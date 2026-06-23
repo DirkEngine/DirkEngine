@@ -3,6 +3,8 @@
 //!
 //! [`World`]: crate::World
 
+mod new;
+
 use std::any::TypeId;
 
 use crate::{Entity, Universe, WorldId, components::Component};
