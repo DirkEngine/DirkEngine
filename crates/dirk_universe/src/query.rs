@@ -3,8 +3,8 @@
 //!
 //! [`World`]: crate::World
 
-mod filter;
-mod new;
+pub mod experimental;
+pub mod filter;
 
 use std::any::TypeId;
 
