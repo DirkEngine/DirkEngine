@@ -1,0 +1,628 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+use dirk_rhi::{
+    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, BufferDesc,
+    GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageUsages, ImageViewDesc, ImageViewType,
+    MemoryDomain, PipelineLayoutDesc, Result, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage,
+    ShaderStages,
+};
+use metal::{
+    CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLResourceOptions,
+    MTLSamplerMipFilter, MTLStorageMode, MTLTextureType, MTLTextureUsage, RenderPipelineDescriptor,
+    RenderPipelineState, SamplerDescriptor, SamplerState, SharedEvent, Texture, TextureDescriptor,
+    VertexDescriptor,
+};
+
+use crate::{backend::Context, backend_error, convert};
+
+pub(crate) const VERTEX_BUFFER_BASE: u64 = 16;
+
+/// Metal buffer and its RHI allocation metadata.
+#[derive(Clone)]
+pub struct MetalBuffer {
+    pub(crate) context: Arc<Context>,
+    pub(crate) raw: metal::Buffer,
+    pub(crate) size: u64,
+    pub(crate) memory: MemoryDomain,
+}
+
+impl MetalBuffer {
+    pub(crate) fn create(context: &Arc<Context>, desc: &BufferDesc<'_>) -> Result<Self> {
+        if desc.size == 0 {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "buffer size must be non-zero",
+            ));
+        }
+        let options = match desc.memory {
+            MemoryDomain::Device => MTLResourceOptions::StorageModePrivate,
+            MemoryDomain::Upload | MemoryDomain::Readback => MTLResourceOptions::StorageModeShared,
+        } | MTLResourceOptions::HazardTrackingModeTracked;
+        let raw = context.device.new_buffer(desc.size, options);
+        raw.set_label(desc.label);
+        Ok(Self {
+            context: context.clone(),
+            raw,
+            size: desc.size,
+            memory: desc.memory,
+        })
+    }
+}
+
+/// Metal texture.
+#[derive(Clone)]
+pub struct MetalImage {
+    pub(crate) context: Arc<Context>,
+    pub(crate) raw: Texture,
+    pub(crate) format: dirk_rhi::Format,
+    pub(crate) mip_levels: u32,
+    pub(crate) array_layers: u32,
+}
+
+impl MetalImage {
+    pub(crate) fn create(context: &Arc<Context>, desc: &ImageDesc<'_>) -> Result<Self> {
+        if desc.extent.width == 0
+            || desc.extent.height == 0
+            || desc.extent.depth == 0
+            || desc.mip_levels == 0
+            || desc.array_layers == 0
+        {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "image dimensions, levels, and layers must be non-zero",
+            ));
+        }
+        if desc.format == dirk_rhi::Format::Rgb32Float {
+            return Err(dirk_rhi::Error::Unsupported(
+                "Metal textures do not support three-channel 32-bit float formats",
+            ));
+        }
+        if desc.array_layers > 1 && desc.samples != dirk_rhi::SampleCount::One {
+            return Err(dirk_rhi::Error::Unsupported(
+                "multisampled Metal texture arrays are not supported",
+            ));
+        }
+        if desc.usage.contains(ImageUsages::TRANSIENT_ATTACHMENT)
+            && (!desc.usage.contains(ImageUsages::COLOR_ATTACHMENT)
+                && !desc.usage.contains(ImageUsages::DEPTH_STENCIL_ATTACHMENT)
+                || desc.usage.contains(ImageUsages::COPY_SRC)
+                || desc.usage.contains(ImageUsages::COPY_DST)
+                || desc.usage.contains(ImageUsages::SAMPLED)
+                || desc.usage.contains(ImageUsages::STORAGE))
+        {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "memoryless Metal textures may only be used as attachments",
+            ));
+        }
+        let texture_type = if desc.extent.depth > 1 {
+            MTLTextureType::D3
+        } else if desc.array_layers > 1 {
+            MTLTextureType::D2Array
+        } else if desc.samples != dirk_rhi::SampleCount::One {
+            MTLTextureType::D2Multisample
+        } else {
+            MTLTextureType::D2
+        };
+        let descriptor = TextureDescriptor::new();
+        descriptor.set_texture_type(texture_type);
+        descriptor.set_pixel_format(convert::format(desc.format));
+        descriptor.set_width(u64::from(desc.extent.width));
+        descriptor.set_height(u64::from(desc.extent.height));
+        descriptor.set_depth(u64::from(desc.extent.depth));
+        descriptor.set_mipmap_level_count(u64::from(desc.mip_levels));
+        descriptor.set_array_length(u64::from(desc.array_layers));
+        descriptor.set_sample_count(convert::samples(desc.samples));
+        descriptor.set_storage_mode(if desc.usage.contains(ImageUsages::TRANSIENT_ATTACHMENT) {
+            MTLStorageMode::Memoryless
+        } else {
+            MTLStorageMode::Private
+        });
+        let mut usage = MTLTextureUsage::Unknown;
+        if desc.usage.contains(ImageUsages::SAMPLED) {
+            usage |= MTLTextureUsage::ShaderRead;
+        }
+        if desc.usage.contains(ImageUsages::STORAGE) {
+            usage |= MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite;
+        }
+        if desc.usage.contains(ImageUsages::COLOR_ATTACHMENT)
+            || desc.usage.contains(ImageUsages::DEPTH_STENCIL_ATTACHMENT)
+        {
+            usage |= MTLTextureUsage::RenderTarget;
+        }
+        descriptor.set_usage(usage);
+        let raw = context.device.new_texture(&descriptor);
+        raw.set_label(desc.label);
+        Ok(Self {
+            context: context.clone(),
+            raw,
+            format: desc.format,
+            mip_levels: desc.mip_levels,
+            array_layers: desc.array_layers,
+        })
+    }
+
+    pub(crate) fn surface(context: &Arc<Context>, raw: Texture, format: dirk_rhi::Format) -> Self {
+        Self {
+            context: context.clone(),
+            raw,
+            format,
+            mip_levels: 1,
+            array_layers: 1,
+        }
+    }
+}
+
+/// Metal texture view.
+#[derive(Clone)]
+pub struct MetalImageView {
+    pub(crate) context: Arc<Context>,
+    pub(crate) raw: Texture,
+    pub(crate) aspects: ImageAspects,
+}
+
+impl MetalImageView {
+    pub(crate) fn create(
+        context: &Arc<Context>,
+        desc: &ImageViewDesc<'_, crate::MetalBackend>,
+    ) -> Result<Self> {
+        if !Arc::ptr_eq(context, &desc.image.context) {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "image belongs to a different RHI instance",
+            ));
+        }
+        if desc
+            .base_mip_level
+            .checked_add(desc.mip_level_count)
+            .is_none_or(|end| end > desc.image.mip_levels)
+            || desc
+                .base_array_layer
+                .checked_add(desc.array_layer_count)
+                .is_none_or(|end| end > desc.image.array_layers)
+        {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "image view range exceeds the image",
+            ));
+        }
+        let texture_type = match desc.view_type {
+            ImageViewType::TwoD if desc.array_layer_count == 1 => MTLTextureType::D2,
+            ImageViewType::TwoD => {
+                return Err(dirk_rhi::Error::InvalidResource(
+                    "a two-dimensional Metal view must select one array layer",
+                ));
+            }
+            ImageViewType::TwoDArray => MTLTextureType::D2Array,
+            ImageViewType::Cube if desc.array_layer_count == 6 => MTLTextureType::Cube,
+            ImageViewType::Cube
+                if desc.array_layer_count.is_multiple_of(6)
+                    && desc.base_array_layer.is_multiple_of(6) =>
+            {
+                MTLTextureType::CubeArray
+            }
+            ImageViewType::Cube => {
+                return Err(dirk_rhi::Error::InvalidResource(
+                    "a Metal cube view must select aligned groups of six layers",
+                ));
+            }
+        };
+        let raw = desc.image.raw.new_texture_view_from_slice(
+            convert::format(desc.image.format),
+            texture_type,
+            metal::NSRange::new(
+                u64::from(desc.base_mip_level),
+                u64::from(desc.mip_level_count),
+            ),
+            metal::NSRange::new(
+                u64::from(desc.base_array_layer),
+                u64::from(desc.array_layer_count),
+            ),
+        );
+        raw.set_label(desc.label);
+        Ok(Self {
+            context: context.clone(),
+            raw,
+            aspects: desc.aspects,
+        })
+    }
+
+    pub(crate) fn surface(context: &Arc<Context>, raw: Texture) -> Self {
+        Self {
+            context: context.clone(),
+            raw,
+            aspects: ImageAspects::COLOR,
+        }
+    }
+}
+
+/// Metal sampler state.
+#[derive(Clone)]
+pub struct MetalSampler {
+    pub(crate) context: Arc<Context>,
+    pub(crate) raw: SamplerState,
+}
+
+impl MetalSampler {
+    pub(crate) fn create(context: &Arc<Context>, desc: &SamplerDesc<'_>) -> Self {
+        let descriptor = SamplerDescriptor::new();
+        descriptor.set_label(desc.label);
+        descriptor.set_min_filter(convert::min_mag_filter(desc.min_filter));
+        descriptor.set_mag_filter(convert::min_mag_filter(desc.mag_filter));
+        descriptor.set_mip_filter(if desc.lod_max <= desc.lod_min {
+            MTLSamplerMipFilter::NotMipmapped
+        } else {
+            convert::mip_filter(desc.mip_filter)
+        });
+        descriptor.set_address_mode_s(convert::address_mode(desc.address_u));
+        descriptor.set_address_mode_t(convert::address_mode(desc.address_v));
+        descriptor.set_address_mode_r(convert::address_mode(desc.address_w));
+        descriptor.set_max_anisotropy(u64::from(desc.max_anisotropy.clamp(1, 16)));
+        descriptor.set_lod_min_clamp(desc.lod_min);
+        descriptor.set_lod_max_clamp(desc.lod_max);
+        Self {
+            context: context.clone(),
+            raw: context.device.new_sampler(&descriptor),
+        }
+    }
+}
+
+/// Compiled MSL shader function.
+#[derive(Clone)]
+pub struct MetalShader {
+    pub(crate) context: Arc<Context>,
+    pub(crate) function: Function,
+    pub(crate) stage: ShaderStage,
+}
+
+impl MetalShader {
+    pub(crate) fn create(context: &Arc<Context>, desc: &ShaderDesc<'_>) -> Result<Self> {
+        let ShaderSource::Msl(source) = desc.source else {
+            return Err(dirk_rhi::Error::Unsupported(
+                "Metal shaders currently require MSL source",
+            ));
+        };
+        let library = context
+            .device
+            .new_library_with_source(source, &CompileOptions::new())
+            .map_err(backend_error)?;
+        library.set_label(desc.label);
+        let function = library
+            .get_function(desc.entry, None)
+            .map_err(backend_error)?;
+        Ok(Self {
+            context: context.clone(),
+            function,
+            stage: desc.stage,
+        })
+    }
+}
+
+/// Metal bind-group layout metadata.
+#[derive(Clone)]
+pub struct MetalBindGroupLayout {
+    pub(crate) context: Arc<Context>,
+    pub(crate) entries: Arc<[dirk_rhi::BindGroupLayoutEntry]>,
+}
+
+impl MetalBindGroupLayout {
+    pub(crate) fn create(context: &Arc<Context>, desc: &BindGroupLayoutDesc<'_>) -> Result<Self> {
+        let mut entries = desc.entries.to_vec();
+        entries.sort_unstable_by_key(|entry| entry.binding);
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].binding == pair[1].binding)
+        {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "bind-group bindings must be unique",
+            ));
+        }
+        Ok(Self {
+            context: context.clone(),
+            entries: entries.into(),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum OwnedBinding {
+    Buffer {
+        buffer: MetalBuffer,
+        offset: u64,
+    },
+    SampledImage {
+        view: MetalImageView,
+        sampler: MetalSampler,
+    },
+    StorageImage(MetalImageView),
+}
+
+/// Metal resources associated with one bind group.
+#[derive(Clone)]
+pub struct MetalBindGroup {
+    pub(crate) layout: MetalBindGroupLayout,
+    pub(crate) entries: Arc<[(u32, OwnedBinding)]>,
+}
+
+impl MetalBindGroup {
+    pub(crate) fn create(
+        context: &Arc<Context>,
+        desc: &BindGroupDesc<'_, crate::MetalBackend>,
+    ) -> Result<Self> {
+        require_context(context, &desc.layout.context)?;
+        let mut entries = Vec::with_capacity(desc.entries.len());
+        for entry in desc.entries {
+            let layout_entry = desc
+                .layout
+                .entries
+                .iter()
+                .find(|layout| layout.binding == entry.binding)
+                .ok_or(dirk_rhi::Error::InvalidResource(
+                    "bind-group entry is absent from its layout",
+                ))?;
+            let resource = match (&entry.resource, layout_entry.ty) {
+                (
+                    BindingResource::Buffer {
+                        buffer,
+                        offset,
+                        size,
+                    },
+                    BindingType::UniformBuffer | BindingType::StorageBuffer,
+                ) => {
+                    require_context(context, &buffer.context)?;
+                    if offset
+                        .checked_add(*size)
+                        .is_none_or(|end| end > buffer.size)
+                    {
+                        return Err(dirk_rhi::Error::InvalidResource(
+                            "bind-group buffer range exceeds the buffer",
+                        ));
+                    }
+                    OwnedBinding::Buffer {
+                        buffer: (*buffer).clone(),
+                        offset: *offset,
+                    }
+                }
+                (BindingResource::SampledImage { view, sampler }, BindingType::SampledImage) => {
+                    require_context(context, &view.context)?;
+                    require_context(context, &sampler.context)?;
+                    OwnedBinding::SampledImage {
+                        view: (*view).clone(),
+                        sampler: (*sampler).clone(),
+                    }
+                }
+                (BindingResource::StorageImage(view), BindingType::StorageImage) => {
+                    require_context(context, &view.context)?;
+                    OwnedBinding::StorageImage((*view).clone())
+                }
+                _ => {
+                    return Err(dirk_rhi::Error::InvalidResource(
+                        "bind-group resource type does not match its layout",
+                    ));
+                }
+            };
+            entries.push((entry.binding, resource));
+        }
+        if entries.len() != desc.layout.entries.len() {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "bind group must populate every layout entry",
+            ));
+        }
+        entries.sort_unstable_by_key(|entry| entry.0);
+        Ok(Self {
+            layout: desc.layout.clone(),
+            entries: entries.into(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GroupOffsets {
+    pub buffers: u64,
+    pub textures: u64,
+    pub samplers: u64,
+}
+
+/// Metal pipeline binding layout.
+#[derive(Clone)]
+pub struct MetalPipelineLayout {
+    pub(crate) context: Arc<Context>,
+    pub(crate) layouts: Arc<[MetalBindGroupLayout]>,
+    pub(crate) offsets: Arc<[GroupOffsets]>,
+}
+
+impl MetalPipelineLayout {
+    pub(crate) fn create(
+        context: &Arc<Context>,
+        desc: &PipelineLayoutDesc<'_, crate::MetalBackend>,
+    ) -> Result<Self> {
+        let mut offsets = Vec::with_capacity(desc.bind_group_layouts.len());
+        let mut next = GroupOffsets::default();
+        let mut layouts = Vec::with_capacity(desc.bind_group_layouts.len());
+        for layout in desc.bind_group_layouts {
+            require_context(context, &layout.context)?;
+            offsets.push(next);
+            for entry in layout.entries.iter() {
+                let end = u64::from(entry.binding) + 1;
+                match entry.ty {
+                    BindingType::UniformBuffer | BindingType::StorageBuffer => {
+                        next.buffers = next
+                            .buffers
+                            .max(offsets.last().map_or(0, |base| base.buffers) + end);
+                    }
+                    BindingType::SampledImage => {
+                        let base = *offsets.last().unwrap_or(&GroupOffsets::default());
+                        next.textures = next.textures.max(base.textures + end);
+                        next.samplers = next.samplers.max(base.samplers + end);
+                    }
+                    BindingType::StorageImage => {
+                        next.textures = next
+                            .textures
+                            .max(offsets.last().map_or(0, |base| base.textures) + end);
+                    }
+                }
+            }
+            layouts.push((*layout).clone());
+        }
+        if next.buffers > VERTEX_BUFFER_BASE {
+            return Err(dirk_rhi::Error::Unsupported(
+                "Metal pipeline layouts support at most 16 shader buffer slots",
+            ));
+        }
+        Ok(Self {
+            context: context.clone(),
+            layouts: layouts.into(),
+            offsets: offsets.into(),
+        })
+    }
+}
+
+/// Metal render pipeline state.
+#[derive(Clone)]
+pub struct MetalGraphicsPipeline {
+    pub(crate) context: Arc<Context>,
+    pub(crate) raw: RenderPipelineState,
+    pub(crate) depth: Option<DepthStencilState>,
+    pub(crate) topology: metal::MTLPrimitiveType,
+    pub(crate) winding: metal::MTLWinding,
+    pub(crate) cull: metal::MTLCullMode,
+}
+
+impl MetalGraphicsPipeline {
+    pub(crate) fn create(
+        context: &Arc<Context>,
+        desc: &GraphicsPipelineDesc<'_, crate::MetalBackend>,
+    ) -> Result<Self> {
+        for object in [
+            &desc.layout.context,
+            &desc.vertex.context,
+            &desc.fragment.context,
+        ] {
+            require_context(context, object)?;
+        }
+        if desc.vertex.stage != ShaderStage::Vertex || desc.fragment.stage != ShaderStage::Fragment
+        {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "graphics pipeline shader stage mismatch",
+            ));
+        }
+        let vertex_descriptor = VertexDescriptor::new();
+        for (buffer_index, layout) in desc.vertex_buffers.iter().enumerate() {
+            let metal_index = VERTEX_BUFFER_BASE
+                + u64::try_from(buffer_index)
+                    .map_err(|_| dirk_rhi::Error::InvalidResource("too many vertex buffers"))?;
+            let metal_layout = vertex_descriptor
+                .layouts()
+                .object_at(metal_index)
+                .ok_or(dirk_rhi::Error::InvalidResource("too many vertex buffers"))?;
+            metal_layout.set_stride(u64::from(layout.stride));
+            metal_layout.set_step_function(convert::vertex_step(layout.step_mode));
+            metal_layout.set_step_rate(1);
+            for attribute in layout.attributes {
+                let format = convert::vertex_format(attribute.format)
+                    .ok_or(dirk_rhi::Error::Unsupported("Metal vertex format"))?;
+                let metal_attribute = vertex_descriptor
+                    .attributes()
+                    .object_at(u64::from(attribute.location))
+                    .ok_or(dirk_rhi::Error::InvalidResource(
+                        "vertex attribute location is too large",
+                    ))?;
+                metal_attribute.set_format(format);
+                metal_attribute.set_offset(u64::from(attribute.offset));
+                metal_attribute.set_buffer_index(metal_index);
+            }
+        }
+        let descriptor = RenderPipelineDescriptor::new();
+        descriptor.set_label(desc.label);
+        descriptor.set_vertex_function(Some(&desc.vertex.function));
+        descriptor.set_fragment_function(Some(&desc.fragment.function));
+        descriptor.set_vertex_descriptor(Some(vertex_descriptor));
+        descriptor.set_sample_count(convert::samples(desc.samples));
+        for (index, format) in desc.color_formats.iter().enumerate() {
+            descriptor
+                .color_attachments()
+                .object_at(
+                    u64::try_from(index).map_err(|_| {
+                        dirk_rhi::Error::InvalidResource("too many color attachments")
+                    })?,
+                )
+                .ok_or(dirk_rhi::Error::InvalidResource(
+                    "too many color attachments",
+                ))?
+                .set_pixel_format(convert::format(*format));
+        }
+        let depth = desc.depth.map(|depth| {
+            descriptor.set_depth_attachment_pixel_format(convert::format(depth.format));
+            if matches!(
+                depth.format,
+                dirk_rhi::Format::Depth24UnormStencil8 | dirk_rhi::Format::Depth32FloatStencil8
+            ) {
+                descriptor.set_stencil_attachment_pixel_format(convert::format(depth.format));
+            }
+            let state = DepthStencilDescriptor::new();
+            state.set_depth_compare_function(convert::compare(depth.compare));
+            state.set_depth_write_enabled(depth.write_enabled);
+            context.device.new_depth_stencil_state(&state)
+        });
+        let raw = context
+            .device
+            .new_render_pipeline_state(&descriptor)
+            .map_err(backend_error)?;
+        Ok(Self {
+            context: context.clone(),
+            raw,
+            depth,
+            topology: convert::topology(desc.raster.topology),
+            winding: convert::winding(desc.raster.front_face),
+            cull: convert::cull(desc.raster.cull_mode),
+        })
+    }
+}
+
+/// CPU-waitable Metal submission fence.
+pub struct MetalFence {
+    pub(crate) context: Arc<Context>,
+    pub(crate) event: SharedEvent,
+    pub(crate) target: AtomicU64,
+}
+
+impl MetalFence {
+    pub(crate) fn create(context: &Arc<Context>, signaled: bool) -> Self {
+        let event = context.device.new_shared_event();
+        if signaled {
+            event.set_signaled_value(1);
+        }
+        Self {
+            context: context.clone(),
+            event,
+            target: AtomicU64::new(1),
+        }
+    }
+
+    pub(crate) fn value(&self) -> u64 {
+        self.target.load(Ordering::Acquire)
+    }
+}
+
+/// Metal shared event used as an RHI timeline semaphore.
+#[derive(Clone)]
+pub struct MetalTimelineSemaphore {
+    pub(crate) context: Arc<Context>,
+    pub(crate) event: SharedEvent,
+}
+
+pub(crate) fn require_context(expected: &Arc<Context>, actual: &Arc<Context>) -> Result<()> {
+    if Arc::ptr_eq(expected, actual) {
+        Ok(())
+    } else {
+        Err(dirk_rhi::Error::InvalidResource(
+            "resource belongs to a different RHI instance",
+        ))
+    }
+}
+
+pub(crate) fn binding_visibility(layout: &MetalBindGroupLayout, binding: u32) -> ShaderStages {
+    layout
+        .entries
+        .iter()
+        .find(|entry| entry.binding == binding)
+        .map_or(ShaderStages::NONE, |entry| entry.visibility)
+}

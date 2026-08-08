@@ -5,7 +5,9 @@ A Vulkan Game Engine in Rust
 On macOS, the Vulkan renderer uses `MoltenVK` through the Vulkan loader. The
 engine does not install or bundle a Vulkan SDK or `MoltenVK`; provide the
 Vulkan loader and configure it to discover the `MoltenVK` ICD at runtime. Native
-Metal rendering remains a future backend.
+Metal support is available through `dirk_rhi_metal`; the engine renderer remains
+on the Vulkan backend while its typed pipeline and egui compatibility seams are
+migrated.
 
 Debug builds also enable `VK_LAYER_KHRONOS_validation`; make its Vulkan layer
 manifest discoverable with `VK_ADD_LAYER_PATH` (or a standard Vulkan layer

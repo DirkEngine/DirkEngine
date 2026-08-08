@@ -105,6 +105,7 @@ dirk_platform = { version = "0.1.0", path = "crates/dirk_platform" }
 dirk_input    = { version = "0.1.0", path = "crates/dirk_input" }
 dirk_rhi      = { version = "0.1.0", path = "crates/dirk_rhi" }
 dirk_rhi_vulkan = { version = "0.1.0", path = "crates/dirk_rhi_vulkan" }
+dirk_rhi_metal = { version = "0.1.0", path = "crates/dirk_rhi_metal" }
 dirk_renderer = { version = "0.1.0", path = "crates/dirk_renderer" }
 dirk_assets   = { version = "0.1.0", path = "crates/dirk_assets" }
 dirk_world    = { version = "0.1.0", path = "crates/dirk_world" }
