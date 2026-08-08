@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    ffi::{CStr, CString},
+    ffi::CString,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -10,9 +10,10 @@ use std::{
 };
 
 use anyhow::Context;
-#[cfg(validation)]
-use ash::ext::debug_utils;
-use ash::{Entry, khr::swapchain, vk};
+use ash::vk;
+#[cfg(not(feature = "editor"))]
+use dirk_rhi::{CommandBuffer as _, Extent3d, ImageAspects, ImageCopy};
+use dirk_rhi::{ImageUsages, SampleCount};
 
 #[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
@@ -25,13 +26,13 @@ use dirk_player::PlayerPresentationAssignments;
 
 use dirk_universe::{Entity, Universe, UniverseBuilder, WorldId};
 use dirk_utils::Version;
-use raw_window_handle::HasDisplayHandle;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::{debug, info};
 
 use dirk_platform::PlatformWindows;
 
 mod utils;
-use utils::{Frame, RendererProperties, make_version};
+use utils::{Frame, RendererProperties};
 
 mod errors;
 #[cfg(feature = "editor")]
@@ -50,7 +51,6 @@ mod resources;
 use resources::{
     command_pool::CommandBuffer,
     device::{FrameCounters, RenderDevice},
-    queues::QueueType,
     swapchain::RenderImage,
 };
 
@@ -67,7 +67,6 @@ use render_commands::RenderCommandReceiver;
 
 mod init;
 mod models;
-mod physical_device;
 mod pipeline;
 mod shaders;
 
@@ -127,20 +126,7 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
     }
 }
 
-#[cfg(validation)]
-mod debug;
-
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
-const DEVICE_EXTENSIONS: &[&str] = &[
-    unsafe { std::str::from_utf8_unchecked(swapchain::NAME.to_bytes()) },
-    #[cfg(platform_macos)]
-    unsafe {
-        std::str::from_utf8_unchecked(ash::khr::portability_subset::NAME.to_bytes())
-    },
-];
-#[cfg(validation)]
-const VALIDATION_LAYERS: &[*const i8] = &[c"VK_LAYER_KHRONOS_validation".as_ptr()];
-
 /// The information needed to create the renderer. This is primarily metadata
 /// used for Vulkan initialisation.
 pub struct RendererCreateInfo {
@@ -279,71 +265,60 @@ impl Renderer {
         #[cfg(feature = "editor")] player_input_sender: PlayerInputSender,
         #[cfg(feature = "editor")] editor: dirk_engine::editor::EditorServices,
     ) -> Result<Self> {
-        info!("Intializing Vulkan...");
+        info!("initializing renderer RHI with Vulkan");
 
-        let entry = unsafe { Entry::load()? };
+        let surface_info = dirk_rhi::SurfaceCreateInfo {
+            display: window.display_handle()?.as_raw(),
+            window: window.window_handle()?.as_raw(),
+        };
+        let version = |version: Version| (version.major(), version.minor(), version.patch());
+        let rhi = dirk_rhi::Rhi::<dirk_rhi_vulkan::VulkanBackend>::new(&dirk_rhi::RhiCreateInfo {
+            engine_name: create_info.engine_name.to_string_lossy().as_ref(),
+            engine_version: version(create_info.engine_version),
+            application_name: create_info.app_name.to_string_lossy().as_ref(),
+            application_version: version(create_info.app_version),
+            validation: cfg!(validation),
+            compatible_surface: Some(surface_info),
+        })?;
 
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(create_info.app_name.as_c_str())
-            .application_version(make_version(create_info.app_version))
-            .engine_name(create_info.engine_name.as_c_str())
-            .engine_version(make_version(create_info.engine_version))
-            .api_version(vk::API_VERSION_1_3);
-
-        let mut extensions = Self::required_instance_extensions(window)?;
-        let mut instance_create_info =
-            vk::InstanceCreateInfo::default().application_info(&app_info);
-
-        #[cfg(platform_macos)]
-        {
-            instance_create_info =
-                instance_create_info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
-        }
-
-        #[cfg(validation)]
-        let mut debug_create_info = debug::debug_create_info();
-
-        #[cfg(validation)]
-        {
-            info!(target: "vulkan::validation", "using validation layers");
-            extensions.push(debug_utils::NAME.as_ptr());
-            debug::validate_instance_layers(&entry, VALIDATION_LAYERS)?;
-
-            instance_create_info = instance_create_info
-                .enabled_layer_names(VALIDATION_LAYERS)
-                .push_next(&mut debug_create_info);
-        }
-
-        Self::validate_instance_extensions(&entry, &extensions)?;
-        instance_create_info = instance_create_info.enabled_extension_names(&extensions);
-
-        let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
-
-        #[cfg(validation)]
-        let debug_messenger = debug::create_debug_messenger(&entry, &instance, &debug_create_info)?;
-
-        let (physical_device, properties) =
-            Self::select_physical_device(&entry, &instance, window)?;
-        let device = Self::create_device(&instance, physical_device, &properties)?;
+        let backend = rhi.backend();
+        let (surface_loader, surface) =
+            Self::create_surface(backend.entry(), backend.instance(), window)?;
+        let surface_format =
+            Self::surface_format(&surface_loader, backend.physical_device(), surface)?;
+        unsafe { surface_loader.destroy_surface(surface, None) };
+        let capabilities = rhi.capabilities();
+        let properties = RendererProperties {
+            msaa_samples: match capabilities.max_samples {
+                dirk_rhi::SampleCount::One => vk::SampleCountFlags::TYPE_1,
+                dirk_rhi::SampleCount::Two => vk::SampleCountFlags::TYPE_2,
+                dirk_rhi::SampleCount::Four => vk::SampleCountFlags::TYPE_4,
+                dirk_rhi::SampleCount::Eight => vk::SampleCountFlags::TYPE_8,
+            },
+            anisotropy: capabilities.max_sampler_anisotropy > 1,
+            surface_format,
+            depth_format: match capabilities.depth_format {
+                dirk_rhi::Format::Depth16Unorm => vk::Format::D16_UNORM,
+                dirk_rhi::Format::Depth24UnormStencil8 => vk::Format::D24_UNORM_S8_UINT,
+                dirk_rhi::Format::Depth32Float => vk::Format::D32_SFLOAT,
+                dirk_rhi::Format::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+                _ => return Err(Error::NoSupportedFormat),
+            },
+        };
 
         let current_frame = Arc::new(AtomicUsize::new(0));
         let frame_count = Arc::new(AtomicUsize::new(0));
 
         let render_device = RenderDevice::new(
-            entry.clone(),
-            instance.clone(),
-            device.clone(),
-            physical_device,
+            rhi,
             properties,
             FrameCounters {
                 current_frame: current_frame.clone(),
                 frame_count: frame_count.clone(),
             },
-            #[cfg(validation)]
-            debug_messenger,
         )?;
 
-        let frames = Self::build_frames(&device, &render_device)?;
+        let frames = Self::build_frames(&render_device)?;
 
         let models = models::ModelRegistry::new(&render_device, event_manager)?;
         let scene_manager = SceneManager::init(&render_device)?;
@@ -605,6 +580,7 @@ impl Renderer {
 
         self.frames[frame_index].fence.wait(u64::MAX)?;
         self.frames[frame_index].submitted_command_buffers.clear();
+        self.render_device.rhi.collect_garbage()?;
 
         let viewport_submission = self.record_viewport_graph(frame_index)?;
         let presentation_targets = self.acquire_presentation_targets()?;
@@ -614,7 +590,6 @@ impl Renderer {
             viewport_submission.as_ref(),
         )?;
 
-        self.frames[frame_index].fence.reset()?;
         self.submit_frame(
             frame_index,
             viewport_submission.as_ref(),
@@ -673,11 +648,9 @@ impl Renderer {
             let output = graph.import_texture(TextureDesc {
                 width: viewport.settings().extent.width,
                 height: viewport.settings().extent.height,
-                format: viewport.settings().format,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-                samples: vk::SampleCountFlags::TYPE_1,
+                format: resources::image::rhi_format(viewport.settings().format)?,
+                usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
+                samples: SampleCount::One,
                 imported: Some(viewport.import()),
             });
             self.scene_manager.render(
@@ -687,23 +660,23 @@ impl Renderer {
                 camera,
                 SceneRenderSettings {
                     extent: viewport.settings().extent,
-                    format: viewport.settings().format,
+                    format: resources::image::rhi_format(viewport.settings().format)?,
                     clear_color: viewport.settings().clear_color,
                     fov_y_radians: viewport.settings().fov_y_radians,
                     near: viewport.settings().near,
                     far: viewport.settings().far,
                 },
                 output,
-            );
+            )?;
         }
 
         if rendered_players.is_empty() {
             return Ok(None);
         }
 
-        let cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
+        let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
         cmd.begin_command_buffer(&vk::CommandBufferBeginInfo::default())?;
-        graph.run(&self.render_device, &cmd)?;
+        graph.run(&self.render_device, &mut cmd)?;
         cmd.end_command_buffer()?;
 
         Ok(Some(ViewportRenderSubmission {
@@ -748,17 +721,16 @@ impl Renderer {
         let mut egui_target = None;
         for target in targets {
             #[cfg(feature = "editor")]
-            let swapchain_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+            let swapchain_usage = ImageUsages::COLOR_ATTACHMENT;
             #[cfg(not(feature = "editor"))]
-            let swapchain_usage =
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST;
+            let swapchain_usage = ImageUsages::COLOR_ATTACHMENT | ImageUsages::COPY_DST;
 
             let swapchain = graph.import_texture(TextureDesc {
                 width: target.extent.width,
                 height: target.extent.height,
-                format: self.render_device.properties.surface_format.format,
+                format: target.image.format(),
                 usage: swapchain_usage,
-                samples: vk::SampleCountFlags::TYPE_1,
+                samples: SampleCount::One,
                 imported: Some(target.image.import()),
             });
 
@@ -783,11 +755,11 @@ impl Renderer {
                     let viewport_source = graph.import_texture(TextureDesc {
                         width: viewport_extent.width,
                         height: viewport_extent.height,
-                        format: viewport.settings().format,
-                        usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
-                            | vk::ImageUsageFlags::SAMPLED
-                            | vk::ImageUsageFlags::TRANSFER_SRC,
-                        samples: vk::SampleCountFlags::TYPE_1,
+                        format: resources::image::rhi_format(viewport.settings().format)?,
+                        usage: ImageUsages::COLOR_ATTACHMENT
+                            | ImageUsages::SAMPLED
+                            | ImageUsages::COPY_SRC,
+                        samples: SampleCount::One,
                         imported: Some(if rendered_this_frame {
                             viewport.import_after_render()
                         } else {
@@ -800,31 +772,20 @@ impl Renderer {
                         .read_transfer_src(viewport_source)
                         .write_transfer_dst(swapchain);
                     copy_pass.execute(Box::new(move |_, cmd, images| {
-                        let region = vk::ImageCopy::default()
-                            .src_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            })
-                            .dst_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            })
-                            .extent(vk::Extent3D {
-                                width: target_extent.width,
-                                height: target_extent.height,
-                                depth: 1,
-                            });
-
-                        cmd.copy_image(
-                            images[viewport_source.index()].image,
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            images[swapchain.index()].image,
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            &[region],
+                        cmd.rhi_mut().copy_image(
+                            &images[viewport_source.index()].image,
+                            &images[swapchain.index()].image,
+                            &[ImageCopy {
+                                src_mip_level: 0,
+                                src_base_array_layer: 0,
+                                dst_mip_level: 0,
+                                dst_base_array_layer: 0,
+                                array_layer_count: 1,
+                                src_origin: dirk_rhi::Origin3d::default(),
+                                dst_origin: dirk_rhi::Origin3d::default(),
+                                extent: Extent3d::new_2d(target_extent.width, target_extent.height),
+                                aspects: ImageAspects::COLOR,
+                            }],
                         );
                         Ok(())
                     }));
@@ -842,9 +803,9 @@ impl Renderer {
             }));
         }
 
-        let cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
+        let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
         cmd.begin_command_buffer(&vk::CommandBufferBeginInfo::default())?;
-        graph.run(&self.render_device, &cmd)?;
+        graph.run(&self.render_device, &mut cmd)?;
         cmd.end_command_buffer()?;
 
         Ok(Some(cmd))
@@ -894,11 +855,6 @@ impl Renderer {
         presentation_cmd: Option<&resources::command_pool::CommandBuffer>,
         presentation_targets: &[PresentationTarget],
     ) -> Result<()> {
-        let mut submits = Vec::new();
-
-        // VIEWPORTS
-
-        // all the viewports that were rendered too this frame
         let rendered_viewports = viewport_submission.map_or_else(Vec::new, |submission| {
             submission
                 .rendered_players
@@ -907,92 +863,34 @@ impl Renderer {
                 .collect::<Vec<_>>()
         });
 
-        // timeline semaphores to signal for viewports
-        let timeline_signal_semaphores = rendered_viewports
+        let signal_timelines = rendered_viewports
             .iter()
-            .map(|viewport| viewport.render_semaphore())
+            .map(|viewport| dirk_rhi::TimelinePoint {
+                semaphore: viewport.render_semaphore(),
+                value: viewport.next_render_value(),
+                stages: dirk_rhi::PipelineStages::ALL,
+            })
             .collect::<Vec<_>>();
-        // values to signal said semaphores too
-        let timeline_signal_values = rendered_viewports
-            .iter()
-            .map(|viewport| viewport.next_render_value())
+        let command_buffers = viewport_submission
+            .map(|submission| submission.command_buffer.rhi())
+            .into_iter()
+            .chain(presentation_cmd.map(resources::command_pool::CommandBuffer::rhi))
             .collect::<Vec<_>>();
-        // submit info for the viewport timeline semaphores
-        let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
-            .signal_semaphore_values(&timeline_signal_values);
-
-        // actually create the submit info for the viewport rendering
-        if let Some(submission) = viewport_submission {
-            let mut submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&submission.command_buffer))
-                .signal_semaphores(&timeline_signal_semaphores);
-            if !timeline_signal_semaphores.is_empty() {
-                submit = submit.push_next(&mut timeline_info);
-            }
-            submits.push(submit);
-        }
-
-        // WINDOWS
-
-        let image_available_semaphores = presentation_targets
+        let surface_frames = presentation_targets
             .iter()
-            .map(|target| target.image.image_available_semaphore)
-            .collect::<Vec<_>>();
-        let render_finished_semaphores = presentation_targets
-            .iter()
-            .map(|target| target.image.render_finished_semaphore)
+            .map(|target| target.image.rhi())
             .collect::<Vec<_>>();
 
-        // wait on image available semaphores & viewport timeline semaphores
-        let mut wait_semaphores = image_available_semaphores.clone();
-        wait_semaphores.extend(timeline_signal_semaphores.iter().copied());
-
-        // wait values: 0 for image vailable, timeline signal values otherwise
-        let mut wait_values = vec![0; image_available_semaphores.len()];
-        wait_values.extend(timeline_signal_values.iter().copied());
-
-        // submit info for the window timeline semaphores
-        let mut presentation_timeline_info =
-            vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
-
-        // all presentation targets wait on COLOR_ATTACHMENT_OUTPUT
-        let mut wait_stages = presentation_targets
-            .iter()
-            .map(|_| vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .collect::<Vec<_>>();
-
-        // all viewports wait on FRAGMENT_SHADER or TRANSFER when not in editor
-        #[cfg(feature = "editor")]
-        let viewport_wait_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
-        #[cfg(not(feature = "editor"))]
-        let viewport_wait_stage = vk::PipelineStageFlags::TRANSFER;
-        wait_stages.extend(
-            timeline_signal_semaphores
-                .iter()
-                .map(|_| viewport_wait_stage),
-        );
-
-        // actually create the submit info for window rendering
-        if let Some(cmd) = presentation_cmd {
-            let mut submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(cmd))
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .signal_semaphores(&render_finished_semaphores);
-            if !timeline_signal_semaphores.is_empty() {
-                submit = submit.push_next(&mut presentation_timeline_info);
-            }
-            submits.push(submit);
-        }
-
-        if submits.is_empty() {
-            submits.push(vk::SubmitInfo::default());
-        }
-
-        self.render_device.queues.submit(
-            QueueType::Graphics,
-            &submits,
-            Some(&self.frames[frame_index].fence),
+        self.frames[frame_index].fence.reset()?;
+        self.render_device.rhi.submit(
+            dirk_rhi::QueueType::Graphics,
+            &dirk_rhi::Submission {
+                command_buffers: &command_buffers,
+                surface_frames: &surface_frames,
+                wait_timelines: &[],
+                signal_timelines: &signal_timelines,
+                fence: self.frames[frame_index].fence.rhi(),
+            },
         )?;
 
         Ok(())
@@ -1027,73 +925,6 @@ impl Renderer {
                 viewport.world = None;
             }
         }
-    }
-    fn create_sampler(device: &RenderDevice, mip_levels: u32) -> Result<vk::Sampler> {
-        let props = unsafe {
-            device
-                .instance
-                .get_physical_device_properties(device.physical_device)
-        };
-        let max_aniso = props.limits.max_sampler_anisotropy;
-
-        // the max_lod cast loses precision, as there are only a
-        // small number of mip_levels, there should be no real
-        // precision loss.
-        #[allow(clippy::cast_precision_loss)]
-        let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .mip_lod_bias(0.0)
-            .anisotropy_enable(true) // TODO: use the detected prpoerty
-            .max_anisotropy(max_aniso) // use hardware maximum
-            .compare_enable(false)
-            .min_lod(0.0)
-            .max_lod(mip_levels as f32)
-            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-            .unnormalized_coordinates(false);
-
-        Ok(unsafe { device.device.create_sampler(&sampler_info, None)? })
-    }
-
-    fn required_instance_extensions(window: &dirk_platform::Window) -> Result<Vec<*const i8>> {
-        let display_handle = window.display_handle()?.as_raw();
-        let extensions = ash_window::enumerate_required_extensions(display_handle)?.to_vec();
-
-        #[cfg(platform_macos)]
-        let extensions = {
-            let mut extensions = extensions;
-            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
-            extensions
-        };
-
-        Ok(extensions)
-    }
-
-    fn validate_instance_extensions(entry: &Entry, extensions: &[*const i8]) -> Result<()> {
-        let available = unsafe {
-            entry
-                .enumerate_instance_extension_properties(None)
-                .unwrap_or_default()
-        };
-
-        for &required in extensions {
-            let required = unsafe { CStr::from_ptr(required) };
-            let found = available
-                .iter()
-                .any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) } == required);
-
-            if !found {
-                return Err(Error::ExtensionNotFound(
-                    required.to_string_lossy().into_owned(),
-                ));
-            }
-        }
-
-        Ok(())
     }
 }
 

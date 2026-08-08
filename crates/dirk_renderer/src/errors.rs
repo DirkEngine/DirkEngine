@@ -14,6 +14,9 @@ pub enum Error {
     /// An error occuring during the allocation of a GPU object
     #[error("Allocation error: {0}")]
     Allocation(#[from] gpu_allocator::AllocationError),
+    /// Error produced by the render hardware interface.
+    #[error("RHI error: {0}")]
+    Rhi(#[from] dirk_rhi::Error),
 
     /// An error loading Vulkan function
     #[error("Error loading Vulkan functions: {0}")]

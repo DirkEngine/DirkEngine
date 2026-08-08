@@ -25,7 +25,7 @@ use crate::{
             DescriptorAllocator, DescriptorSet, DescriptorWriter,
             sets::{MaterialSet, ObjectSet, SceneSet},
         },
-        device::{Garbage, RenderDevice},
+        device::RenderDevice,
         image::Image,
     },
     utils::Vertex,
@@ -80,15 +80,8 @@ impl<T> Deref for Handle<T> {
 }
 
 pub struct Texture {
-    pub device: RenderDevice,
     pub image: Image,
-    pub sampler: vk::Sampler,
-}
-
-impl Drop for Texture {
-    fn drop(&mut self) {
-        self.device.destroy(Garbage::Sampler(self.sampler));
-    }
+    pub sampler: dirk_rhi_vulkan::VulkanSampler,
 }
 
 struct Primitive {
@@ -210,7 +203,7 @@ impl ModelRegistry {
         let set = material_alloc.allocate()?;
 
         DescriptorWriter::new(&device.device)
-            .combined_image_sampler(&set, 0, texture.image.view(), texture.sampler)
+            .combined_image_sampler(&set, 0, texture.image.view(), texture.sampler.raw())
             .flush();
 
         Ok((
@@ -298,12 +291,12 @@ impl ModelRegistry {
                 || {
                     (
                         self.fallback_texture.image.view(),
-                        self.fallback_texture.sampler,
+                        self.fallback_texture.sampler.raw(),
                     )
                 },
                 |tex_handle| {
                     let tex = &self.textures[*tex_handle];
-                    (tex.image.view(), tex.sampler)
+                    (tex.image.view(), tex.sampler.raw())
                 },
             );
             pending.push((base_color, set, view, sampler));

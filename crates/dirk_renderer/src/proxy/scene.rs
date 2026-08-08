@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ash::vk;
+use dirk_rhi::{Format, ImageUsages};
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
 use gpu_allocator::MemoryLocation;
@@ -23,7 +24,7 @@ use crate::{
 
 pub(crate) struct SceneRenderSettings {
     pub extent: vk::Extent2D,
-    pub format: vk::Format,
+    pub format: Format,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,
@@ -70,28 +71,28 @@ impl SceneManager {
         camera: Entity,
         settings: SceneRenderSettings,
         target: TextureHandle,
-    ) {
+    ) -> Result<()> {
         let depth = graph.create_texture(TextureDesc {
             width: settings.extent.width,
             height: settings.extent.height,
-            format: self.device.properties.depth_format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            samples: self.device.properties.msaa_samples,
+            format: crate::resources::image::rhi_format(self.device.properties.depth_format)?,
+            usage: ImageUsages::DEPTH_STENCIL_ATTACHMENT,
+            samples: crate::resources::image::rhi_samples(self.device.properties.msaa_samples)?,
             imported: None,
         });
 
-        let msaa_color = (self.device.properties.msaa_samples != vk::SampleCountFlags::TYPE_1)
-            .then(|| {
-                graph.create_texture(TextureDesc {
-                    width: settings.extent.width,
-                    height: settings.extent.height,
-                    format: settings.format,
-                    usage: vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    samples: self.device.properties.msaa_samples,
-                    imported: None,
-                })
-            });
+        let msaa_color = if self.device.properties.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+            None
+        } else {
+            Some(graph.create_texture(TextureDesc {
+                width: settings.extent.width,
+                height: settings.extent.height,
+                format: settings.format,
+                usage: ImageUsages::TRANSIENT_ATTACHMENT | ImageUsages::COLOR_ATTACHMENT,
+                samples: crate::resources::image::rhi_samples(self.device.properties.msaa_samples)?,
+                imported: None,
+            }))
+        };
 
         let mut pass = graph.add_pass("scene");
         let [r, g, b, a] = settings.clear_color;
@@ -108,11 +109,12 @@ impl SceneManager {
         pass.execute(Box::new(move |_, cmd, _| {
             self.record_scene_draws(models, cmd, world, &settings, camera)
         }));
+        Ok(())
     }
     fn record_scene_draws(
         &self,
         models: &ModelRegistry,
-        cmd: &CommandBuffer,
+        cmd: &mut CommandBuffer,
         world: WorldId,
         settings: &SceneRenderSettings,
         camera: Entity,
@@ -152,11 +154,11 @@ impl SceneManager {
             };
 
             let scene_ubo = SceneUbo { view, proj };
-            unsafe { scene.ubo[frame].write(&scene_ubo) };
+            scene.ubo[frame].write(&scene_ubo)?;
         };
 
         for proxy in &proxies {
-            proxy.write_ubo(frame);
+            proxy.write_ubo(frame)?;
         }
 
         let ctx = self.graphics_pipeline.bind(cmd);
@@ -349,25 +351,26 @@ impl SceneProxy {
     pub fn set_model(&mut self, model: Option<dirk_assets::AssetHandle>) {
         self.model = model;
     }
-    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) {
+    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) -> Result<()> {
         self.model_matrix = mat;
 
         if let Some(mat) = mat {
             let proxy_ubo = ProxyUbo { model: mat };
             for ubo in &self.ubo {
-                unsafe { ubo.write(&proxy_ubo) };
+                ubo.write(&proxy_ubo)?;
             }
         }
+        Ok(())
     }
     pub fn set_view(&mut self, view: Option<glam::Mat4>) {
         self.view = view;
     }
-    pub fn write_ubo(&self, frame: usize) {
+    pub fn write_ubo(&self, frame: usize) -> Result<()> {
         let Some(model) = self.model_matrix else {
-            return;
+            return Ok(());
         };
 
         let data = ProxyUbo { model };
-        unsafe { self.ubo[frame].write(&data) };
+        self.ubo[frame].write(&data)
     }
 }

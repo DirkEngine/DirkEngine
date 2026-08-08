@@ -1,7 +1,10 @@
 # renderer
 
-The renderer owns Vulkan rendering for the engine. GPU operations are handled
-through `ash`.
+The renderer owns GPU rendering for the engine. Resource creation, uploads,
+presentation, synchronization, and render-graph execution go through
+`dirk_rhi`; the active backend is Vulkan. Existing typed pipelines,
+descriptors, and egui integration use the Vulkan backend's native accessors
+until those higher-level systems are migrated.
 
 On macOS, the renderer discovers the `AppKit` surface extensions and enables
 Vulkan portability enumeration for `MoltenVK`. It loads the Vulkan loader

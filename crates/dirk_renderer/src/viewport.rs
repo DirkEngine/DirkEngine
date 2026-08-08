@@ -5,7 +5,7 @@ use gpu_allocator::MemoryLocation;
 
 use crate::{
     Result,
-    frame_graph::{ImportedTexture, TextureStateDesc},
+    frame_graph::ImportedTexture,
     resources::{
         device::RenderDevice,
         image::{Image, ImageCreateInfo},
@@ -15,19 +15,7 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub(crate) struct TextureState {
-    layout: vk::ImageLayout,
-    stage: vk::PipelineStageFlags2,
-    access: vk::AccessFlags2,
-}
-
-impl From<TextureState> for TextureStateDesc {
-    fn from(state: TextureState) -> Self {
-        Self {
-            layout: state.layout,
-            stage: state.stage,
-            access: state.access,
-        }
-    }
+    state: dirk_rhi::ImageState,
 }
 
 pub(crate) struct Viewport {
@@ -57,7 +45,7 @@ impl Viewport {
             settings,
             output: Self::create_output(device, &settings)?,
             output_state: Viewport::undefined_state(),
-            render_semaphore: TimelineSemaphore::create(device, 0)?,
+            render_semaphore: TimelineSemaphore::create(&device.rhi, 0)?,
             last_render_value: 0,
             output_has_rendered: false,
         })
@@ -105,18 +93,18 @@ impl Viewport {
 
     pub fn import(&self) -> ImportedTexture {
         ImportedTexture {
-            image: self.output.image(),
-            view: self.output.view(),
-            aspect_flags: self.output.aspect_flags(),
-            initial_state: self.output_state.into(),
-            final_state: Self::shader_read_state().into(),
+            image: self.output.rhi_image().clone(),
+            view: self.output.rhi_view().clone(),
+            aspects: self.output.rhi_aspects(),
+            initial_state: self.output_state.state,
+            final_state: Self::shader_read_state().state,
         }
     }
 
     #[cfg(not(feature = "editor"))]
     pub fn import_after_render(&self) -> ImportedTexture {
         let mut import = self.import();
-        import.initial_state = Self::shader_read_state().into();
+        import.initial_state = Self::shader_read_state().state;
         import
     }
 
@@ -124,8 +112,8 @@ impl Viewport {
         self.last_render_value + 1
     }
 
-    pub fn render_semaphore(&self) -> vk::Semaphore {
-        self.render_semaphore.raw()
+    pub fn render_semaphore(&self) -> &dirk_rhi_vulkan::VulkanTimelineSemaphore {
+        self.render_semaphore.rhi()
     }
 
     pub fn mark_render_submitted(&mut self, value: u64) {
@@ -136,17 +124,13 @@ impl Viewport {
 
     fn undefined_state() -> TextureState {
         TextureState {
-            layout: vk::ImageLayout::UNDEFINED,
-            stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
-            access: vk::AccessFlags2::empty(),
+            state: dirk_rhi::ImageState::Undefined,
         }
     }
 
     fn shader_read_state() -> TextureState {
         TextureState {
-            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
-            access: vk::AccessFlags2::SHADER_READ,
+            state: dirk_rhi::ImageState::ShaderRead,
         }
     }
 

@@ -1,115 +1,72 @@
-//! Synchronization resource wrappers.
+//! Synchronization wrappers backed by the active RHI.
 
-use ash::{Device, prelude::VkResult, vk};
+use dirk_rhi_vulkan::{VulkanFence, VulkanTimelineSemaphore};
 
-use crate::resources::device::{Garbage, RenderDevice};
+use crate::{Result, resources::ActiveRhi};
 
-/// RAII wrapper for a Vulkan fence.
+/// Reusable per-frame completion fence.
 pub struct Fence {
-    device: Device,
-    raw: vk::Fence,
+    rhi: ActiveRhi,
+    inner: VulkanFence,
 }
 
 impl Fence {
-    /// Creates a fence with the supplied creation flags.
-    pub fn create(device: &Device, flags: vk::FenceCreateFlags) -> VkResult<Self> {
-        let info = vk::FenceCreateInfo::default().flags(flags);
-        let raw = unsafe { device.create_fence(&info, None)? };
-
+    /// Creates a signaled fence.
+    pub fn signaled(rhi: &ActiveRhi) -> Result<Self> {
         Ok(Self {
-            device: device.clone(),
-            raw,
+            inner: rhi.create_fence(true)?,
+            rhi: rhi.clone(),
         })
     }
 
-    /// Creates an unsignaled fence.
-    pub fn unsignaled(device: &Device) -> VkResult<Self> {
-        Self::create(device, vk::FenceCreateFlags::empty())
+    /// Waits for the submission associated with this fence to complete.
+    pub fn wait(&self, timeout: u64) -> Result<()> {
+        self.rhi.wait_fence(&self.inner, timeout)?;
+        Ok(())
     }
 
-    /// Creates a signaled fence.
-    pub fn signaled(device: &Device) -> VkResult<Self> {
-        Self::create(device, vk::FenceCreateFlags::SIGNALED)
+    /// Resets this fence before its next submission.
+    pub fn reset(&self) -> Result<()> {
+        self.rhi.reset_fence(&self.inner)?;
+        Ok(())
     }
 
-    /// Returns the raw Vulkan fence handle.
-    pub fn raw(&self) -> vk::Fence {
-        self.raw
-    }
-
-    /// Returns the raw null fence handle for Vulkan calls that take an optional fence.
-    pub(crate) fn null_handle() -> vk::Fence {
-        vk::Fence::null()
-    }
-
-    /// Waits for this fence to become signaled.
-    pub fn wait(&self, timeout: u64) -> VkResult<()> {
-        unsafe {
-            self.device
-                .wait_for_fences(std::slice::from_ref(&self.raw), true, timeout)
-        }
-    }
-
-    /// Resets this fence to the unsignaled state.
-    pub fn reset(&self) -> VkResult<()> {
-        unsafe { self.device.reset_fences(std::slice::from_ref(&self.raw)) }
+    /// Returns the backend fence used in an RHI submission.
+    pub(crate) fn rhi(&self) -> &VulkanFence {
+        &self.inner
     }
 }
 
-impl Drop for Fence {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_fence(self.raw, None);
-        }
-    }
-}
-
-/// RAII wrapper for a Vulkan timeline semaphore.
+/// Renderer timeline semaphore used to order viewport output.
+#[derive(Clone)]
 pub struct TimelineSemaphore {
-    device: RenderDevice,
-    raw: vk::Semaphore,
+    rhi: ActiveRhi,
+    inner: VulkanTimelineSemaphore,
 }
 
 impl TimelineSemaphore {
-    /// Creates a timeline semaphore with the supplied initial counter value.
-    pub fn create(device: &RenderDevice, initial_value: u64) -> VkResult<Self> {
-        let mut type_info = vk::SemaphoreTypeCreateInfo::default()
-            .semaphore_type(vk::SemaphoreType::TIMELINE)
-            .initial_value(initial_value);
-        let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
-        let raw = unsafe { device.device.create_semaphore(&info, None)? };
-
+    /// Creates a timeline semaphore with the supplied initial value.
+    pub fn create(rhi: &ActiveRhi, initial_value: u64) -> Result<Self> {
         Ok(Self {
-            device: device.clone(),
-            raw,
+            inner: rhi.create_timeline_semaphore(initial_value)?,
+            rhi: rhi.clone(),
         })
     }
 
-    /// Returns the raw Vulkan semaphore handle.
-    pub fn raw(&self) -> vk::Semaphore {
-        self.raw
-    }
-
-    /// Waits until the timeline semaphore reaches at least `value`.
+    /// Waits until the timeline reaches `value`.
     #[allow(unused)]
-    pub fn wait(&self, value: u64, timeout: u64) -> VkResult<()> {
-        let semaphores = [self.raw];
-        let values = [value];
-        let info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        unsafe { self.device.device.wait_semaphores(&info, timeout) }
+    pub fn wait(&self, value: u64, timeout: u64) -> Result<()> {
+        self.rhi.wait_timeline(&self.inner, value, timeout)?;
+        Ok(())
     }
 
-    /// Returns the current timeline counter value.
+    /// Returns the current timeline value.
     #[allow(unused)]
-    pub fn value(&self) -> VkResult<u64> {
-        unsafe { self.device.device.get_semaphore_counter_value(self.raw) }
+    pub fn value(&self) -> Result<u64> {
+        Ok(self.rhi.timeline_value(&self.inner)?)
     }
-}
 
-impl Drop for TimelineSemaphore {
-    fn drop(&mut self) {
-        self.device.destroy(Garbage::Semaphore(self.raw));
+    pub(crate) fn rhi(&self) -> &VulkanTimelineSemaphore {
+        &self.inner
     }
 }

@@ -1,7 +1,6 @@
 use ash::vk;
 
 use crate::{
-    physical_device,
     resources::{
         command_pool::{CommandBuffer, CommandPool, Graphics},
         sync::Fence,
@@ -42,10 +41,6 @@ impl VertexInput for Vertex {
     ];
 }
 
-pub fn make_version(version: dirk_utils::Version) -> u32 {
-    vk::make_api_version(0, version.major(), version.minor(), version.patch())
-}
-
 pub struct Frame {
     /// Command pool to allocate command buffers on every frame
     pub command_pool: CommandPool<Graphics>,
@@ -58,19 +53,10 @@ pub struct Frame {
     // there is a change in scene count. If not reallocated, reset.
 }
 
-impl Drop for Frame {
-    fn drop(&mut self) {
-        self.submitted_command_buffers.clear();
-        self.command_pool.destroy();
-    }
-}
-
 pub struct RendererProperties {
     pub msaa_samples: vk::SampleCountFlags,
     #[allow(unused)]
     pub anisotropy: bool,
     pub surface_format: vk::SurfaceFormatKHR,
-    pub queue_family_indices: physical_device::QueueFamilyIndices,
     pub depth_format: vk::Format,
-    pub present_mode: vk::PresentModeKHR,
 }
