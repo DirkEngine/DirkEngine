@@ -180,14 +180,20 @@ impl Backend for VulkanBackend {
         VulkanFence::create(&self.context, signaled)
     }
 
-    fn wait_and_reset_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<()> {
+    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<()> {
         self.require_context(fence.context())?;
         unsafe {
             self.context
                 .device
                 .wait_for_fences(std::slice::from_ref(&fence.raw()), true, timeout_ns)
-                .map_err(vk_error)?;
-            fence.release_resources();
+                .map_err(vk_error)
+        }
+    }
+
+    fn reset_fence(&self, fence: &VulkanFence) -> Result<()> {
+        self.require_context(fence.context())?;
+        fence.release_resources();
+        unsafe {
             self.context
                 .device
                 .reset_fences(std::slice::from_ref(&fence.raw()))
@@ -302,7 +308,7 @@ impl Backend for VulkanBackend {
         let retained = submission
             .command_buffers
             .iter()
-            .flat_map(VulkanCommandBuffer::retained)
+            .flat_map(|command| command.retained())
             .chain(
                 submission
                     .surface_frames
