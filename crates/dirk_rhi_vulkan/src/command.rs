@@ -450,7 +450,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         dst: &VulkanImage,
         regions: &[ImageBlit],
         filter: FilterMode,
-    ) {
+    ) -> Result<()> {
         self.assert_context(src.context());
         self.assert_context(dst.context());
         self.retained.extend([src.retain(), dst.retain()]);
@@ -484,6 +484,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 convert::filter(filter),
             );
         }
+        Ok(())
     }
 
     fn barrier(&mut self, dependency: &DependencyInfo<'_, VulkanBackend>) {
