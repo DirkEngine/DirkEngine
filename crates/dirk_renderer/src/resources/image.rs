@@ -162,7 +162,7 @@ impl Image {
                 aspects: ImageAspects::COLOR,
             }],
         );
-        image.record_mips(command.rhi_mut(), texture.width, texture.height);
+        image.record_mips(command.rhi_mut(), texture.width, texture.height)?;
         command.end_and_submit()?;
 
         let sampler = device.rhi.create_sampler(&SamplerDesc {
@@ -187,7 +187,7 @@ impl Image {
         command: &mut dirk_rhi_vulkan::VulkanCommandBuffer,
         width: u32,
         height: u32,
-    ) {
+    ) -> dirk_rhi::Result<()> {
         for mip in 1..self.mip_levels {
             command.barrier(&DependencyInfo {
                 image_barriers: &[ImageBarrier {
@@ -214,7 +214,7 @@ impl Image {
                     dst_extent: Extent3d::new_2d((width >> mip).max(1), (height >> mip).max(1)),
                 }],
                 FilterMode::Linear,
-            );
+            )?;
             command.barrier(&DependencyInfo {
                 image_barriers: &[ImageBarrier {
                     image: &self.inner,
@@ -240,6 +240,7 @@ impl Image {
                 array_layer_count: 1,
             }],
         });
+        Ok(())
     }
 
     fn mip_levels(width: u32, height: u32) -> u32 {
