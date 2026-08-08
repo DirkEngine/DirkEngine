@@ -691,6 +691,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirk_rhi_vulkan"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ash-window",
+ "dirk_rhi",
+ "gpu-allocator",
+ "parking_lot",
+ "tracing",
+]
+
+[[package]]
 name = "dirk_shaders"
 version = "0.1.0"
 dependencies = [
