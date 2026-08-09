@@ -6,7 +6,7 @@ use std::sync::{
 use core_graphics_types::geometry::CGSize;
 use dirk_rhi::{
     Extent3d, Format, ImageUsages, Result, SurfaceCreateInfo, SurfaceFrame, SurfaceStatus,
-    SwapchainDesc,
+    Swapchain, SwapchainDesc,
 };
 use metal::foreign_types::ForeignType;
 use metal::{MTLPixelFormat, MetalDrawable, MetalLayer};
@@ -93,8 +93,10 @@ impl MetalSwapchain {
             extent: Extent3d::new_2d(desc.width, desc.height),
         })
     }
+}
 
-    pub(crate) fn acquire(&mut self) -> Result<MetalSurfaceFrame> {
+impl Swapchain<MetalBackend> for MetalSwapchain {
+    fn acquire(&mut self) -> Result<MetalSurfaceFrame> {
         let drawable = self
             .surface
             .0
@@ -116,11 +118,22 @@ impl MetalSwapchain {
         })
     }
 
-    pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         validate_extent(width, height)?;
         set_extent(&self.surface.0.layer, width, height);
         self.extent = Extent3d::new_2d(width, height);
         Ok(())
+    }
+
+    fn present(&mut self, frame: MetalSurfaceFrame) -> Result<()> {
+        require_context(&self.context, &frame.context)?;
+        if frame.was_submitted() {
+            Ok(())
+        } else {
+            Err(dirk_rhi::Error::InvalidResource(
+                "Metal surface frame must be submitted before presentation",
+            ))
+        }
     }
 }
 

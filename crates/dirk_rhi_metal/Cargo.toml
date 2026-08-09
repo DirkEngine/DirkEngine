@@ -16,6 +16,7 @@ dirk_rhi.workspace = true
 parking_lot.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
+anyhow.workspace = true
 core-graphics-types = { version = "0.2", default-features = false }
 metal = "0.33"
 raw-window-handle.workspace = true

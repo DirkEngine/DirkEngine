@@ -2,12 +2,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use dirk_rhi::{
-    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, BufferDesc,
+    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Fence,
     GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageUsages, ImageViewDesc, ImageViewType,
     MemoryDomain, PipelineLayoutDesc, Result, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage,
-    ShaderStages,
+    ShaderStages, TimelineSemaphore,
 };
 use metal::{
     CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLResourceOptions,
@@ -48,6 +49,35 @@ impl MetalBuffer {
             size: desc.size,
             memory: desc.memory,
         })
+    }
+}
+
+impl Buffer for MetalBuffer {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        if self.memory == MemoryDomain::Device {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "device-local Metal buffers are not host writable",
+            ));
+        }
+        let size = u64::try_from(data.len())
+            .map_err(|_| dirk_rhi::Error::InvalidResource("buffer write is too large"))?;
+        if offset.checked_add(size).is_none_or(|end| end > self.size) {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "buffer write exceeds the allocation",
+            ));
+        }
+        let offset = usize::try_from(offset)
+            .map_err(|_| dirk_rhi::Error::InvalidResource("buffer offset is too large"))?;
+        // SAFETY: Bounds are checked above and shared Metal buffer memory is
+        // host visible for the lifetime of `self`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.raw.contents().cast::<u8>().add(offset),
+                data.len(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -602,11 +632,52 @@ impl MetalFence {
     }
 }
 
+impl Fence for MetalFence {
+    fn wait(&self, timeout_ns: u64) -> Result<()> {
+        wait_event(&self.event, self.value(), timeout_ns)
+    }
+
+    fn reset(&self) -> Result<()> {
+        let value = self.value();
+        if self.event.signaled_value() < value {
+            return Err(dirk_rhi::Error::InvalidResource(
+                "cannot reset an unsignaled Metal fence",
+            ));
+        }
+        self.target.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
 /// Metal shared event used as an RHI timeline semaphore.
 #[derive(Clone)]
 pub struct MetalTimelineSemaphore {
     pub(crate) context: Arc<Context>,
     pub(crate) event: SharedEvent,
+}
+
+impl TimelineSemaphore for MetalTimelineSemaphore {
+    fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
+        wait_event(&self.event, value, timeout_ns)
+    }
+
+    fn value(&self) -> Result<u64> {
+        Ok(self.event.signaled_value())
+    }
+}
+
+fn wait_event(event: &metal::SharedEventRef, value: u64, timeout_ns: u64) -> Result<()> {
+    let started = Instant::now();
+    let timeout = Duration::from_nanos(timeout_ns);
+    while event.signaled_value() < value {
+        if timeout_ns != u64::MAX && started.elapsed() >= timeout {
+            return Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
+                "timed out waiting for a Metal shared event"
+            )));
+        }
+        std::thread::yield_now();
+    }
+    Ok(())
 }
 
 pub(crate) fn require_context(expected: &Arc<Context>, actual: &Arc<Context>) -> Result<()> {

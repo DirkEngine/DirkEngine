@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use dirk_rhi::{
     Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, GraphicsPipelineDesc,
@@ -31,7 +28,7 @@ impl Context {
     }
 }
 
-/// Native Metal backend for [`dirk_rhi::Rhi`].
+/// Native Metal implementation of the [`Backend`] contract.
 pub struct MetalBackend {
     context: Arc<Context>,
     capabilities: Capabilities,
@@ -101,34 +98,6 @@ impl Backend for MetalBackend {
         MetalBuffer::create(&self.context, desc)
     }
 
-    fn write_buffer(&self, buffer: &MetalBuffer, offset: u64, data: &[u8]) -> Result<()> {
-        require_context(&self.context, &buffer.context)?;
-        if buffer.memory == dirk_rhi::MemoryDomain::Device {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "device-local Metal buffers are not host writable",
-            ));
-        }
-        let size = u64::try_from(data.len())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("buffer write is too large"))?;
-        if offset.checked_add(size).is_none_or(|end| end > buffer.size) {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "buffer write exceeds the allocation",
-            ));
-        }
-        let offset = usize::try_from(offset)
-            .map_err(|_| dirk_rhi::Error::InvalidResource("buffer offset is too large"))?;
-        // SAFETY: Bounds are checked above and shared Metal buffer memory is
-        // host visible for the lifetime of `buffer`.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                buffer.raw.contents().cast::<u8>().add(offset),
-                data.len(),
-            );
-        }
-        Ok(())
-    }
-
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<MetalImage> {
         MetalImage::create(&self.context, desc)
     }
@@ -186,23 +155,6 @@ impl Backend for MetalBackend {
         Ok(MetalFence::create(&self.context, signaled))
     }
 
-    fn wait_fence(&self, fence: &MetalFence, timeout_ns: u64) -> Result<()> {
-        require_context(&self.context, &fence.context)?;
-        wait_event(&fence.event, fence.value(), timeout_ns)
-    }
-
-    fn reset_fence(&self, fence: &MetalFence) -> Result<()> {
-        require_context(&self.context, &fence.context)?;
-        let value = fence.value();
-        if fence.event.signaled_value() < value {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "cannot reset an unsignaled Metal fence",
-            ));
-        }
-        fence.target.fetch_add(1, Ordering::AcqRel);
-        Ok(())
-    }
-
     fn create_timeline_semaphore(&self, initial_value: u64) -> Result<MetalTimelineSemaphore> {
         let event = self.context.device.new_shared_event();
         event.set_signaled_value(initial_value);
@@ -210,21 +162,6 @@ impl Backend for MetalBackend {
             context: self.context.clone(),
             event,
         })
-    }
-
-    fn wait_timeline(
-        &self,
-        semaphore: &MetalTimelineSemaphore,
-        value: u64,
-        timeout_ns: u64,
-    ) -> Result<()> {
-        require_context(&self.context, &semaphore.context)?;
-        wait_event(&semaphore.event, value, timeout_ns)
-    }
-
-    fn timeline_value(&self, semaphore: &MetalTimelineSemaphore) -> Result<u64> {
-        require_context(&self.context, &semaphore.context)?;
-        Ok(semaphore.event.signaled_value())
     }
 
     fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
@@ -281,53 +218,13 @@ impl Backend for MetalBackend {
     fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<MetalSwapchain> {
         MetalSwapchain::create(&self.context, desc)
     }
-
-    fn acquire_frame(&self, swapchain: &mut MetalSwapchain) -> Result<MetalSurfaceFrame> {
-        require_context(&self.context, &swapchain.context)?;
-        swapchain.acquire()
-    }
-
-    fn resize_swapchain(
-        &self,
-        swapchain: &mut MetalSwapchain,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        require_context(&self.context, &swapchain.context)?;
-        swapchain.resize(width, height)
-    }
-
-    fn present(&self, frame: MetalSurfaceFrame) -> Result<()> {
-        require_context(&self.context, &frame.context)?;
-        if frame.was_submitted() {
-            Ok(())
-        } else {
-            Err(dirk_rhi::Error::InvalidResource(
-                "Metal surface frame must be submitted before presentation",
-            ))
-        }
-    }
-}
-
-fn wait_event(event: &metal::SharedEventRef, value: u64, timeout_ns: u64) -> Result<()> {
-    let started = Instant::now();
-    let timeout = Duration::from_nanos(timeout_ns);
-    while event.signaled_value() < value {
-        if timeout_ns != u64::MAX && started.elapsed() >= timeout {
-            return Err(dirk_rhi::Error::Backend(
-                "timed out waiting for a Metal shared event".into(),
-            ));
-        }
-        std::thread::yield_now();
-    }
-    Ok(())
 }
 
 fn command_result(command: &metal::CommandBufferRef) -> Result<()> {
     match command.status() {
         MTLCommandBufferStatus::Completed => Ok(()),
         MTLCommandBufferStatus::Error => Err(dirk_rhi::Error::DeviceLost),
-        status => Err(dirk_rhi::Error::Backend(format!(
+        status => Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
             "Metal command buffer completed with unexpected status {status:?}"
         ))),
     }

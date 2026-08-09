@@ -35,5 +35,5 @@ pub use resource::{
 
 #[cfg(target_vendor = "apple")]
 fn backend_error(error: impl std::fmt::Display) -> dirk_rhi::Error {
-    dirk_rhi::Error::Backend(error.to_string())
+    dirk_rhi::Error::Backend(anyhow::anyhow!("{error}"))
 }
