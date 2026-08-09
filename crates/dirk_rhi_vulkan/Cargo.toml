@@ -12,6 +12,7 @@ authors.workspace = true
 documentation.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 ash.workspace = true
 ash-window.workspace = true
 dirk_rhi.workspace = true

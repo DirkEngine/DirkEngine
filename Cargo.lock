@@ -694,6 +694,7 @@ dependencies = [
 name = "dirk_rhi_vulkan"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ash",
  "ash-window",
  "dirk_rhi",

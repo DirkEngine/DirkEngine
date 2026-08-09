@@ -3,7 +3,7 @@ use std::{ffi::CStr, sync::Arc};
 use ash::vk;
 use dirk_rhi::{
     Error, Extent3d, Format, ImageUsages, Result, SurfaceCreateInfo, SurfaceFrame, SurfaceStatus,
-    SwapchainDesc,
+    Swapchain, SwapchainDesc,
 };
 
 use crate::{
@@ -321,7 +321,15 @@ impl VulkanSwapchain {
         })
     }
 
-    pub(crate) fn acquire(&mut self) -> Result<VulkanSurfaceFrame> {
+    #[must_use]
+    /// Returns the native handle for the current swapchain generation.
+    pub fn raw(&self) -> vk::SwapchainKHR {
+        self.generation.raw
+    }
+}
+
+impl Swapchain<VulkanBackend> for VulkanSwapchain {
+    fn acquire(&mut self) -> Result<VulkanSurfaceFrame> {
         let semaphore_index = self.semaphore_index;
         self.semaphore_index = (self.semaphore_index + 1) % self.generation.semaphores.len();
         let image_available = self.generation.semaphores[semaphore_index].0;
@@ -336,7 +344,9 @@ impl VulkanSwapchain {
         .map_err(vk_error)?;
         let generation = self.generation.clone();
         let index = usize::try_from(image_index).map_err(|_| {
-            Error::Backend("Vulkan returned an invalid swapchain image index".into())
+            Error::Backend(anyhow::anyhow!(
+                "Vulkan returned an invalid swapchain image index"
+            ))
         })?;
         let image = VulkanImage::surface(
             generation.clone(),
@@ -359,7 +369,7 @@ impl VulkanSwapchain {
         })
     }
 
-    pub(crate) fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         let generation = SwapchainGeneration::create(
             &self.generation.context,
             &self.generation.surface,
@@ -373,14 +383,30 @@ impl VulkanSwapchain {
         Ok(())
     }
 
-    #[must_use]
-    /// Returns the native handle for the current swapchain generation.
-    pub fn raw(&self) -> vk::SwapchainKHR {
-        self.generation.raw
-    }
-
-    pub(crate) fn context(&self) -> &Arc<Context> {
-        &self.generation.context
+    fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
+        if !Arc::ptr_eq(&self.generation.context, frame.context()) {
+            return Err(Error::InvalidResource(
+                "frame belongs to a different RHI instance",
+            ));
+        }
+        let waits = [frame.render_finished()];
+        let swapchains = [frame.generation.raw];
+        let image_indices = [frame.image_index];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&waits)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+        let suboptimal = unsafe {
+            self.generation
+                .context
+                .swapchain_loader
+                .queue_present(self.generation.context.queues.present, &present_info)
+        }
+        .map_err(vk_error)?;
+        if suboptimal {
+            return Err(Error::SurfaceOutOfDate);
+        }
+        Ok(())
     }
 }
 
@@ -428,26 +454,6 @@ impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
     fn status(&self) -> SurfaceStatus {
         self.status
     }
-}
-
-pub(crate) fn present(context: &Context, frame: &VulkanSurfaceFrame) -> Result<()> {
-    let waits = [frame.render_finished()];
-    let swapchains = [frame.generation.raw];
-    let image_indices = [frame.image_index];
-    let present_info = vk::PresentInfoKHR::default()
-        .wait_semaphores(&waits)
-        .swapchains(&swapchains)
-        .image_indices(&image_indices);
-    let suboptimal = unsafe {
-        context
-            .swapchain_loader
-            .queue_present(context.queues.present, &present_info)
-    }
-    .map_err(vk_error)?;
-    if suboptimal {
-        return Err(Error::SurfaceOutOfDate);
-    }
-    Ok(())
 }
 
 fn destroy_partial(

@@ -11,7 +11,7 @@ use crate::{
     command::{VulkanCommandBuffer, VulkanCommandPool},
     convert,
     device::Context,
-    presentation::{self, VulkanSurface, VulkanSurfaceFrame, VulkanSwapchain},
+    presentation::{VulkanSurface, VulkanSurfaceFrame, VulkanSwapchain},
     resource::{
         VulkanBindGroup, VulkanBindGroupLayout, VulkanBuffer, VulkanFence, VulkanGraphicsPipeline,
         VulkanImage, VulkanImageView, VulkanPipelineLayout, VulkanSampler, VulkanShader,
@@ -20,7 +20,7 @@ use crate::{
     vk_error,
 };
 
-/// Vulkan 1.3 backend for [`dirk_rhi::Rhi`].
+/// Vulkan 1.3 implementation of the [`Backend`] contract.
 pub struct VulkanBackend {
     pub(crate) context: Arc<Context>,
 }
@@ -116,11 +116,6 @@ impl Backend for VulkanBackend {
         VulkanBuffer::create(&self.context, desc)
     }
 
-    fn write_buffer(&self, buffer: &VulkanBuffer, offset: u64, data: &[u8]) -> Result<()> {
-        self.require_context(buffer.context())?;
-        buffer.write(offset, data)
-    }
-
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<VulkanImage> {
         VulkanImage::create(&self.context, desc)
     }
@@ -180,59 +175,8 @@ impl Backend for VulkanBackend {
         VulkanFence::create(&self.context, signaled)
     }
 
-    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<()> {
-        self.require_context(fence.context())?;
-        unsafe {
-            self.context
-                .device
-                .wait_for_fences(std::slice::from_ref(&fence.raw()), true, timeout_ns)
-                .map_err(vk_error)
-        }
-    }
-
-    fn reset_fence(&self, fence: &VulkanFence) -> Result<()> {
-        self.require_context(fence.context())?;
-        fence.release_resources();
-        unsafe {
-            self.context
-                .device
-                .reset_fences(std::slice::from_ref(&fence.raw()))
-                .map_err(vk_error)
-        }
-    }
-
     fn create_timeline_semaphore(&self, initial_value: u64) -> Result<VulkanTimelineSemaphore> {
         VulkanTimelineSemaphore::create(&self.context, initial_value)
-    }
-
-    fn wait_timeline(
-        &self,
-        semaphore: &VulkanTimelineSemaphore,
-        value: u64,
-        timeout_ns: u64,
-    ) -> Result<()> {
-        self.require_context(semaphore.context())?;
-        let semaphores = [semaphore.raw()];
-        let values = [value];
-        let wait_info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        unsafe {
-            self.context
-                .device
-                .wait_semaphores(&wait_info, timeout_ns)
-                .map_err(vk_error)
-        }
-    }
-
-    fn timeline_value(&self, semaphore: &VulkanTimelineSemaphore) -> Result<u64> {
-        self.require_context(semaphore.context())?;
-        unsafe {
-            self.context
-                .device
-                .get_semaphore_counter_value(semaphore.raw())
-                .map_err(vk_error)
-        }
     }
 
     fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
@@ -337,25 +281,5 @@ impl Backend for VulkanBackend {
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<VulkanSwapchain> {
         VulkanSwapchain::create(&self.context, desc)
-    }
-
-    fn acquire_frame(&self, swapchain: &mut VulkanSwapchain) -> Result<VulkanSurfaceFrame> {
-        self.require_context(swapchain.context())?;
-        swapchain.acquire()
-    }
-
-    fn resize_swapchain(
-        &self,
-        swapchain: &mut VulkanSwapchain,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        self.require_context(swapchain.context())?;
-        swapchain.resize(width, height)
-    }
-
-    fn present(&self, frame: VulkanSurfaceFrame) -> Result<()> {
-        self.require_context(frame.context())?;
-        presentation::present(&self.context, &frame)
     }
 }

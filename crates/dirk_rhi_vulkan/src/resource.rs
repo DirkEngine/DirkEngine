@@ -2,9 +2,9 @@ use std::{ffi::CString, sync::Arc};
 
 use ash::vk;
 use dirk_rhi::{
-    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, BufferDesc, Error,
-    GraphicsPipelineDesc, ImageDesc, ImageViewDesc, Result, SamplerDesc, ShaderDesc, ShaderSource,
-    ShaderStage,
+    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Error,
+    Fence, GraphicsPipelineDesc, ImageDesc, ImageViewDesc, Result, SamplerDesc, ShaderDesc,
+    ShaderSource, ShaderStage, TimelineSemaphore,
 };
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use parking_lot::Mutex;
@@ -68,7 +68,29 @@ impl VulkanBuffer {
         })))
     }
 
-    pub(crate) fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    #[must_use]
+    /// Returns the native buffer handle.
+    pub fn raw(&self) -> vk::Buffer {
+        self.0.raw
+    }
+
+    #[must_use]
+    /// Returns the allocation size in bytes.
+    pub fn size(&self) -> u64 {
+        self.0.size
+    }
+
+    pub(crate) fn retain(&self) -> Retained {
+        self.0.clone()
+    }
+
+    pub(crate) fn context(&self) -> &Arc<Context> {
+        &self.0.context
+    }
+}
+
+impl Buffer for VulkanBuffer {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let data_len = u64::try_from(data.len())
             .map_err(|_| Error::InvalidResource("buffer write is too large"))?;
         if offset
@@ -113,26 +135,6 @@ impl VulkanBuffer {
             }
         }
         Ok(())
-    }
-
-    #[must_use]
-    /// Returns the native buffer handle.
-    pub fn raw(&self) -> vk::Buffer {
-        self.0.raw
-    }
-
-    #[must_use]
-    /// Returns the allocation size in bytes.
-    pub fn size(&self) -> u64 {
-        self.0.size
-    }
-
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
-    pub(crate) fn context(&self) -> &Arc<Context> {
-        &self.0.context
     }
 }
 
@@ -1046,6 +1048,29 @@ impl VulkanFence {
     }
 }
 
+impl Fence for VulkanFence {
+    fn wait(&self, timeout_ns: u64) -> Result<()> {
+        unsafe {
+            self.0
+                .context
+                .device
+                .wait_for_fences(std::slice::from_ref(&self.0.raw), true, timeout_ns)
+                .map_err(vk_error)
+        }
+    }
+
+    fn reset(&self) -> Result<()> {
+        self.release_resources();
+        unsafe {
+            self.0
+                .context
+                .device
+                .reset_fences(std::slice::from_ref(&self.0.raw))
+                .map_err(vk_error)
+        }
+    }
+}
+
 impl Drop for FenceInner {
     fn drop(&mut self) {
         self.context.retire(Garbage::Fence(self.raw));
@@ -1093,5 +1118,32 @@ impl VulkanTimelineSemaphore {
 
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
+    }
+}
+
+impl TimelineSemaphore for VulkanTimelineSemaphore {
+    fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
+        let semaphores = [self.0.raw];
+        let values = [value];
+        let wait_info = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        unsafe {
+            self.0
+                .context
+                .device
+                .wait_semaphores(&wait_info, timeout_ns)
+                .map_err(vk_error)
+        }
+    }
+
+    fn value(&self) -> Result<u64> {
+        unsafe {
+            self.0
+                .context
+                .device
+                .get_semaphore_counter_value(self.0.raw)
+                .map_err(vk_error)
+        }
     }
 }

@@ -25,10 +25,10 @@ fn vk_error(error: ash::vk::Result) -> Error {
     match error {
         ash::vk::Result::ERROR_DEVICE_LOST => Error::DeviceLost,
         ash::vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
-        error => Error::Backend(format!("Vulkan operation failed: {error:?}")),
+        error => Error::Backend(anyhow::anyhow!("Vulkan operation failed: {error:?}")),
     }
 }
 
-fn backend_error(error: impl std::fmt::Display) -> Error {
-    Error::Backend(error.to_string())
+fn backend_error(error: impl Into<anyhow::Error>) -> Error {
+    Error::Backend(error.into())
 }

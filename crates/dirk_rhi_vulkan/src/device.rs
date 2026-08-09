@@ -118,14 +118,13 @@ struct Initialized {
 
 impl Bootstrap {
     fn finish(mut self) -> Result<Initialized> {
-        let instance = self
-            .instance
-            .take()
-            .ok_or(Error::Backend("Vulkan instance bootstrap was empty".into()))?;
+        let instance = self.instance.take().ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!("Vulkan instance bootstrap was empty"))
+        })?;
         let device = self
             .device
             .take()
-            .ok_or(Error::Backend("Vulkan device bootstrap was empty".into()))?;
+            .ok_or_else(|| Error::Backend(anyhow::anyhow!("Vulkan device bootstrap was empty")))?;
         Ok(Initialized {
             instance,
             device,
@@ -236,10 +235,9 @@ impl Context {
             device: None,
             debug_messenger: None,
         };
-        let instance = bootstrap
-            .instance
-            .as_ref()
-            .ok_or(Error::Backend("Vulkan instance bootstrap was empty".into()))?;
+        let instance = bootstrap.instance.as_ref().ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!("Vulkan instance bootstrap was empty"))
+        })?;
         bootstrap.debug_messenger = if info.validation
             && extensions
                 .iter()
@@ -289,7 +287,7 @@ impl Context {
         let device = bootstrap
             .device
             .as_ref()
-            .ok_or(Error::Backend("Vulkan device bootstrap was empty".into()))?;
+            .ok_or_else(|| Error::Backend(anyhow::anyhow!("Vulkan device bootstrap was empty")))?;
         let swapchain_loader = swapchain::Device::new(instance, device);
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
