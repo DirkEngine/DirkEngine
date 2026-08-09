@@ -1,9 +1,9 @@
 //! Backend-neutral render graph executed through the renderer RHI.
 
 use dirk_rhi::{
-    Color, CommandBuffer as _, DependencyInfo, Extent3d, Format, ImageAspects, ImageBarrier,
-    ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp, RenderingInfo,
-    SampleCount, StoreOp,
+    Backend as _, Color, CommandBuffer as _, DependencyInfo, Extent3d, Format, ImageAspects,
+    ImageBarrier, ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp,
+    RenderingInfo, SampleCount, StoreOp,
 };
 use dirk_rhi_vulkan::{VulkanImage, VulkanImageView};
 

@@ -1,5 +1,6 @@
 use ash::vk;
 use dirk_platform::WindowId;
+use dirk_rhi::Backend as _;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
@@ -54,6 +55,9 @@ impl Window {
     }
     pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
         self.swapchain.recreate(extent)
+    }
+    pub fn present(&mut self, image: RenderImage) -> Result<()> {
+        self.swapchain.present(image)
     }
     pub fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;

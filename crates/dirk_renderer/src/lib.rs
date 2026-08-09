@@ -11,9 +11,9 @@ use std::{
 
 use anyhow::Context;
 use ash::vk;
+use dirk_rhi::{Backend as _, ImageUsages, SampleCount};
 #[cfg(not(feature = "editor"))]
 use dirk_rhi::{CommandBuffer as _, Extent3d, ImageAspects, ImageCopy};
-use dirk_rhi::{ImageUsages, SampleCount};
 
 #[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
@@ -272,20 +272,19 @@ impl Renderer {
             window: window.window_handle()?.as_raw(),
         };
         let version = |version: Version| (version.major(), version.minor(), version.patch());
-        let rhi = dirk_rhi::Rhi::<dirk_rhi_vulkan::VulkanBackend>::new(&dirk_rhi::RhiCreateInfo {
-            engine_name: create_info.engine_name.to_string_lossy().as_ref(),
-            engine_version: version(create_info.engine_version),
-            application_name: create_info.app_name.to_string_lossy().as_ref(),
-            application_version: version(create_info.app_version),
-            validation: cfg!(validation),
-            compatible_surface: Some(surface_info),
-        })?;
+        let rhi = Arc::new(dirk_rhi_vulkan::VulkanBackend::new(
+            &dirk_rhi::RhiCreateInfo {
+                engine_name: create_info.engine_name.to_string_lossy().as_ref(),
+                engine_version: version(create_info.engine_version),
+                application_name: create_info.app_name.to_string_lossy().as_ref(),
+                application_version: version(create_info.app_version),
+                validation: cfg!(validation),
+                compatible_surface: Some(surface_info),
+            },
+        )?);
 
-        let backend = rhi.backend();
-        let (surface_loader, surface) =
-            Self::create_surface(backend.entry(), backend.instance(), window)?;
-        let surface_format =
-            Self::surface_format(&surface_loader, backend.physical_device(), surface)?;
+        let (surface_loader, surface) = Self::create_surface(rhi.entry(), rhi.instance(), window)?;
+        let surface_format = Self::surface_format(&surface_loader, rhi.physical_device(), surface)?;
         unsafe { surface_loader.destroy_surface(surface, None) };
         let capabilities = rhi.capabilities();
         let properties = RendererProperties {
@@ -612,7 +611,12 @@ impl Renderer {
         }
 
         for target in presentation_targets {
-            target.image.present()?;
+            self.windows
+                .get_mut(&target.window)
+                .ok_or(dirk_rhi::Error::InvalidResource(
+                    "presentation window no longer exists",
+                ))?
+                .present(target.image)?;
         }
 
         self.current_frame.store(

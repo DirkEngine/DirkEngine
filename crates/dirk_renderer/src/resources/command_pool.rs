@@ -1,7 +1,7 @@
-use std::{marker::PhantomData, ops::Deref};
+use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
 use ash::vk;
-use dirk_rhi::{CommandBuffer as _, QueueType, Submission};
+use dirk_rhi::{Backend as _, CommandBuffer as _, Fence as _, QueueType, Submission};
 use dirk_rhi_vulkan::{VulkanCommandBuffer, VulkanCommandPool};
 
 use crate::{Result, resources::ActiveRhi};
@@ -27,14 +27,14 @@ impl Pool for Transfer {
 
 /// Typed renderer wrapper around an RHI command pool.
 pub struct CommandPool<Type: Pool> {
-    rhi: ActiveRhi,
+    rhi: Arc<ActiveRhi>,
     inner: VulkanCommandPool,
     pool_type: PhantomData<Type>,
 }
 
 impl<Type: Pool> CommandPool<Type> {
     /// Creates a resettable command pool for this marker's queue.
-    pub fn build(rhi: &ActiveRhi) -> Result<Self> {
+    pub fn build(rhi: &Arc<ActiveRhi>) -> Result<Self> {
         Ok(Self {
             inner: rhi.create_command_pool(Type::QUEUE)?,
             rhi: rhi.clone(),
@@ -50,7 +50,7 @@ impl<Type: Pool> CommandPool<Type> {
     pub fn allocate_buffer(&self) -> Result<CommandBuffer> {
         let inner = self.rhi.create_command_buffer(&self.inner)?;
         Ok(CommandBuffer {
-            device: self.rhi.backend().device().clone(),
+            device: self.rhi.device().clone(),
             raw: inner.raw(),
             inner,
             rhi: self.rhi.clone(),
@@ -69,7 +69,7 @@ pub struct CommandBuffer {
     device: ash::Device,
     raw: vk::CommandBuffer,
     inner: VulkanCommandBuffer,
-    rhi: ActiveRhi,
+    rhi: Arc<ActiveRhi>,
 }
 
 impl CommandBuffer {
@@ -198,7 +198,7 @@ impl CommandBuffer {
                 fence: &fence,
             },
         )?;
-        self.rhi.wait_fence(&fence, u64::MAX)?;
+        fence.wait(u64::MAX)?;
         Ok(())
     }
 }

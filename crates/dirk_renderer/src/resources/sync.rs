@@ -1,12 +1,12 @@
 //! Synchronization wrappers backed by the active RHI.
 
+use dirk_rhi::{Backend as _, Fence as _, TimelineSemaphore as _};
 use dirk_rhi_vulkan::{VulkanFence, VulkanTimelineSemaphore};
 
 use crate::{Result, resources::ActiveRhi};
 
 /// Reusable per-frame completion fence.
 pub struct Fence {
-    rhi: ActiveRhi,
     inner: VulkanFence,
 }
 
@@ -15,19 +15,18 @@ impl Fence {
     pub fn signaled(rhi: &ActiveRhi) -> Result<Self> {
         Ok(Self {
             inner: rhi.create_fence(true)?,
-            rhi: rhi.clone(),
         })
     }
 
     /// Waits for the submission associated with this fence to complete.
     pub fn wait(&self, timeout: u64) -> Result<()> {
-        self.rhi.wait_fence(&self.inner, timeout)?;
+        self.inner.wait(timeout)?;
         Ok(())
     }
 
     /// Resets this fence before its next submission.
     pub fn reset(&self) -> Result<()> {
-        self.rhi.reset_fence(&self.inner)?;
+        self.inner.reset()?;
         Ok(())
     }
 
@@ -40,7 +39,6 @@ impl Fence {
 /// Renderer timeline semaphore used to order viewport output.
 #[derive(Clone)]
 pub struct TimelineSemaphore {
-    rhi: ActiveRhi,
     inner: VulkanTimelineSemaphore,
 }
 
@@ -49,21 +47,20 @@ impl TimelineSemaphore {
     pub fn create(rhi: &ActiveRhi, initial_value: u64) -> Result<Self> {
         Ok(Self {
             inner: rhi.create_timeline_semaphore(initial_value)?,
-            rhi: rhi.clone(),
         })
     }
 
     /// Waits until the timeline reaches `value`.
     #[allow(unused)]
     pub fn wait(&self, value: u64, timeout: u64) -> Result<()> {
-        self.rhi.wait_timeline(&self.inner, value, timeout)?;
+        self.inner.wait(value, timeout)?;
         Ok(())
     }
 
     /// Returns the current timeline value.
     #[allow(unused)]
     pub fn value(&self) -> Result<u64> {
-        Ok(self.rhi.timeline_value(&self.inner)?)
+        Ok(self.inner.value()?)
     }
 
     pub(crate) fn rhi(&self) -> &VulkanTimelineSemaphore {

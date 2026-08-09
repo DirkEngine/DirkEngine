@@ -3,14 +3,16 @@
 use std::{marker::PhantomData, mem::size_of_val};
 
 use ash::vk;
-use dirk_rhi::{BufferCopy, BufferDesc, BufferUsages, CommandBuffer as _, MemoryDomain};
+use dirk_rhi::{
+    Backend as _, Buffer as _, BufferCopy, BufferDesc, BufferUsages, CommandBuffer as _,
+    MemoryDomain,
+};
 use dirk_rhi_vulkan::VulkanBuffer;
 use gpu_allocator::MemoryLocation;
 
 use crate::{Result, resources::device::RenderDevice, shaders::metadata::VertexInput};
 
 pub struct Buffer<Type: BuffType = Custom> {
-    device: RenderDevice,
     inner: VulkanBuffer,
     _type: PhantomData<Type>,
 }
@@ -51,7 +53,6 @@ impl<Type: BuffType> Buffer<Type> {
             memory: memory_domain(location),
         })?;
         Ok(Self {
-            device: device.clone(),
             inner,
             _type: PhantomData,
         })
@@ -84,7 +85,7 @@ impl<Type: BuffType> Buffer<Type> {
         )?;
         let bytes =
             unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
-        device.rhi.write_buffer(staging.rhi(), 0, bytes)?;
+        staging.rhi().write(0, bytes)?;
 
         let output = Self::create_custom(
             device,
@@ -114,7 +115,7 @@ impl UniformBuffer {
         let bytes = unsafe {
             std::slice::from_raw_parts(std::ptr::from_ref(data).cast::<u8>(), size_of_val(data))
         };
-        self.device.rhi.write_buffer(&self.inner, 0, bytes)?;
+        self.inner.write(0, bytes)?;
         Ok(())
     }
 }

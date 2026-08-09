@@ -1,7 +1,9 @@
 //! Renderer presentation wrappers backed by the active RHI.
 
+use std::sync::Arc;
+
 use ash::vk;
-use dirk_rhi::{SurfaceFrame as _, SwapchainDesc};
+use dirk_rhi::{Backend as _, SurfaceFrame as _, Swapchain as _, SwapchainDesc};
 use dirk_rhi_vulkan::{VulkanSurface, VulkanSurfaceFrame, VulkanSwapchain};
 
 use crate::{
@@ -12,17 +14,10 @@ use crate::{
 
 /// Acquired image from an RHI swapchain.
 pub struct RenderImage {
-    rhi: ActiveRhi,
     inner: VulkanSurfaceFrame,
 }
 
 impl RenderImage {
-    /// Presents this acquired image.
-    pub fn present(self) -> Result<()> {
-        self.rhi.present(self.inner)?;
-        Ok(())
-    }
-
     /// Imports the acquired image into the renderer graph.
     pub fn import(&self) -> ImportedTexture {
         ImportedTexture {
@@ -45,7 +40,7 @@ impl RenderImage {
 
 /// Reconfigurable renderer swapchain.
 pub struct Swapchain {
-    rhi: ActiveRhi,
+    rhi: Arc<ActiveRhi>,
     inner: VulkanSwapchain,
     extent: vk::Extent2D,
 }
@@ -78,23 +73,25 @@ impl Swapchain {
     }
 
     pub fn acquire_next_image(&mut self) -> Result<RenderImage> {
-        let inner = self.rhi.acquire_frame(&mut self.inner)?;
+        let inner = self.inner.acquire()?;
         let extent = inner.extent();
         self.extent = vk::Extent2D {
             width: extent.width,
             height: extent.height,
         };
-        Ok(RenderImage {
-            rhi: self.rhi.clone(),
-            inner,
-        })
+        Ok(RenderImage { inner })
     }
 
     pub fn recreate(&mut self, window_size: vk::Extent2D) -> Result<()> {
         self.rhi.wait_idle()?;
-        self.rhi
-            .resize_swapchain(&mut self.inner, window_size.width, window_size.height)?;
+        self.inner.resize(window_size.width, window_size.height)?;
         self.extent = window_size;
+        Ok(())
+    }
+
+    /// Presents an image acquired from this swapchain.
+    pub fn present(&mut self, image: RenderImage) -> Result<()> {
+        self.inner.present(image.inner)?;
         Ok(())
     }
 }

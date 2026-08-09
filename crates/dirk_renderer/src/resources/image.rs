@@ -2,9 +2,9 @@
 
 use ash::vk;
 use dirk_rhi::{
-    BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d, FilterMode, ImageAspects,
-    ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType,
-    SampleCount, SamplerDesc,
+    Backend as _, Buffer as _, BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d,
+    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
+    ImageViewDesc, ImageViewType, SampleCount, SamplerDesc,
 };
 use dirk_rhi_vulkan::{VulkanImage, VulkanImageView};
 use gpu_allocator::MemoryLocation;
@@ -117,7 +117,7 @@ impl Image {
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
         )?;
-        device.rhi.write_buffer(staging.rhi(), 0, &pixels)?;
+        staging.rhi().write(0, &pixels)?;
 
         let image = Self::create_image(
             device,

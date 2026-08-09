@@ -43,7 +43,7 @@ pub struct RenderDeviceInner {
     frame_count: Arc<AtomicUsize>,
     /// Active render hardware interface. Declared last so it outlives all
     /// native compatibility resources above.
-    pub rhi: ActiveRhi,
+    pub rhi: Arc<ActiveRhi>,
 }
 
 pub struct FrameCounters {
@@ -53,11 +53,11 @@ pub struct FrameCounters {
 
 impl RenderDevice {
     pub fn new(
-        rhi: ActiveRhi,
+        rhi: Arc<ActiveRhi>,
         properties: RendererProperties,
         frame_counters: FrameCounters,
     ) -> Result<Self> {
-        let device = rhi.backend().device().clone();
+        let device = rhi.device().clone();
 
         // COMMAND POOLS
         let transfer_pool = CommandPool::build(&rhi)?;

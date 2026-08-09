@@ -31,11 +31,10 @@ pub struct EguiFrameInput {
 impl EguiState {
     pub fn new(device: &RenderDevice) -> Result<Self> {
         let surface_format = device.properties.surface_format.format;
-        let backend = device.rhi.backend();
         let renderer = egui_ash_renderer::Renderer::with_default_allocator(
-            backend.instance(),
-            backend.physical_device(),
-            backend.device().clone(),
+            device.rhi.instance(),
+            device.rhi.physical_device(),
+            device.rhi.device().clone(),
             DynamicRendering {
                 color_attachment_format: surface_format,
                 depth_attachment_format: None,
@@ -137,7 +136,7 @@ impl EguiState {
         };
 
         self.renderer.set_textures(
-            device.rhi.backend().queue(dirk_rhi::QueueType::Graphics),
+            device.rhi.queue(dirk_rhi::QueueType::Graphics),
             device.graphics_pool.raw(),
             pending.textures_delta.set.as_slice(),
         )?;
