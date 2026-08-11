@@ -102,7 +102,17 @@ allow-workspace = true
 deny = []
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
-skip = []
+skip = [
+    # ash-window still uses the older raw-window-metal/Core Graphics stack,
+    # while the native Metal backend uses the current stack.
+    { crate = "core-foundation@0.9.4", reason = "transitive Vulkan window dependency on Apple platforms" },
+    { crate = "core-graphics-types@0.1.3", reason = "transitive Vulkan window dependency on Apple platforms" },
+    { crate = "raw-window-metal@0.4.0", reason = "ash-window and the native Metal backend require different major versions" },
+
+    # Rust-GPU reflection and SPIRV-Cross currently target different SPIR-V SDK
+    # support crates. Both are build-only dependencies.
+    { crate = "spirv@0.4.0", reason = "build-time MSL translation dependency" },
+]
 
 # Like skip but with entire direct & transitive dependency tree of crate
 skip-tree = [
