@@ -10,19 +10,19 @@ use std::{
 };
 
 use anyhow::Context;
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use ash::vk;
 use dirk_rhi::Extent3d;
-#[cfg(not(feature = "editor"))]
+#[cfg(not(renderer_editor))]
 use dirk_rhi::{ImageAspects, ImageCopy};
 
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use dirk_platform::WindowInputEvent;
 use dirk_platform::{PlatformEvent, WindowEvent, WindowId};
 use dirk_player::PlayerId;
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use dirk_player::PlayerInputSender;
-#[cfg(not(feature = "editor"))]
+#[cfg(not(renderer_editor))]
 use dirk_player::PlayerPresentationAssignments;
 
 use dirk_universe::{Entity, Universe, UniverseBuilder, WorldId};
@@ -36,13 +36,13 @@ mod utils;
 use utils::{Frame, RendererProperties};
 
 mod errors;
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 pub use egui;
 pub use errors::{Error, Result};
 
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 mod egui_integration;
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use egui_integration::{EguiFrameInput, EguiState};
 
 mod window;
@@ -74,9 +74,9 @@ mod shaders;
 mod viewport;
 use viewport::{Viewport, ViewportSettings};
 
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 mod viewport_editor;
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use viewport_editor::ViewportEditor;
 
 mod frame_graph;
@@ -97,11 +97,11 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
 
         builder.add_subsystem(|ctx| {
             let platform_windows = ctx.resource::<dirk_platform::PlatformWindows>()?;
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             let editor = ctx.resource::<dirk_engine::editor::EditorServices>()?;
-            #[cfg(not(feature = "editor"))]
+            #[cfg(not(renderer_editor))]
             let presentation_assignments = ctx.resource::<PlayerPresentationAssignments>()?;
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             let player_input_sender = ctx.resource::<PlayerInputSender>()?;
 
             let create_info = RendererCreateInfo::from_engine_metadata(ctx.handle().metadata())?;
@@ -112,11 +112,11 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
                 &main_window,
                 ctx.events(),
                 platform_windows.clone(),
-                #[cfg(not(feature = "editor"))]
+                #[cfg(not(renderer_editor))]
                 presentation_assignments,
-                #[cfg(feature = "editor")]
+                #[cfg(renderer_editor)]
                 player_input_sender,
-                #[cfg(feature = "editor")]
+                #[cfg(renderer_editor)]
                 editor,
             )?;
 
@@ -166,23 +166,23 @@ struct Renderer {
     windows: HashMap<WindowId, Window>,
     window_order: Vec<WindowId>,
     platform_windows: PlatformWindows,
-    #[cfg(not(feature = "editor"))]
+    #[cfg(not(renderer_editor))]
     presentation_assignments: PlayerPresentationAssignments,
     /// All of the internal [`world::World`] representations.
     scene_manager: SceneManager,
     /// The management for all the models.
     models: models::ModelRegistry,
     /// Immediate-mode UI rendering state.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     egui: EguiState,
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     egui_window: Option<WindowId>,
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     egui_input_consumer: dirk_events::Consumer<WindowInputEvent>,
     /// Editor window registry rendered through egui.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     editor: dirk_engine::editor::EditorServices,
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     viewport_editor: ViewportEditor,
     /// Player-owned internal scene render outputs.
     viewports: HashMap<PlayerId, Viewport>,
@@ -231,7 +231,7 @@ impl dirk_engine::Subsystem for Renderer {
         universe: &Universe,
     ) -> anyhow::Result<()> {
         self.tick(delta_time)?;
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         {
             let ctx = self.begin_frame();
             let frame = dirk_engine::editor::EditorRenderContext::new(delta_time, handle);
@@ -240,7 +240,7 @@ impl dirk_engine::Subsystem for Renderer {
             self.editor.render_ui(&ctx, &frame, universe)?;
         }
 
-        #[cfg(not(feature = "editor"))]
+        #[cfg(not(renderer_editor))]
         {
             let _ = (handle, universe);
         }
@@ -272,9 +272,9 @@ impl Renderer {
         window: &dirk_platform::Window,
         event_manager: &dirk_events::EventManager,
         platform_windows: PlatformWindows,
-        #[cfg(not(feature = "editor"))] presentation_assignments: PlayerPresentationAssignments,
-        #[cfg(feature = "editor")] player_input_sender: PlayerInputSender,
-        #[cfg(feature = "editor")] editor: dirk_engine::editor::EditorServices,
+        #[cfg(not(renderer_editor))] presentation_assignments: PlayerPresentationAssignments,
+        #[cfg(renderer_editor)] player_input_sender: PlayerInputSender,
+        #[cfg(renderer_editor)] editor: dirk_engine::editor::EditorServices,
     ) -> Result<Self> {
         #[cfg(target_vendor = "apple")]
         info!("initializing renderer RHI with Metal");
@@ -344,9 +344,9 @@ impl Renderer {
 
         let models = models::ModelRegistry::new(&render_device, event_manager)?;
         let scene_manager = SceneManager::init(&render_device)?;
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         let egui = EguiState::new(&render_device)?;
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         let viewport_editor = ViewportEditor::new(&render_device, player_input_sender)?;
 
         let windows = {
@@ -363,20 +363,20 @@ impl Renderer {
             windows,
             window_order,
             platform_windows,
-            #[cfg(not(feature = "editor"))]
+            #[cfg(not(renderer_editor))]
             presentation_assignments,
             scene_manager,
             viewports: HashMap::new(),
             models,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             egui,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             egui_window: None,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             editor,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             viewport_editor,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             egui_input_consumer: event_manager.subscribe(),
 
             frames,
@@ -394,7 +394,7 @@ impl Renderer {
     /// Begins a frame.
     ///
     /// Returns an [`egui::Context`] for rendering.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     pub fn begin_frame(&mut self) -> egui::Context {
         let input = self.egui_frame_input();
         self.egui_window = Some(input.window_id);
@@ -402,7 +402,7 @@ impl Renderer {
     }
 
     // TODO: shouldn't be necessary
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     fn primary_extent(&self) -> vk::Extent2D {
         self.primary_window_id()
             .and_then(|id| self.windows.get(&id))
@@ -418,12 +418,12 @@ impl Renderer {
             )
     }
 
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     fn primary_window_id(&self) -> Option<WindowId> {
         self.window_order.first().copied()
     }
 
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     #[allow(clippy::cast_possible_truncation)]
     fn egui_frame_input(&mut self) -> EguiFrameInput {
         let window_id = self
@@ -491,7 +491,7 @@ impl Renderer {
     /// world (unless in [`WorldEvent::Created`] or [`WorldEvent::Destroyed`].
     fn tick(&mut self, _delta_time: f64) -> Result<()> {
         for event in self.player_spawn_consumer.consume_all() {
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             self.viewport_editor.remove_viewport(event.id, &self.editor);
 
             let viewport = Viewport::new(
@@ -502,14 +502,14 @@ impl Renderer {
                     self.render_device.properties.surface_format,
                 ),
             )?;
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             self.viewport_editor
                 .add_viewport(event.id, &viewport, &self.editor, &mut self.egui)?;
             self.viewports.insert(event.id, viewport);
         }
 
         for event in self.player_despawn_consumer.consume_all() {
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             self.viewport_editor.remove_viewport(event.id, &self.editor);
             self.viewports.remove(&event.id);
         }
@@ -583,14 +583,14 @@ impl Renderer {
     ///
     /// Backend errors can occur during rendering.
     fn end_frame(&mut self) -> Result<()> {
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         self.egui.end_frame();
 
         let frame_index = self.current_frame();
         if let Some(completion) = self.frames[frame_index].completion.take() {
             completion.wait(u64::MAX)?;
         }
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         {
             self.egui.free_textures_for_frame(frame_index)?;
             self.viewport_editor
@@ -598,7 +598,7 @@ impl Renderer {
             self.viewport_editor
                 .apply_resize_requests(&mut self.viewports, &mut self.egui)?;
         }
-        #[cfg(not(feature = "editor"))]
+        #[cfg(not(renderer_editor))]
         self.update_non_editor_presentation()?;
 
         self.render_device.rhi.collect_garbage()?;
@@ -722,7 +722,7 @@ impl Renderer {
         &mut self,
         frame_index: usize,
         targets: &[PresentationTarget],
-        #[cfg_attr(feature = "editor", allow(unused_variables))] viewport_submission: Option<
+        #[cfg_attr(renderer_editor, allow(unused_variables))] viewport_submission: Option<
             &ViewportRenderSubmission,
         >,
     ) -> Result<Option<ActiveRecordedCommands>> {
@@ -731,7 +731,7 @@ impl Renderer {
         }
 
         let mut graph = RenderGraph::new();
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         let mut egui_target = None;
         for target in targets {
             let swapchain = graph.import_texture(target.image.import());
@@ -741,12 +741,12 @@ impl Renderer {
                 frame_graph::AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
             );
 
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             if Some(target.window) == self.egui_window {
                 egui_target = Some((swapchain, target.extent));
             }
 
-            #[cfg(not(feature = "editor"))]
+            #[cfg(not(renderer_editor))]
             if let Some(viewport) = self.assigned_viewport_for_window(target.window) {
                 let rendered_this_frame = viewport_submission.is_some_and(|submission| {
                     submission.rendered_players.contains(&viewport.player())
@@ -787,7 +787,7 @@ impl Renderer {
             }
         }
 
-        #[cfg(feature = "editor")]
+        #[cfg(renderer_editor)]
         if let Some((swapchain, extent)) = egui_target {
             let mut egui_pass = graph.add_pass("egui");
             egui_pass.write_color_attachment(swapchain, frame_graph::AttachmentInfo::load_store());
@@ -814,7 +814,7 @@ impl Renderer {
         Ok(Some(cmd))
     }
 
-    #[cfg(not(feature = "editor"))]
+    #[cfg(not(renderer_editor))]
     fn update_non_editor_presentation(&mut self) -> Result<()> {
         let assignments = self.current_non_editor_assignments();
         self.presentation_assignments.set(assignments.clone());
@@ -832,7 +832,7 @@ impl Renderer {
         Ok(())
     }
 
-    #[cfg(not(feature = "editor"))]
+    #[cfg(not(renderer_editor))]
     fn current_non_editor_assignments(&self) -> Vec<(WindowId, PlayerId)> {
         let mut players = self.viewports.keys().copied().collect::<Vec<_>>();
         players.sort_unstable();
@@ -844,7 +844,7 @@ impl Renderer {
             .collect()
     }
 
-    #[cfg(not(feature = "editor"))]
+    #[cfg(not(renderer_editor))]
     fn assigned_viewport_for_window(&self, window: WindowId) -> Option<&Viewport> {
         self.presentation_assignments
             .player_for_window(window)

@@ -27,10 +27,18 @@ fn main() -> anyhow::Result<()> {
     dirk_build::configure_platform();
 
     println!("cargo:rustc-check-cfg=cfg(validation)");
+    println!("cargo:rustc-check-cfg=cfg(renderer_editor)");
 
     let profile = std::env::var("PROFILE").unwrap_or_default();
     if profile != "release" {
         println!("cargo:rustc-cfg=validation");
+    }
+    // The current editor adapter consumes Vulkan-native handles. Keep Apple
+    // builds on the normal presentation path even when CI enables all features.
+    if std::env::var_os("CARGO_FEATURE_EDITOR").is_some()
+        && std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
+    {
+        println!("cargo:rustc-cfg=renderer_editor");
     }
 
     build_shaders()?;

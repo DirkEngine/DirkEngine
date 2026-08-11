@@ -8,7 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 pub enum Error {
     /// An error returned by the temporary Vulkan editor adapter.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     #[error("Vulkan error: {0}")]
     VulkanError(#[from] ash::vk::Result),
     /// Error produced by the render hardware interface.
@@ -16,7 +16,7 @@ pub enum Error {
     Rhi(#[from] dirk_rhi::Error),
 
     /// An error loading Vulkan functions for the temporary editor adapter.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     #[error("Error loading Vulkan functions: {0}")]
     Loading(#[from] ash::LoadingError),
     /// Error produced by the [`platform`] crate.
@@ -26,7 +26,7 @@ pub enum Error {
     #[error("assets error: {0}")]
     AssetError(#[from] dirk_assets::Error),
     /// Error produced by the egui Vulkan renderer.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     #[error("egui renderer error: {0}")]
     EguiRenderer(#[from] egui_ash_renderer::RendererError),
 
