@@ -9,31 +9,23 @@
 //! Cross-image blits are supported when source and destination extents match;
 //! scaled cross-image blits return [`dirk_rhi::Error::Unsupported`].
 
-#[cfg(target_vendor = "apple")]
+#![cfg(target_vendor = "apple")]
+
 mod backend;
-#[cfg(target_vendor = "apple")]
 mod command;
-#[cfg(target_vendor = "apple")]
 mod convert;
-#[cfg(target_vendor = "apple")]
 mod presentation;
-#[cfg(target_vendor = "apple")]
 mod resource;
 
-#[cfg(target_vendor = "apple")]
 pub use backend::MetalBackend;
-#[cfg(target_vendor = "apple")]
 pub use command::{MetalCommandBuffer, MetalCommandPool};
-#[cfg(target_vendor = "apple")]
 pub use presentation::{MetalSurface, MetalSurfaceFrame, MetalSwapchain};
-#[cfg(target_vendor = "apple")]
 pub use resource::{
     MetalBindGroup, MetalBindGroupLayout, MetalBuffer, MetalFence, MetalGraphicsPipeline,
     MetalImage, MetalImageView, MetalPipelineLayout, MetalSampler, MetalShader,
     MetalTimelineSemaphore,
 };
 
-#[cfg(target_vendor = "apple")]
 fn backend_error(error: impl std::fmt::Display) -> dirk_rhi::Error {
     dirk_rhi::Error::Backend(anyhow::anyhow!("{error}"))
 }
