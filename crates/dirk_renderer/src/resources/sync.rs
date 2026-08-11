@@ -1,13 +1,15 @@
 //! Synchronization wrappers backed by the active RHI.
 
 use dirk_rhi::{Backend as _, Fence as _, TimelineSemaphore as _};
-use dirk_rhi_vulkan::{VulkanFence, VulkanTimelineSemaphore};
 
-use crate::{Result, resources::ActiveRhi};
+use crate::{
+    Result,
+    resources::{ActiveFence, ActiveRhi, ActiveTimelineSemaphore},
+};
 
 /// Reusable per-frame completion fence.
 pub struct Fence {
-    inner: VulkanFence,
+    inner: ActiveFence,
 }
 
 impl Fence {
@@ -31,7 +33,7 @@ impl Fence {
     }
 
     /// Returns the backend fence used in an RHI submission.
-    pub(crate) fn rhi(&self) -> &VulkanFence {
+    pub(crate) fn rhi(&self) -> &ActiveFence {
         &self.inner
     }
 }
@@ -39,7 +41,7 @@ impl Fence {
 /// Renderer timeline semaphore used to order viewport output.
 #[derive(Clone)]
 pub struct TimelineSemaphore {
-    inner: VulkanTimelineSemaphore,
+    inner: ActiveTimelineSemaphore,
 }
 
 impl TimelineSemaphore {
@@ -63,7 +65,7 @@ impl TimelineSemaphore {
         Ok(self.inner.value()?)
     }
 
-    pub(crate) fn rhi(&self) -> &VulkanTimelineSemaphore {
+    pub(crate) fn rhi(&self) -> &ActiveTimelineSemaphore {
         &self.inner
     }
 }

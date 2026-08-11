@@ -2,23 +2,24 @@
 
 use std::{marker::PhantomData, mem::size_of_val};
 
-use ash::vk;
 use dirk_rhi::{
     Backend as _, Buffer as _, BufferCopy, BufferDesc, BufferUsages, CommandBuffer as _,
     MemoryDomain,
 };
-use dirk_rhi_vulkan::VulkanBuffer;
-use gpu_allocator::MemoryLocation;
 
-use crate::{Result, resources::device::RenderDevice, shaders::metadata::VertexInput};
+use crate::{
+    Result,
+    resources::{ActiveBuffer, device::RenderDevice},
+    shaders::metadata::VertexInput,
+};
 
 pub struct Buffer<Type: BuffType = Custom> {
-    inner: VulkanBuffer,
+    inner: ActiveBuffer,
     _type: PhantomData<Type>,
 }
 
 pub trait BuffType {
-    fn get_usage() -> vk::BufferUsageFlags;
+    fn usage() -> BufferUsages;
 }
 
 macro_rules! define_buff_type {
@@ -26,7 +27,7 @@ macro_rules! define_buff_type {
         pub struct $name;
 
         impl BuffType for $name {
-            fn get_usage() -> vk::BufferUsageFlags {
+            fn usage() -> BufferUsages {
                 $usage
             }
         }
@@ -37,20 +38,20 @@ macro_rules! define_buff_type {
     };
 }
 
-define_buff_type!(Custom, vk::BufferUsageFlags::STORAGE_BUFFER);
+define_buff_type!(Custom, BufferUsages::STORAGE);
 
 impl<Type: BuffType> Buffer<Type> {
     pub fn create_custom(
         device: &RenderDevice,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        location: MemoryLocation,
+        size: u64,
+        usage: BufferUsages,
+        memory: MemoryDomain,
     ) -> Result<Self> {
         let inner = device.rhi.create_buffer(&BufferDesc {
             label: "renderer buffer",
             size,
-            usage: buffer_usage(usage),
-            memory: memory_domain(location),
+            usage,
+            memory,
         })?;
         Ok(Self {
             inner,
@@ -58,19 +59,11 @@ impl<Type: BuffType> Buffer<Type> {
         })
     }
 
-    pub fn create(
-        device: &RenderDevice,
-        size: vk::DeviceSize,
-        location: MemoryLocation,
-    ) -> Result<Self> {
-        Self::create_custom(device, size, Type::get_usage(), location)
+    pub fn create(device: &RenderDevice, size: u64, memory: MemoryDomain) -> Result<Self> {
+        Self::create_custom(device, size, Type::usage(), memory)
     }
 
-    pub fn buffer(&self) -> vk::Buffer {
-        self.inner.raw()
-    }
-
-    pub(crate) fn rhi(&self) -> &VulkanBuffer {
+    pub(crate) fn rhi(&self) -> &ActiveBuffer {
         &self.inner
     }
 
@@ -80,8 +73,8 @@ impl<Type: BuffType> Buffer<Type> {
         let staging = Buffer::<Custom>::create_custom(
             device,
             size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            MemoryLocation::CpuToGpu,
+            BufferUsages::COPY_SRC,
+            MemoryDomain::Upload,
         )?;
         let bytes =
             unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
@@ -90,8 +83,8 @@ impl<Type: BuffType> Buffer<Type> {
         let output = Self::create_custom(
             device,
             size,
-            vk::BufferUsageFlags::TRANSFER_DST | Type::get_usage(),
-            MemoryLocation::GpuOnly,
+            BufferUsages::COPY_DST | Type::usage(),
+            MemoryDomain::Device,
         )?;
         let mut command = device.transfer_pool.begin_single_time()?;
         command.rhi_mut().copy_buffer(
@@ -108,7 +101,7 @@ impl<Type: BuffType> Buffer<Type> {
     }
 }
 
-define_buff_type!(Uniform, vk::BufferUsageFlags::UNIFORM_BUFFER);
+define_buff_type!(Uniform, BufferUsages::UNIFORM);
 
 impl UniformBuffer {
     pub fn write<T: Copy>(&self, data: &T) -> Result<()> {
@@ -122,8 +115,8 @@ impl UniformBuffer {
 
 struct Vertex;
 impl BuffType for Vertex {
-    fn get_usage() -> vk::BufferUsageFlags {
-        vk::BufferUsageFlags::VERTEX_BUFFER
+    fn usage() -> BufferUsages {
+        BufferUsages::VERTEX
     }
 }
 
@@ -140,34 +133,9 @@ impl<I: VertexInput> VertexBuffer<I> {
         })
     }
 
-    pub fn buffer(&self) -> vk::Buffer {
-        self.buff.buffer()
+    pub(crate) fn buffer(&self) -> &ActiveBuffer {
+        self.buff.rhi()
     }
 }
 
-define_buff_type!(Index, vk::BufferUsageFlags::INDEX_BUFFER);
-
-fn buffer_usage(usage: vk::BufferUsageFlags) -> BufferUsages {
-    let mut result = BufferUsages::NONE;
-    for (vulkan, rhi) in [
-        (vk::BufferUsageFlags::TRANSFER_SRC, BufferUsages::COPY_SRC),
-        (vk::BufferUsageFlags::TRANSFER_DST, BufferUsages::COPY_DST),
-        (vk::BufferUsageFlags::VERTEX_BUFFER, BufferUsages::VERTEX),
-        (vk::BufferUsageFlags::INDEX_BUFFER, BufferUsages::INDEX),
-        (vk::BufferUsageFlags::UNIFORM_BUFFER, BufferUsages::UNIFORM),
-        (vk::BufferUsageFlags::STORAGE_BUFFER, BufferUsages::STORAGE),
-    ] {
-        if usage.contains(vulkan) {
-            result |= rhi;
-        }
-    }
-    result
-}
-
-fn memory_domain(location: MemoryLocation) -> MemoryDomain {
-    match location {
-        MemoryLocation::GpuOnly | MemoryLocation::Unknown => MemoryDomain::Device,
-        MemoryLocation::CpuToGpu => MemoryDomain::Upload,
-        MemoryLocation::GpuToCpu => MemoryDomain::Readback,
-    }
-}
+define_buff_type!(Index, BufferUsages::INDEX);

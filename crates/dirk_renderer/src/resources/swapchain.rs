@@ -2,19 +2,17 @@
 
 use std::sync::Arc;
 
-use ash::vk;
-use dirk_rhi::{Backend as _, SurfaceFrame as _, Swapchain as _, SwapchainDesc};
-use dirk_rhi_vulkan::{VulkanSurface, VulkanSurfaceFrame, VulkanSwapchain};
+use dirk_rhi::{Backend as _, Extent3d, Format, SurfaceFrame as _, Swapchain as _, SwapchainDesc};
 
 use crate::{
     Result,
     frame_graph::ImportedTexture,
-    resources::{ActiveRhi, device::RenderDevice},
+    resources::{ActiveRhi, ActiveSurface, ActiveSurfaceFrame, ActiveSwapchain},
 };
 
 /// Acquired image from an RHI swapchain.
 pub struct RenderImage {
-    inner: VulkanSurfaceFrame,
+    inner: ActiveSurfaceFrame,
 }
 
 impl RenderImage {
@@ -29,11 +27,11 @@ impl RenderImage {
         }
     }
 
-    pub(crate) fn rhi(&self) -> &VulkanSurfaceFrame {
+    pub(crate) fn rhi(&self) -> &ActiveSurfaceFrame {
         &self.inner
     }
 
-    pub fn format(&self) -> dirk_rhi::Format {
+    pub fn format(&self) -> Format {
         self.inner.format()
     }
 }
@@ -41,18 +39,17 @@ impl RenderImage {
 /// Reconfigurable renderer swapchain.
 pub struct Swapchain {
     rhi: Arc<ActiveRhi>,
-    inner: VulkanSwapchain,
-    extent: vk::Extent2D,
+    inner: ActiveSwapchain,
 }
 
 impl Swapchain {
     /// Creates a swapchain for a renderer window.
     pub fn build(
-        device: &RenderDevice,
-        surface: &VulkanSurface,
-        window_size: vk::Extent2D,
+        rhi: &Arc<ActiveRhi>,
+        surface: &ActiveSurface,
+        window_size: Extent3d,
     ) -> Result<Self> {
-        let inner = device.rhi.create_swapchain(&SwapchainDesc {
+        let inner = rhi.create_swapchain(&SwapchainDesc {
             label: "renderer window swapchain",
             surface,
             width: window_size.width,
@@ -62,30 +59,28 @@ impl Swapchain {
                 | dirk_rhi::ImageUsages::PRESENT,
         })?;
         Ok(Self {
-            rhi: device.rhi.clone(),
+            rhi: rhi.clone(),
             inner,
-            extent: window_size,
         })
     }
 
-    pub fn extent(&self) -> vk::Extent2D {
-        self.extent
+    pub fn extent(&self) -> Extent3d {
+        self.inner.extent()
+    }
+
+    pub fn format(&self) -> Format {
+        self.inner.format()
     }
 
     pub fn acquire_next_image(&mut self) -> Result<RenderImage> {
-        let inner = self.inner.acquire()?;
-        let extent = inner.extent();
-        self.extent = vk::Extent2D {
-            width: extent.width,
-            height: extent.height,
-        };
-        Ok(RenderImage { inner })
+        Ok(RenderImage {
+            inner: self.inner.acquire()?,
+        })
     }
 
-    pub fn recreate(&mut self, window_size: vk::Extent2D) -> Result<()> {
+    pub fn recreate(&mut self, window_size: Extent3d) -> Result<()> {
         self.rhi.wait_idle()?;
         self.inner.resize(window_size.width, window_size.height)?;
-        self.extent = window_size;
         Ok(())
     }
 

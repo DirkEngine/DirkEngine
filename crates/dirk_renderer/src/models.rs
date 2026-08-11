@@ -13,16 +13,16 @@ use std::{
     ops::Deref,
 };
 
-use ash::vk;
+use dirk_rhi::{CommandBuffer as _, IndexFormat};
 
 use crate::{
     Error, Result,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipelineRenderingContext},
     resources::{
+        ActiveSampler,
         buffer::{IndexBuffer, VertexBuffer},
-        command_pool::CommandBuffer,
         descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
+            DescriptorAllocator, DescriptorSet,
             sets::{MaterialSet, ObjectSet, SceneSet},
         },
         device::RenderDevice,
@@ -81,7 +81,7 @@ impl<T> Deref for Handle<T> {
 
 pub struct Texture {
     pub image: Image,
-    pub sampler: dirk_rhi_vulkan::VulkanSampler,
+    pub sampler: ActiveSampler,
 }
 
 struct Primitive {
@@ -157,10 +157,9 @@ impl ModelRegistry {
     pub fn render_model(
         &self,
         handle: &dirk_assets::AssetHandle,
-        cmd: &CommandBuffer,
         scene_set: &DescriptorSet<SceneSet>,
         proxy_set: &DescriptorSet<ObjectSet>,
-        ctx: &GraphicsPipelineRenderingContext<'_, MainPipelineSpec>,
+        ctx: &mut GraphicsPipelineRenderingContext<'_, MainPipelineSpec>,
     ) -> dirk_assets::Result<()> {
         if handle.asset_type() != dirk_assets::AssetType::Model {
             return Err(dirk_assets::Error::TypeMismatch(handle.to_string()));
@@ -183,8 +182,14 @@ impl ModelRegistry {
 
             ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set));
             ctx.bind_vertex_buffer(&prim.vertex_buffer);
-            cmd.bind_index_buffer(prim.index_buffer.buffer(), 0, vk::IndexType::UINT32);
-            cmd.draw_indexed(prim.index_count, 1, 0, 0, 0);
+            ctx.command().rhi_mut().bind_index_buffer(
+                prim.index_buffer.rhi(),
+                0,
+                IndexFormat::Uint32,
+            );
+            ctx.command()
+                .rhi_mut()
+                .draw_indexed(prim.index_count, 1, 0, 0, 0);
         }
         Ok(())
     }
@@ -200,11 +205,7 @@ impl ModelRegistry {
             height: 1,
         };
         let texture = Image::upload_texture(device, &white)?;
-        let set = material_alloc.allocate()?;
-
-        DescriptorWriter::new(&device.device)
-            .combined_image_sampler(&set, 0, texture.image.view(), texture.sampler.raw())
-            .flush();
+        let set = material_alloc.sampled_image(0, texture.image.rhi_view(), &texture.sampler)?;
 
         Ok((
             Material {
@@ -274,7 +275,6 @@ impl ModelRegistry {
         let mut pending = Vec::with_capacity(materials.len());
 
         for mat in materials {
-            let set = self.material_alloc.allocate()?;
             let base_color = mat
                 .pbr_metallic_roughness()
                 .base_color_texture()
@@ -287,30 +287,17 @@ impl ModelRegistry {
                 })
                 .transpose()?;
 
-            let (view, sampler) = base_color.map_or_else(
-                || {
-                    (
-                        self.fallback_texture.image.view(),
-                        self.fallback_texture.sampler.raw(),
-                    )
-                },
-                |tex_handle| {
-                    let tex = &self.textures[*tex_handle];
-                    (tex.image.view(), tex.sampler.raw())
-                },
-            );
-            pending.push((base_color, set, view, sampler));
+            let texture =
+                base_color.map_or(&self.fallback_texture, |handle| &self.textures[*handle]);
+            let set =
+                self.material_alloc
+                    .sampled_image(0, texture.image.rhi_view(), &texture.sampler)?;
+            pending.push((base_color, set));
         }
-
-        let mut writer = DescriptorWriter::new(&self.device.device);
-        for (_, set, view, sampler) in &pending {
-            writer = writer.combined_image_sampler(set, 0, *view, *sampler);
-        }
-        writer.flush();
 
         Ok(pending
             .into_iter()
-            .map(|(base_color, set, _, _)| {
+            .map(|(base_color, set)| {
                 Handle::new(self.materials.insert(Material { base_color, set }))
             })
             .collect())

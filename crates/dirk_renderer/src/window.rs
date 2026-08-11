@@ -1,12 +1,13 @@
-use ash::vk;
+use std::sync::Arc;
+
 use dirk_platform::WindowId;
-use dirk_rhi::Backend as _;
+use dirk_rhi::{Backend as _, Extent3d, Format};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
     Result,
     resources::{
-        device::RenderDevice,
+        ActiveRhi,
         swapchain::{RenderImage, Swapchain},
     },
 };
@@ -23,19 +24,16 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn build(device: &RenderDevice, plat_window: &dirk_platform::Window) -> Result<Self> {
-        let surface = device.rhi.create_surface(dirk_rhi::SurfaceCreateInfo {
+    pub fn build(rhi: &Arc<ActiveRhi>, plat_window: &dirk_platform::Window) -> Result<Self> {
+        let surface = rhi.create_surface(dirk_rhi::SurfaceCreateInfo {
             display: plat_window.display_handle()?.as_raw(),
             window: plat_window.window_handle()?.as_raw(),
         })?;
 
         let window_size = plat_window.size();
-        let size = vk::Extent2D {
-            width: window_size.width,
-            height: window_size.height,
-        };
+        let size = Extent3d::new_2d(window_size.width, window_size.height);
 
-        let swapchain = Swapchain::build(device, &surface, size)?;
+        let swapchain = Swapchain::build(rhi, &surface, size)?;
 
         Ok(Self {
             id: plat_window.id(),
@@ -47,13 +45,16 @@ impl Window {
     pub fn id(&self) -> WindowId {
         self.id
     }
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent3d {
         self.swapchain.extent()
+    }
+    pub fn format(&self) -> Format {
+        self.swapchain.format()
     }
     pub fn next_image(&mut self) -> Result<RenderImage> {
         self.swapchain.acquire_next_image()
     }
-    pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
+    pub fn resize(&mut self, extent: Extent3d) -> Result<()> {
         self.swapchain.recreate(extent)
     }
     pub fn present(&mut self, image: RenderImage) -> Result<()> {

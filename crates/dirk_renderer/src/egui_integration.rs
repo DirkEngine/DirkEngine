@@ -30,7 +30,18 @@ pub struct EguiFrameInput {
 
 impl EguiState {
     pub fn new(device: &RenderDevice) -> Result<Self> {
-        let surface_format = device.properties.surface_format.format;
+        let surface_format = match device.properties.surface_format {
+            dirk_rhi::Format::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            dirk_rhi::Format::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
+            dirk_rhi::Format::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+            dirk_rhi::Format::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
+            _ => {
+                return Err(dirk_rhi::Error::Unsupported(
+                    "egui requires an eight-bit color swapchain",
+                )
+                .into());
+            }
+        };
         let renderer = egui_ash_renderer::Renderer::with_default_allocator(
             device.rhi.instance(),
             device.rhi.physical_device(),

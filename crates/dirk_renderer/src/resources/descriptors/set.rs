@@ -1,51 +1,33 @@
-//! Owned descriptor set handle.
+//! Typed bind group owned by the active RHI.
 
 use std::marker::PhantomData;
 
+#[cfg(feature = "editor")]
 use ash::vk;
 
-use crate::resources::{
-    descriptors::layouts::SetLayout,
-    device::{Garbage, RenderDevice},
-};
+use crate::resources::{ActiveBindGroup, descriptors::layouts::SetLayout};
 
-/// An owned Vulkan descriptor set with deferred RAII cleanup.
-///
-/// The phantom type `L` ensures that descriptor sets allocated for different
-/// layouts cannot be mixed up at the call site.
+/// A backend bind group tagged with its type-level renderer layout.
 pub struct DescriptorSet<L: SetLayout> {
-    device: RenderDevice,
-    pool: vk::DescriptorPool,
-    raw: vk::DescriptorSet,
+    inner: ActiveBindGroup,
     _layout: PhantomData<L>,
 }
 
 impl<L: SetLayout> DescriptorSet<L> {
-    /// Returns the raw Vulkan handle.
-    #[inline]
-    pub fn raw(&self) -> vk::DescriptorSet {
-        self.raw
-    }
-
-    pub(super) fn new(
-        device: RenderDevice,
-        pool: vk::DescriptorPool,
-        raw: vk::DescriptorSet,
-    ) -> Self {
+    pub(super) fn new(inner: ActiveBindGroup) -> Self {
         Self {
-            device,
-            pool,
-            raw,
+            inner,
             _layout: PhantomData,
         }
     }
-}
 
-impl<L: SetLayout> Drop for DescriptorSet<L> {
-    fn drop(&mut self) {
-        self.device.destroy(Garbage::DescriptorSet {
-            pool: self.pool,
-            set: self.raw,
-        });
+    pub(crate) fn group(&self) -> &ActiveBindGroup {
+        &self.inner
+    }
+
+    /// Returns the Vulkan descriptor set used by the temporary editor adapter.
+    #[cfg(feature = "editor")]
+    pub fn raw(&self) -> vk::DescriptorSet {
+        self.inner.raw()
     }
 }

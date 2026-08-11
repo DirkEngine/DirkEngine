@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use ash::vk;
-use dirk_rhi::{Format, ImageUsages};
+use dirk_rhi::{
+    CommandBuffer as _, Extent3d, Format, ImageUsages, MemoryDomain, Rect, SampleCount, Viewport,
+};
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
     Error, MAX_FRAMES_IN_FLIGHT, Result,
@@ -15,7 +15,7 @@ use crate::{
         buffer::UniformBuffer,
         command_pool::CommandBuffer,
         descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
+            DescriptorAllocator, DescriptorSet,
             sets::{ObjectSet, SceneSet},
         },
         device::RenderDevice,
@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub(crate) struct SceneRenderSettings {
-    pub extent: vk::Extent2D,
+    pub extent: Extent3d,
     pub format: Format,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
@@ -71,17 +71,17 @@ impl SceneManager {
         camera: Entity,
         settings: SceneRenderSettings,
         target: TextureHandle,
-    ) -> Result<()> {
+    ) {
         let depth = graph.create_texture(TextureDesc {
             width: settings.extent.width,
             height: settings.extent.height,
-            format: crate::resources::image::rhi_format(self.device.properties.depth_format)?,
+            format: self.device.properties.depth_format,
             usage: ImageUsages::DEPTH_STENCIL_ATTACHMENT,
-            samples: crate::resources::image::rhi_samples(self.device.properties.msaa_samples)?,
+            samples: self.device.properties.msaa_samples,
             imported: None,
         });
 
-        let msaa_color = if self.device.properties.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+        let msaa_color = if self.device.properties.msaa_samples == SampleCount::One {
             None
         } else {
             Some(graph.create_texture(TextureDesc {
@@ -89,7 +89,7 @@ impl SceneManager {
                 height: settings.extent.height,
                 format: settings.format,
                 usage: ImageUsages::TRANSIENT_ATTACHMENT | ImageUsages::COLOR_ATTACHMENT,
-                samples: crate::resources::image::rhi_samples(self.device.properties.msaa_samples)?,
+                samples: self.device.properties.msaa_samples,
                 imported: None,
             }))
         };
@@ -109,7 +109,6 @@ impl SceneManager {
         pass.execute(Box::new(move |_, cmd, _| {
             self.record_scene_draws(models, cmd, world, &settings, camera)
         }));
-        Ok(())
     }
     fn record_scene_draws(
         &self,
@@ -161,28 +160,31 @@ impl SceneManager {
             proxy.write_ubo(frame)?;
         }
 
-        let ctx = self.graphics_pipeline.bind(cmd);
+        let mut ctx = self.graphics_pipeline.bind(cmd);
 
         // the window size never gets anywhere near 2^23
         #[allow(clippy::cast_precision_loss)]
-        let viewport = vk::Viewport::default()
-            .width(settings.extent.width as f32)
-            .height(settings.extent.height as f32)
-            .min_depth(0.)
-            .max_depth(1.);
-        cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D::default())
-            .extent(settings.extent);
-        cmd.set_scissor(0, &[scissor]);
+        ctx.command().rhi_mut().set_viewport(Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: settings.extent.width as f32,
+            height: settings.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        });
+        ctx.command().rhi_mut().set_scissor(Rect {
+            x: 0,
+            y: 0,
+            width: settings.extent.width,
+            height: settings.extent.height,
+        });
 
         for proxy in &proxies {
             let Some(ref model) = proxy.model else {
                 continue;
             };
 
-            match models.render_model(model, cmd, &scene.sets[frame], &proxy.sets[frame], &ctx) {
+            match models.render_model(model, &scene.sets[frame], &proxy.sets[frame], &mut ctx) {
                 Ok(()) | Err(dirk_assets::Error::NotFound(_)) => (),
                 Err(err) => return Err(err.into()),
             }
@@ -284,21 +286,17 @@ impl Scene {
     /// Constructs the renderer stuff like command pools, descriptor sets, ... from
     /// the [Renderer].
     pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .scene_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
         let ubo_size = size_of::<SceneUbo>() as u64;
-        let build_ubo =
-            || UniformBuffer::create(&manager.device, ubo_size, MemoryLocation::CpuToGpu);
+        let build_ubo = || UniformBuffer::create(&manager.device, ubo_size, MemoryDomain::Upload);
         let ubo = [build_ubo()?, build_ubo()?];
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), ubo_size);
-        }
-        writer.flush();
+        let sets = [
+            manager
+                .scene_alloc
+                .uniform_buffer(0, ubo[0].rhi(), ubo_size)?,
+            manager
+                .scene_alloc
+                .uniform_buffer(0, ubo[1].rhi(), ubo_size)?,
+        ];
 
         Ok(Self {
             entities: HashSet::new(),
@@ -326,19 +324,12 @@ pub struct SceneProxy {
 impl SceneProxy {
     pub fn build(manager: &mut SceneManager) -> Result<Self> {
         let size = size_of::<ProxyUbo>() as u64;
-        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryLocation::CpuToGpu);
+        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryDomain::Upload);
         let ubo = [build_ubo()?, build_ubo()?];
-
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .proxy_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), size);
-        }
-        writer.flush();
+        let sets = [
+            manager.proxy_alloc.uniform_buffer(0, ubo[0].rhi(), size)?,
+            manager.proxy_alloc.uniform_buffer(0, ubo[1].rhi(), size)?,
+        ];
 
         Ok(Self {
             model: None,

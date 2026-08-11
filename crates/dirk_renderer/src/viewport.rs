@@ -1,12 +1,12 @@
-use ash::vk;
 use dirk_player::PlayerId;
+use dirk_rhi::{Extent3d, Format, ImageAspects, ImageUsages, SampleCount};
 use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
     Result,
     frame_graph::ImportedTexture,
     resources::{
+        ActiveTimelineSemaphore,
         device::RenderDevice,
         image::{Image, ImageCreateInfo},
         sync::TimelineSemaphore,
@@ -58,9 +58,9 @@ impl Viewport {
         &self.settings
     }
 
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
-    pub fn output_view(&self) -> vk::ImageView {
-        self.output.view()
+    #[cfg(feature = "editor")]
+    pub fn output_rhi_view(&self) -> &crate::resources::ActiveImageView {
+        self.output.rhi_view()
     }
     pub fn is_renderable(&self) -> bool {
         self.world.is_some() && self.camera.is_some()
@@ -69,7 +69,7 @@ impl Viewport {
         self.output_has_rendered
     }
 
-    pub fn resize(&mut self, device: &RenderDevice, extent: vk::Extent2D) -> Result<()> {
+    pub fn resize(&mut self, device: &RenderDevice, extent: Extent3d) -> Result<()> {
         self.reconfigure(
             device,
             ViewportSettings {
@@ -112,7 +112,7 @@ impl Viewport {
         self.last_render_value + 1
     }
 
-    pub fn render_semaphore(&self) -> &dirk_rhi_vulkan::VulkanTimelineSemaphore {
+    pub fn render_semaphore(&self) -> &ActiveTimelineSemaphore {
         self.render_semaphore.rhi()
     }
 
@@ -138,16 +138,12 @@ impl Viewport {
         Image::create_image(
             device,
             &ImageCreateInfo {
-                size: settings.extent,
+                extent: settings.extent,
                 format: settings.format,
-                tiling: vk::ImageTiling::OPTIMAL,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-                location: MemoryLocation::GpuOnly,
+                usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
                 mip_levels: 1,
-                num_samples: vk::SampleCountFlags::TYPE_1,
-                aspect_flags: vk::ImageAspectFlags::COLOR,
+                samples: SampleCount::One,
+                aspects: ImageAspects::COLOR,
             },
         )
     }
@@ -155,8 +151,8 @@ impl Viewport {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ViewportSettings {
-    pub extent: vk::Extent2D,
-    pub format: vk::Format,
+    pub extent: Extent3d,
+    pub format: Format,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,
@@ -164,7 +160,7 @@ pub(crate) struct ViewportSettings {
 }
 
 impl ViewportSettings {
-    pub(crate) fn new(extent: vk::Extent2D, format: vk::Format) -> Self {
+    pub(crate) fn new(extent: Extent3d, format: Format) -> Self {
         Self {
             extent,
             format,
@@ -177,10 +173,7 @@ impl ViewportSettings {
 
     fn clamped(self) -> Self {
         Self {
-            extent: vk::Extent2D {
-                width: self.extent.width.max(1),
-                height: self.extent.height.max(1),
-            },
+            extent: Extent3d::new_2d(self.extent.width.max(1), self.extent.height.max(1)),
             ..self
         }
     }

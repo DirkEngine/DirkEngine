@@ -1,9 +1,11 @@
 //! Compiled shader blobs used by the renderer.
 
+use dirk_rhi::Backend as _;
+
 macro_rules! shader_code {
     ($name:literal) => {
         ShaderCode {
-            code: (include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv"))),
+            spirv: include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".spv")),
         }
     };
 }
@@ -12,14 +14,23 @@ pub mod metadata;
 
 /// A block of shader bytecode and the shader entry point name.
 pub(crate) struct ShaderCode {
-    code: &'static [u8],
+    spirv: &'static [u8],
 }
 
 impl ShaderCode {
-    fn create_module(&self, device: &ash::Device) -> crate::Result<ash::vk::ShaderModule> {
-        let code = self.code_as_u32();
-        let info = ash::vk::ShaderModuleCreateInfo::default().code(code.as_slice());
-        Ok(unsafe { device.create_shader_module(&info, None)? })
+    fn create(
+        &self,
+        device: &crate::resources::device::RenderDevice,
+        stage: dirk_rhi::ShaderStage,
+        entry: &'static str,
+    ) -> crate::Result<crate::resources::ActiveShader> {
+        let words = self.code_as_u32();
+        Ok(device.rhi.create_shader(&dirk_rhi::ShaderDesc {
+            label: entry,
+            stage,
+            entry,
+            source: dirk_rhi::ShaderSource::SpirV(&words),
+        })?)
     }
 
     /// Returns the shader code as little-endian `u32` words.
@@ -30,10 +41,10 @@ impl ShaderCode {
     #[must_use]
     fn code_as_u32(&self) -> Vec<u32> {
         assert!(
-            self.code.len().is_multiple_of(4),
+            self.spirv.len().is_multiple_of(4),
             "SPIR-V size must be a multiple of 4"
         );
-        self.code
+        self.spirv
             .as_chunks::<4>()
             .0
             .iter()

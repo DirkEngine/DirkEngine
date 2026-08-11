@@ -1,4 +1,4 @@
-use ash::vk;
+use dirk_rhi::{Format, SampleCount, VertexAttribute};
 
 use crate::{
     resources::{
@@ -19,23 +19,20 @@ pub struct Vertex {
 impl VertexInput for Vertex {
     // the offset is far from u32::MAX
     #[allow(clippy::cast_possible_truncation)]
-    const ATTRIBUTES: &'static [vk::VertexInputAttributeDescription] = &[
-        vk::VertexInputAttributeDescription {
+    const ATTRIBUTES: &'static [VertexAttribute] = &[
+        VertexAttribute {
             location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: Format::Rgb32Float,
             offset: std::mem::offset_of!(Self, position) as u32,
         },
-        vk::VertexInputAttributeDescription {
+        VertexAttribute {
             location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
+            format: Format::Rgb32Float,
             offset: std::mem::offset_of!(Self, normal) as u32,
         },
-        vk::VertexInputAttributeDescription {
+        VertexAttribute {
             location: 2,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: Format::Rg32Float,
             offset: std::mem::offset_of!(Self, texcoord) as u32,
         },
     ];
@@ -54,9 +51,9 @@ pub struct Frame {
 }
 
 pub struct RendererProperties {
-    pub msaa_samples: vk::SampleCountFlags,
+    pub msaa_samples: SampleCount,
     #[allow(unused)]
     pub anisotropy: bool,
-    pub surface_format: vk::SurfaceFormatKHR,
-    pub depth_format: vk::Format,
+    pub surface_format: Format,
+    pub depth_format: Format,
 }

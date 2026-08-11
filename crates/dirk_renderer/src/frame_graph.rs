@@ -1,15 +1,13 @@
 //! Backend-neutral render graph executed through the renderer RHI.
 
+use crate::{
+    Result,
+    resources::{ActiveImage, ActiveImageView, command_pool::CommandBuffer, device::RenderDevice},
+};
 use dirk_rhi::{
     Backend as _, Color, CommandBuffer as _, DependencyInfo, Extent3d, Format, ImageAspects,
     ImageBarrier, ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp,
     RenderingInfo, SampleCount, StoreOp,
-};
-use dirk_rhi_vulkan::{VulkanImage, VulkanImageView};
-
-use crate::{
-    Result,
-    resources::{command_pool::CommandBuffer, device::RenderDevice},
 };
 
 /// Opaque index into the graph texture table.
@@ -36,8 +34,8 @@ pub struct TextureDesc {
 /// Externally owned image and its graph-boundary states.
 #[derive(Clone)]
 pub struct ImportedTexture {
-    pub image: VulkanImage,
-    pub view: VulkanImageView,
+    pub image: ActiveImage,
+    pub view: ActiveImageView,
     pub aspects: ImageAspects,
     pub initial_state: ImageState,
     pub final_state: ImageState,
@@ -45,8 +43,8 @@ pub struct ImportedTexture {
 
 /// Backend image resources resolved for a graph texture.
 pub struct ResolvedImage {
-    pub image: VulkanImage,
-    pub view: VulkanImageView,
+    pub image: ActiveImage,
+    pub view: ActiveImageView,
     pub aspects: ImageAspects,
 }
 

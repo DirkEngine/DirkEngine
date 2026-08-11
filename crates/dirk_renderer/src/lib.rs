@@ -10,10 +10,11 @@ use std::{
 };
 
 use anyhow::Context;
+#[cfg(feature = "editor")]
 use ash::vk;
-use dirk_rhi::{Backend as _, ImageUsages, SampleCount};
+use dirk_rhi::{Backend as _, Extent3d, ImageUsages, SampleCount};
 #[cfg(not(feature = "editor"))]
-use dirk_rhi::{CommandBuffer as _, Extent3d, ImageAspects, ImageCopy};
+use dirk_rhi::{CommandBuffer as _, ImageAspects, ImageCopy};
 
 #[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
@@ -49,9 +50,11 @@ use window::Window;
 
 mod resources;
 use resources::{
-    command_pool::CommandBuffer,
+    ActiveRhi,
+    command_pool::{CommandBuffer, CommandPool},
     device::{FrameCounters, RenderDevice},
     swapchain::RenderImage,
+    sync::Fence,
 };
 
 mod proxy;
@@ -65,7 +68,6 @@ use proxy::{
 mod render_commands;
 use render_commands::RenderCommandReceiver;
 
-mod init;
 mod models;
 mod pipeline;
 mod shaders;
@@ -128,15 +130,15 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 /// The information needed to create the renderer. This is primarily metadata
-/// used for Vulkan initialisation.
+/// passed to the active render backend during initialization.
 pub struct RendererCreateInfo {
-    /// The name of the engine. Used for vulkan initialisation.
+    /// The name of the engine.
     pub engine_name: CString,
-    /// The version of the engine. Used for vulkan initialisation.
+    /// The version of the engine.
     pub engine_version: Version,
-    /// The name of the application. Used for vulkan initialisation.
+    /// The name of the application.
     pub app_name: CString,
-    /// The version of the application. Used for vulkan initialisation.
+    /// The version of the application.
     pub app_version: Version,
 }
 
@@ -146,7 +148,7 @@ impl RendererCreateInfo {
     /// # Errors
     ///
     /// Returns an error if one of the metadata strings contains an interior NUL
-    /// byte and cannot be passed to Vulkan.
+    /// byte and cannot be passed to the render backend.
     pub fn from_engine_metadata(metadata: &dirk_engine::EngineMetadata) -> anyhow::Result<Self> {
         Ok(Self {
             engine_name: CString::new(metadata.engine_name())?,
@@ -205,7 +207,7 @@ struct Renderer {
 
 struct PresentationTarget {
     window: WindowId,
-    extent: vk::Extent2D,
+    extent: Extent3d,
     image: RenderImage,
 }
 
@@ -251,11 +253,22 @@ impl dirk_engine::Subsystem for Renderer {
 }
 
 impl Renderer {
-    /// Renderer initialisation. Creates all Vulkan & other renderer objects.
+    fn build_frames(render_device: &RenderDevice) -> Result<[Frame; MAX_FRAMES_IN_FLIGHT]> {
+        let build_frame = || -> Result<Frame> {
+            Ok(Frame {
+                command_pool: CommandPool::build(&render_device.rhi)?,
+                submitted_command_buffers: Vec::new(),
+                fence: Fence::signaled(&render_device.rhi)?,
+            })
+        };
+        Ok([build_frame()?, build_frame()?])
+    }
+
+    /// Renderer initialization. Creates the active backend and renderer objects.
     ///
     /// # Errors
     ///
-    /// Plenty of Vulkan & platform errors can occur during renderer intializing
+    /// Backend and platform errors can occur while initializing the renderer.
     pub fn init(
         create_info: &RendererCreateInfo,
         window: &dirk_platform::Window,
@@ -272,37 +285,23 @@ impl Renderer {
             window: window.window_handle()?.as_raw(),
         };
         let version = |version: Version| (version.major(), version.minor(), version.patch());
-        let rhi = Arc::new(dirk_rhi_vulkan::VulkanBackend::new(
-            &dirk_rhi::RhiCreateInfo {
-                engine_name: create_info.engine_name.to_string_lossy().as_ref(),
-                engine_version: version(create_info.engine_version),
-                application_name: create_info.app_name.to_string_lossy().as_ref(),
-                application_version: version(create_info.app_version),
-                validation: cfg!(validation),
-                compatible_surface: Some(surface_info),
-            },
-        )?);
+        let rhi = Arc::new(ActiveRhi::new(&dirk_rhi::RhiCreateInfo {
+            engine_name: create_info.engine_name.to_string_lossy().as_ref(),
+            engine_version: version(create_info.engine_version),
+            application_name: create_info.app_name.to_string_lossy().as_ref(),
+            application_version: version(create_info.app_version),
+            validation: cfg!(validation),
+            compatible_surface: Some(surface_info),
+        })?);
 
-        let (surface_loader, surface) = Self::create_surface(rhi.entry(), rhi.instance(), window)?;
-        let surface_format = Self::surface_format(&surface_loader, rhi.physical_device(), surface)?;
-        unsafe { surface_loader.destroy_surface(surface, None) };
+        let primary_window = Window::build(&rhi, window)?;
+        let surface_format = primary_window.format();
         let capabilities = rhi.capabilities();
         let properties = RendererProperties {
-            msaa_samples: match capabilities.max_samples {
-                dirk_rhi::SampleCount::One => vk::SampleCountFlags::TYPE_1,
-                dirk_rhi::SampleCount::Two => vk::SampleCountFlags::TYPE_2,
-                dirk_rhi::SampleCount::Four => vk::SampleCountFlags::TYPE_4,
-                dirk_rhi::SampleCount::Eight => vk::SampleCountFlags::TYPE_8,
-            },
+            msaa_samples: capabilities.max_samples,
             anisotropy: capabilities.max_sampler_anisotropy > 1,
             surface_format,
-            depth_format: match capabilities.depth_format {
-                dirk_rhi::Format::Depth16Unorm => vk::Format::D16_UNORM,
-                dirk_rhi::Format::Depth24UnormStencil8 => vk::Format::D24_UNORM_S8_UINT,
-                dirk_rhi::Format::Depth32Float => vk::Format::D32_SFLOAT,
-                dirk_rhi::Format::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
-                _ => return Err(Error::NoSupportedFormat),
-            },
+            depth_format: capabilities.depth_format,
         };
 
         let current_frame = Arc::new(AtomicUsize::new(0));
@@ -313,7 +312,6 @@ impl Renderer {
             properties,
             FrameCounters {
                 current_frame: current_frame.clone(),
-                frame_count: frame_count.clone(),
             },
         )?;
 
@@ -327,9 +325,8 @@ impl Renderer {
         let viewport_editor = ViewportEditor::new(&render_device, player_input_sender)?;
 
         let windows = {
-            let window = Window::build(&render_device, window)?;
             let mut windows = HashMap::new();
-            windows.insert(window.id(), window);
+            windows.insert(primary_window.id(), primary_window);
             windows
         };
         let mut window_order = windows.keys().copied().collect::<Vec<_>>();
@@ -389,7 +386,10 @@ impl Renderer {
                     width: 1,
                     height: 1,
                 },
-                Window::extent,
+                |window| vk::Extent2D {
+                    width: window.extent().width,
+                    height: window.extent().height,
+                },
             )
     }
 
@@ -473,11 +473,8 @@ impl Renderer {
                 &self.render_device,
                 event.id,
                 ViewportSettings::new(
-                    vk::Extent2D {
-                        width: 1,
-                        height: 1,
-                    },
-                    self.render_device.properties.surface_format.format,
+                    Extent3d::new_2d(1, 1),
+                    self.render_device.properties.surface_format,
                 ),
             )?;
             #[cfg(feature = "editor")]
@@ -510,7 +507,7 @@ impl Renderer {
                         continue;
                     };
 
-                    let window = window::Window::build(&self.render_device, plat_window)?;
+                    let window = window::Window::build(&self.render_device.rhi, plat_window)?;
                     self.windows.insert(window.id(), window);
                     self.window_order.push(id);
                     sort_window_ids(&mut self.window_order);
@@ -536,7 +533,7 @@ impl Renderer {
                     let Some(window) = self.windows.get_mut(&id) else {
                         continue;
                     };
-                    window.resize(vk::Extent2D { width, height })?;
+                    window.resize(Extent3d::new_2d(width, height))?;
                 }
                 WindowEvent::Occluded { id, occluded } => {
                     let Some(window) = self.windows.get_mut(&id) else {
@@ -559,13 +556,12 @@ impl Renderer {
     ///
     /// # Errors
     ///
-    /// Vulkan errors can occur during rendering
+    /// Backend errors can occur during rendering.
     fn end_frame(&mut self) -> Result<()> {
         #[cfg(feature = "editor")]
         self.egui.end_frame();
 
         let frame_index = self.current_frame();
-        self.render_device.flush_deletions();
         #[cfg(feature = "editor")]
         {
             self.egui.free_textures_for_frame(frame_index)?;
@@ -652,7 +648,7 @@ impl Renderer {
             let output = graph.import_texture(TextureDesc {
                 width: viewport.settings().extent.width,
                 height: viewport.settings().extent.height,
-                format: resources::image::rhi_format(viewport.settings().format)?,
+                format: viewport.settings().format,
                 usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
                 samples: SampleCount::One,
                 imported: Some(viewport.import()),
@@ -664,14 +660,14 @@ impl Renderer {
                 camera,
                 SceneRenderSettings {
                     extent: viewport.settings().extent,
-                    format: resources::image::rhi_format(viewport.settings().format)?,
+                    format: viewport.settings().format,
                     clear_color: viewport.settings().clear_color,
                     fov_y_radians: viewport.settings().fov_y_radians,
                     near: viewport.settings().near,
                     far: viewport.settings().far,
                 },
                 output,
-            )?;
+            );
         }
 
         if rendered_players.is_empty() {
@@ -679,9 +675,9 @@ impl Renderer {
         }
 
         let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
-        cmd.begin_command_buffer(&vk::CommandBufferBeginInfo::default())?;
+        cmd.begin("viewport render graph")?;
         graph.run(&self.render_device, &mut cmd)?;
-        cmd.end_command_buffer()?;
+        cmd.end()?;
 
         Ok(Some(ViewportRenderSubmission {
             command_buffer: cmd,
@@ -759,7 +755,7 @@ impl Renderer {
                     let viewport_source = graph.import_texture(TextureDesc {
                         width: viewport_extent.width,
                         height: viewport_extent.height,
-                        format: resources::image::rhi_format(viewport.settings().format)?,
+                        format: viewport.settings().format,
                         usage: ImageUsages::COLOR_ATTACHMENT
                             | ImageUsages::SAMPLED
                             | ImageUsages::COPY_SRC,
@@ -803,14 +799,22 @@ impl Renderer {
             egui_pass.write_color_attachment(swapchain, frame_graph::AttachmentInfo::load_store());
             let egui = &mut self.egui;
             egui_pass.execute(Box::new(move |device, cmd, _| {
-                egui.render(device, cmd, extent, frame_index)
+                egui.render(
+                    device,
+                    cmd,
+                    vk::Extent2D {
+                        width: extent.width,
+                        height: extent.height,
+                    },
+                    frame_index,
+                )
             }));
         }
 
         let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
-        cmd.begin_command_buffer(&vk::CommandBufferBeginInfo::default())?;
+        cmd.begin("presentation render graph")?;
         graph.run(&self.render_device, &mut cmd)?;
-        cmd.end_command_buffer()?;
+        cmd.end()?;
 
         Ok(Some(cmd))
     }
@@ -934,9 +938,7 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        unsafe {
-            self.render_device.device.device_wait_idle().ok();
-        }
+        self.render_device.rhi.wait_idle().ok();
         info!("cleaning up renderer");
     }
 }

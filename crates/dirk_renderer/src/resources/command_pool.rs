@@ -1,10 +1,16 @@
-use std::{marker::PhantomData, ops::Deref, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 
+#[cfg(feature = "editor")]
+use std::ops::Deref;
+
+#[cfg(feature = "editor")]
 use ash::vk;
 use dirk_rhi::{Backend as _, CommandBuffer as _, Fence as _, QueueType, Submission};
-use dirk_rhi_vulkan::{VulkanCommandBuffer, VulkanCommandPool};
 
-use crate::{Result, resources::ActiveRhi};
+use crate::{
+    Result,
+    resources::{ActiveCommandBuffer, ActiveCommandPool, ActiveRhi},
+};
 
 #[derive(Debug)]
 pub struct Graphics;
@@ -28,7 +34,7 @@ impl Pool for Transfer {
 /// Typed renderer wrapper around an RHI command pool.
 pub struct CommandPool<Type: Pool> {
     rhi: Arc<ActiveRhi>,
-    inner: VulkanCommandPool,
+    inner: ActiveCommandPool,
     pool_type: PhantomData<Type>,
 }
 
@@ -42,7 +48,7 @@ impl<Type: Pool> CommandPool<Type> {
         })
     }
 
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
+    #[cfg(feature = "editor")]
     pub fn raw(&self) -> vk::CommandPool {
         self.inner.raw()
     }
@@ -50,10 +56,11 @@ impl<Type: Pool> CommandPool<Type> {
     pub fn allocate_buffer(&self) -> Result<CommandBuffer> {
         let inner = self.rhi.create_command_buffer(&self.inner)?;
         Ok(CommandBuffer {
-            device: self.rhi.device().clone(),
+            #[cfg(feature = "editor")]
             raw: inner.raw(),
             inner,
             rhi: self.rhi.clone(),
+            queue: Type::QUEUE,
         })
     }
 
@@ -66,122 +73,30 @@ impl<Type: Pool> CommandPool<Type> {
 
 /// Renderer command buffer backed by the active RHI.
 pub struct CommandBuffer {
-    device: ash::Device,
+    #[cfg(feature = "editor")]
     raw: vk::CommandBuffer,
-    inner: VulkanCommandBuffer,
+    inner: ActiveCommandBuffer,
     rhi: Arc<ActiveRhi>,
+    queue: QueueType,
 }
 
 impl CommandBuffer {
-    pub fn begin_command_buffer(
-        &mut self,
-        begin_info: &vk::CommandBufferBeginInfo<'_>,
-    ) -> Result<()> {
-        self.inner.begin(
-            "renderer command buffer",
-            begin_info
-                .flags
-                .contains(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-        )?;
+    pub fn begin(&mut self, label: &str) -> Result<()> {
+        self.inner.begin(label, false)?;
         Ok(())
     }
 
-    pub fn end_command_buffer(&mut self) -> Result<()> {
+    pub fn end(&mut self) -> Result<()> {
         self.inner.end()?;
         Ok(())
     }
 
-    pub(crate) fn rhi_mut(&mut self) -> &mut VulkanCommandBuffer {
+    pub(crate) fn rhi_mut(&mut self) -> &mut ActiveCommandBuffer {
         &mut self.inner
     }
 
-    pub(crate) fn rhi(&self) -> &VulkanCommandBuffer {
+    pub(crate) fn rhi(&self) -> &ActiveCommandBuffer {
         &self.inner
-    }
-
-    pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {
-        unsafe {
-            self.device
-                .cmd_bind_pipeline(self.inner.raw(), bind_point, pipeline);
-        }
-    }
-
-    pub fn set_viewport(&self, first_viewport: u32, viewports: &[vk::Viewport]) {
-        unsafe {
-            self.device
-                .cmd_set_viewport(self.inner.raw(), first_viewport, viewports);
-        }
-    }
-
-    pub fn set_scissor(&self, first_scissor: u32, scissors: &[vk::Rect2D]) {
-        unsafe {
-            self.device
-                .cmd_set_scissor(self.inner.raw(), first_scissor, scissors);
-        }
-    }
-
-    pub fn bind_descriptor_sets(
-        &self,
-        bind_point: vk::PipelineBindPoint,
-        layout: vk::PipelineLayout,
-        first_set: u32,
-        descriptor_sets: &[vk::DescriptorSet],
-        dynamic_offsets: &[u32],
-    ) {
-        unsafe {
-            self.device.cmd_bind_descriptor_sets(
-                self.inner.raw(),
-                bind_point,
-                layout,
-                first_set,
-                descriptor_sets,
-                dynamic_offsets,
-            );
-        }
-    }
-
-    pub fn bind_vertex_buffers(
-        &self,
-        first_binding: u32,
-        buffers: &[vk::Buffer],
-        offsets: &[vk::DeviceSize],
-    ) {
-        unsafe {
-            self.device
-                .cmd_bind_vertex_buffers(self.inner.raw(), first_binding, buffers, offsets);
-        }
-    }
-
-    pub fn bind_index_buffer(
-        &self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        index_type: vk::IndexType,
-    ) {
-        unsafe {
-            self.device
-                .cmd_bind_index_buffer(self.inner.raw(), buffer, offset, index_type);
-        }
-    }
-
-    pub fn draw_indexed(
-        &self,
-        index_count: u32,
-        instance_count: u32,
-        first_index: u32,
-        vertex_offset: i32,
-        first_instance: u32,
-    ) {
-        unsafe {
-            self.device.cmd_draw_indexed(
-                self.inner.raw(),
-                index_count,
-                instance_count,
-                first_index,
-                vertex_offset,
-                first_instance,
-            );
-        }
     }
 
     /// Ends, submits, and waits for a short-lived command buffer.
@@ -189,7 +104,7 @@ impl CommandBuffer {
         self.inner.end()?;
         let fence = self.rhi.create_fence(false)?;
         self.rhi.submit(
-            self.inner.queue(),
+            self.queue,
             &Submission {
                 command_buffers: &[&self.inner],
                 surface_frames: &[],
@@ -203,12 +118,11 @@ impl CommandBuffer {
     }
 }
 
+#[cfg(feature = "editor")]
 impl Deref for CommandBuffer {
     type Target = vk::CommandBuffer;
 
     fn deref(&self) -> &Self::Target {
-        // Vulkan handles are plain values; the backend wrapper owns the
-        // command allocation for at least as long as this renderer wrapper.
         &self.raw
     }
 }

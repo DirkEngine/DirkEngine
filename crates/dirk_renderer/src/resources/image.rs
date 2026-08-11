@@ -1,36 +1,34 @@
 //! Renderer images and texture uploads backed by the RHI.
 
-use ash::vk;
 use dirk_rhi::{
     Backend as _, Buffer as _, BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d,
-    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
-    ImageViewDesc, ImageViewType, SampleCount, SamplerDesc,
+    FilterMode, Format, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
+    ImageViewDesc, ImageViewType, MemoryDomain, SampleCount, SamplerDesc,
 };
-use dirk_rhi_vulkan::{VulkanImage, VulkanImageView};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
     Result,
     models::Texture,
-    resources::{buffer::CustomBuffer, device::RenderDevice},
+    resources::{
+        ActiveCommandBuffer, ActiveImage, ActiveImageView, buffer::CustomBuffer,
+        device::RenderDevice,
+    },
 };
 
 pub struct Image {
-    inner: VulkanImage,
-    view: VulkanImageView,
+    inner: ActiveImage,
+    view: ActiveImageView,
     aspects: ImageAspects,
     mip_levels: u32,
 }
 
 pub struct ImageCreateInfo {
-    pub size: vk::Extent2D,
-    pub format: vk::Format,
-    pub tiling: vk::ImageTiling,
-    pub usage: vk::ImageUsageFlags,
-    pub location: MemoryLocation,
+    pub extent: Extent3d,
+    pub format: Format,
+    pub usage: ImageUsages,
     pub mip_levels: u32,
-    pub num_samples: vk::SampleCountFlags,
-    pub aspect_flags: vk::ImageAspectFlags,
+    pub samples: SampleCount,
+    pub aspects: ImageAspects,
 }
 
 impl Image {
@@ -41,28 +39,20 @@ impl Image {
             )
             .into());
         }
-        if info.tiling != vk::ImageTiling::OPTIMAL || info.location != MemoryLocation::GpuOnly {
-            return Err(dirk_rhi::Error::Unsupported(
-                "renderer images currently require optimal GPU-local memory",
-            )
-            .into());
-        }
-        let format = rhi_format(info.format)?;
-        let aspects = rhi_aspects(info.aspect_flags);
         let inner = device.rhi.create_image(&ImageDesc {
             label: "renderer image",
-            extent: Extent3d::new_2d(info.size.width, info.size.height),
-            format,
-            usage: rhi_usage(info.usage),
+            extent: info.extent,
+            format: info.format,
+            usage: info.usage,
             mip_levels: info.mip_levels,
             array_layers: 1,
-            samples: rhi_samples(info.num_samples)?,
+            samples: info.samples,
         })?;
         let view = device.rhi.create_image_view(&ImageViewDesc {
             label: "renderer image view",
             image: &inner,
             view_type: ImageViewType::TwoD,
-            aspects,
+            aspects: info.aspects,
             base_mip_level: 0,
             mip_level_count: info.mip_levels,
             base_array_layer: 0,
@@ -71,20 +61,16 @@ impl Image {
         Ok(Self {
             inner,
             view,
-            aspects,
+            aspects: info.aspects,
             mip_levels: info.mip_levels,
         })
     }
 
-    pub fn view(&self) -> vk::ImageView {
-        self.view.raw()
-    }
-
-    pub(crate) fn rhi_image(&self) -> &VulkanImage {
+    pub(crate) fn rhi_image(&self) -> &ActiveImage {
         &self.inner
     }
 
-    pub(crate) fn rhi_view(&self) -> &VulkanImageView {
+    pub(crate) fn rhi_view(&self) -> &ActiveImageView {
         &self.view
     }
 
@@ -114,27 +100,20 @@ impl Image {
             device,
             u64::try_from(pixels.len())
                 .map_err(|_| dirk_rhi::Error::InvalidResource("texture upload is too large"))?,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            MemoryLocation::CpuToGpu,
+            dirk_rhi::BufferUsages::COPY_SRC,
+            MemoryDomain::Upload,
         )?;
         staging.rhi().write(0, &pixels)?;
 
         let image = Self::create_image(
             device,
             &ImageCreateInfo {
-                size: vk::Extent2D {
-                    width: texture.width,
-                    height: texture.height,
-                },
-                format: vk::Format::R8G8B8A8_SRGB,
-                tiling: vk::ImageTiling::OPTIMAL,
-                usage: vk::ImageUsageFlags::TRANSFER_DST
-                    | vk::ImageUsageFlags::TRANSFER_SRC
-                    | vk::ImageUsageFlags::SAMPLED,
-                location: MemoryLocation::GpuOnly,
+                extent: Extent3d::new_2d(texture.width, texture.height),
+                format: Format::Rgba8Srgb,
+                usage: ImageUsages::COPY_DST | ImageUsages::COPY_SRC | ImageUsages::SAMPLED,
                 mip_levels,
-                num_samples: vk::SampleCountFlags::TYPE_1,
-                aspect_flags: vk::ImageAspectFlags::COLOR,
+                samples: SampleCount::One,
+                aspects: ImageAspects::COLOR,
             },
         )?;
         let mut command = device.graphics_pool.begin_single_time()?;
@@ -184,7 +163,7 @@ impl Image {
 
     fn record_mips(
         &self,
-        command: &mut dirk_rhi_vulkan::VulkanCommandBuffer,
+        command: &mut ActiveCommandBuffer,
         width: u32,
         height: u32,
     ) -> dirk_rhi::Result<()> {
@@ -246,69 +225,4 @@ impl Image {
     fn mip_levels(width: u32, height: u32) -> u32 {
         u32::BITS - width.max(height).max(1).leading_zeros()
     }
-}
-
-pub(crate) fn rhi_format(format: vk::Format) -> Result<dirk_rhi::Format> {
-    Ok(match format {
-        vk::Format::R8G8B8A8_UNORM => dirk_rhi::Format::Rgba8Unorm,
-        vk::Format::R8G8B8A8_SRGB => dirk_rhi::Format::Rgba8Srgb,
-        vk::Format::B8G8R8A8_UNORM => dirk_rhi::Format::Bgra8Unorm,
-        vk::Format::B8G8R8A8_SRGB => dirk_rhi::Format::Bgra8Srgb,
-        vk::Format::D16_UNORM => dirk_rhi::Format::Depth16Unorm,
-        vk::Format::D24_UNORM_S8_UINT => dirk_rhi::Format::Depth24UnormStencil8,
-        vk::Format::D32_SFLOAT => dirk_rhi::Format::Depth32Float,
-        vk::Format::D32_SFLOAT_S8_UINT => dirk_rhi::Format::Depth32FloatStencil8,
-        _ => return Err(dirk_rhi::Error::Unsupported("renderer image format").into()),
-    })
-}
-
-pub(crate) fn rhi_usage(usage: vk::ImageUsageFlags) -> ImageUsages {
-    let mut result = ImageUsages::NONE;
-    for (vulkan, rhi) in [
-        (vk::ImageUsageFlags::TRANSFER_SRC, ImageUsages::COPY_SRC),
-        (vk::ImageUsageFlags::TRANSFER_DST, ImageUsages::COPY_DST),
-        (vk::ImageUsageFlags::SAMPLED, ImageUsages::SAMPLED),
-        (vk::ImageUsageFlags::STORAGE, ImageUsages::STORAGE),
-        (
-            vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            ImageUsages::COLOR_ATTACHMENT,
-        ),
-        (
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            ImageUsages::DEPTH_STENCIL_ATTACHMENT,
-        ),
-        (
-            vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
-            ImageUsages::TRANSIENT_ATTACHMENT,
-        ),
-    ] {
-        if usage.contains(vulkan) {
-            result |= rhi;
-        }
-    }
-    result
-}
-
-pub(crate) fn rhi_samples(samples: vk::SampleCountFlags) -> Result<SampleCount> {
-    Ok(match samples {
-        vk::SampleCountFlags::TYPE_1 => SampleCount::One,
-        vk::SampleCountFlags::TYPE_2 => SampleCount::Two,
-        vk::SampleCountFlags::TYPE_4 => SampleCount::Four,
-        vk::SampleCountFlags::TYPE_8 => SampleCount::Eight,
-        _ => return Err(dirk_rhi::Error::Unsupported("renderer sample count").into()),
-    })
-}
-
-fn rhi_aspects(aspects: vk::ImageAspectFlags) -> ImageAspects {
-    let mut result = ImageAspects::NONE;
-    if aspects.contains(vk::ImageAspectFlags::COLOR) {
-        result |= ImageAspects::COLOR;
-    }
-    if aspects.contains(vk::ImageAspectFlags::DEPTH) {
-        result |= ImageAspects::DEPTH;
-    }
-    if aspects.contains(vk::ImageAspectFlags::STENCIL) {
-        result |= ImageAspects::STENCIL;
-    }
-    result
 }

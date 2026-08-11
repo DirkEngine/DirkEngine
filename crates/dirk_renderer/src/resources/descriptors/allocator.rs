@@ -1,119 +1,94 @@
-//! Typed descriptor set allocator.
+//! Typed bind-group factory.
 
-use std::{marker::PhantomData, mem::MaybeUninit};
+use std::{marker::PhantomData, sync::Arc};
 
-use ash::vk;
+use dirk_rhi::{
+    Backend as _, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindingResource, BindingType,
+};
 
 use crate::{
     Result,
-    resources::device::{Garbage, RenderDevice},
+    resources::{
+        ActiveBuffer, ActiveImageView, ActiveRhi, ActiveSampler,
+        descriptors::{layouts::SetLayout, set::DescriptorSet},
+        device::RenderDevice,
+    },
 };
 
-use super::{layouts::SetLayout, set::DescriptorSet};
-
-/// Growable descriptor pool allocator for a single layout type.
+/// Owns one typed bind-group layout and creates groups implementing it.
 pub struct DescriptorAllocator<L: SetLayout> {
-    device: RenderDevice,
-    layout: vk::DescriptorSetLayout,
-    pools: Vec<vk::DescriptorPool>,
-    cursor: usize,
-    next_max_sets: u32,
+    rhi: Arc<ActiveRhi>,
+    layout: <ActiveRhi as dirk_rhi::Backend>::BindGroupLayout,
     _layout: PhantomData<L>,
 }
 
 impl<L: SetLayout> DescriptorAllocator<L> {
-    /// Creates an allocator with one initial pool page.
-    pub fn new(device: &RenderDevice, initial_max_sets: u32) -> Result<Self> {
-        let initial_max_sets = initial_max_sets.max(1);
-        let mut allocator = Self {
-            device: device.clone(),
-            layout: L::create_layout(&device.device)?,
-            pools: Vec::new(),
-            cursor: 0,
-            next_max_sets: initial_max_sets,
+    /// Creates the backend layout. The capacity hint remains accepted so call
+    /// sites do not need to model backend-owned descriptor pooling.
+    pub fn new(device: &RenderDevice, _initial_capacity: u32) -> Result<Self> {
+        Ok(Self {
+            rhi: device.rhi.clone(),
+            layout: device.rhi.create_bind_group_layout(&BindGroupLayoutDesc {
+                label: "renderer bind-group layout",
+                entries: L::BINDINGS,
+            })?,
             _layout: PhantomData,
-        };
-        allocator.add_page(initial_max_sets)?;
-        Ok(allocator)
+        })
     }
 
-    /// Allocates one descriptor set.
-    pub fn allocate(&mut self) -> Result<DescriptorSet<L>> {
-        if !self.pools.is_empty() {
-            match self.allocate_from(self.cursor) {
-                Ok(set) => return Ok(set),
-                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY | vk::Result::ERROR_FRAGMENTED_POOL) => {}
-                Err(error) => return Err(error.into()),
-            }
+    /// Creates a set containing one uniform-buffer binding.
+    pub fn uniform_buffer(
+        &self,
+        binding: u32,
+        buffer: &ActiveBuffer,
+        size: u64,
+    ) -> Result<DescriptorSet<L>> {
+        Self::require_binding(binding, BindingType::UniformBuffer)?;
+        self.create(&[BindGroupEntry {
+            binding,
+            resource: BindingResource::Buffer {
+                buffer,
+                offset: 0,
+                size,
+            },
+        }])
+    }
+
+    /// Creates a set containing one sampled-image binding.
+    pub fn sampled_image(
+        &self,
+        binding: u32,
+        view: &ActiveImageView,
+        sampler: &ActiveSampler,
+    ) -> Result<DescriptorSet<L>> {
+        Self::require_binding(binding, BindingType::SampledImage)?;
+        self.create(&[BindGroupEntry {
+            binding,
+            resource: BindingResource::SampledImage { view, sampler },
+        }])
+    }
+
+    fn create(&self, entries: &[BindGroupEntry<'_, ActiveRhi>]) -> Result<DescriptorSet<L>> {
+        Ok(DescriptorSet::new(self.rhi.create_bind_group(
+            &BindGroupDesc {
+                label: "renderer bind group",
+                layout: &self.layout,
+                entries,
+            },
+        )?))
+    }
+
+    fn require_binding(binding: u32, ty: BindingType) -> Result<()> {
+        match L::BINDINGS.iter().find(|entry| entry.binding == binding) {
+            Some(entry) if entry.ty == ty => Ok(()),
+            Some(_) => Err(dirk_rhi::Error::InvalidResource(
+                "renderer bind-group resource type does not match its layout",
+            )
+            .into()),
+            None => Err(dirk_rhi::Error::InvalidResource(
+                "renderer bind-group binding is absent from its layout",
+            )
+            .into()),
         }
-
-        let page_index = self.add_page(1)?;
-        self.allocate_from(page_index).map_err(Into::into)
-    }
-
-    /// Allocates exactly `N` descriptor sets.
-    pub fn allocate_array<const N: usize>(&mut self) -> Result<[DescriptorSet<L>; N]> {
-        let mut out: [MaybeUninit<DescriptorSet<L>>; N] =
-            std::array::from_fn(|_| MaybeUninit::uninit());
-
-        for i in 0..N {
-            match self.allocate() {
-                Ok(set) => {
-                    out[i].write(set);
-                }
-                Err(error) => {
-                    for initialized in out.iter_mut().take(i) {
-                        // SAFETY: slots before `i` were initialized above.
-                        unsafe { initialized.assume_init_drop() };
-                    }
-                    return Err(error);
-                }
-            }
-        }
-
-        // SAFETY: every slot was initialized by the loop above.
-        Ok(std::array::from_fn(|i| unsafe {
-            out[i].assume_init_read()
-        }))
-    }
-
-    fn allocate_from(&self, page_index: usize) -> ash::prelude::VkResult<DescriptorSet<L>> {
-        let pool = self.pools[page_index];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(pool)
-            .set_layouts(std::slice::from_ref(&self.layout));
-        let raw_sets = unsafe { self.device.device.allocate_descriptor_sets(&alloc_info)? };
-        Ok(DescriptorSet::new(self.device.clone(), pool, raw_sets[0]))
-    }
-
-    fn add_page(&mut self, required_sets: u32) -> Result<usize> {
-        let max_sets = self.next_max_sets.max(required_sets).max(1);
-        self.next_max_sets = max_sets.saturating_mul(2).max(1);
-
-        let pool_sizes = L::pool_sizes(max_sets);
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-            .pool_sizes(&pool_sizes)
-            .max_sets(max_sets);
-
-        let pool = unsafe {
-            self.device
-                .device
-                .create_descriptor_pool(&pool_info, None)?
-        };
-        let index = self.pools.len();
-        self.pools.push(pool);
-        self.cursor = index;
-        Ok(index)
-    }
-}
-
-impl<L: SetLayout> Drop for DescriptorAllocator<L> {
-    fn drop(&mut self) {
-        for pool in self.pools.drain(..) {
-            self.device.destroy(Garbage::DescriptorPool(pool));
-        }
-        self.device
-            .destroy(Garbage::DescriptorSetLayout(self.layout));
     }
 }
