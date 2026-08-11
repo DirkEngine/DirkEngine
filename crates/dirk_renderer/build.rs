@@ -12,6 +12,11 @@ use rspirv_reflect::rspirv::{
     dr::{Instruction, Loader, Module as SpirvModule, Operand},
     spirv::{Decoration, ExecutionModel, Op, StorageClass},
 };
+use spirv_cross2::{
+    Compiler, Module,
+    compile::msl::{BindTarget, CompilerOptions, ResourceBinding},
+    targets::Msl,
+};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -55,7 +60,12 @@ fn build_shaders() -> anyhow::Result<()> {
     for (entrypoint, source_path) in modules {
         let output_path = out_dir.join(format!("{entrypoint}.spv"));
         fs::copy(&source_path, &output_path)?;
-        shaders.push(reflect_shader(&entrypoint, &source_path)?);
+        let shader = reflect_shader(&entrypoint, &source_path)?;
+        fs::write(
+            out_dir.join(format!("{entrypoint}.metal")),
+            shader.compile_msl(&source_path)?,
+        )?;
+        shaders.push(shader);
     }
     shaders.sort_by(|left, right| left.entrypoint.cmp(&right.entrypoint));
     fs::write(
@@ -73,6 +83,140 @@ struct ReflectedShader {
     stage: ShaderStage,
     set_layouts: Vec<Vec<DescriptorBinding>>,
     vertex_inputs: Vec<VertexInput>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MetalBindingOffsets {
+    buffers: u32,
+    textures: u32,
+    samplers: u32,
+}
+
+impl MetalBindingOffsets {
+    fn bind_target(
+        &mut self,
+        base: Self,
+        shader: &ReflectedShader,
+        set: u32,
+        binding: &DescriptorBinding,
+    ) -> anyhow::Result<BindTarget> {
+        if binding.descriptor_count != 1 {
+            bail!(
+                "shader `{}` uses a descriptor array at set {set}, binding {}; descriptor arrays are not supported by the RHI",
+                shader.entrypoint,
+                binding.binding
+            );
+        }
+        let index = |base: u32, resource: &str| {
+            base.checked_add(binding.binding).ok_or_else(|| {
+                anyhow!(
+                    "Metal {resource} index overflowed for shader `{}`",
+                    shader.entrypoint
+                )
+            })
+        };
+        let end = binding.binding.checked_add(1).ok_or_else(|| {
+            anyhow!(
+                "shader `{}` binding index overflowed at set {set}",
+                shader.entrypoint
+            )
+        })?;
+        let range_end = |base: u32, resource: &str| {
+            base.checked_add(end).ok_or_else(|| {
+                anyhow!(
+                    "Metal {resource} range overflowed for shader `{}`",
+                    shader.entrypoint
+                )
+            })
+        };
+        let mut target = BindTarget {
+            buffer: 0,
+            texture: 0,
+            sampler: 0,
+            count: None,
+        };
+        match binding.descriptor_type {
+            "UNIFORM_BUFFER" | "STORAGE_BUFFER" => {
+                target.buffer = index(base.buffers, "buffer")?;
+                self.buffers = self.buffers.max(range_end(base.buffers, "buffer")?);
+            }
+            "COMBINED_IMAGE_SAMPLER" => {
+                target.texture = index(base.textures, "texture")?;
+                target.sampler = index(base.samplers, "sampler")?;
+                self.textures = self.textures.max(range_end(base.textures, "texture")?);
+                self.samplers = self.samplers.max(range_end(base.samplers, "sampler")?);
+            }
+            "STORAGE_IMAGE" => {
+                target.texture = index(base.textures, "texture")?;
+                self.textures = self.textures.max(range_end(base.textures, "texture")?);
+            }
+            descriptor_type => bail!(
+                "shader `{}` uses descriptor type `{descriptor_type}`, which cannot be represented by the RHI",
+                shader.entrypoint
+            ),
+        }
+        Ok(target)
+    }
+}
+
+impl ReflectedShader {
+    /// Translates this shader and applies the same compact slot allocation as
+    /// the Metal pipeline layout.
+    fn compile_msl(&self, spv_path: &Path) -> anyhow::Result<String> {
+        let bytes = fs::read(spv_path).with_context(|| {
+            format!(
+                "failed to read SPIR-V for MSL translation of `{}`",
+                self.entrypoint
+            )
+        })?;
+        if !bytes.len().is_multiple_of(4) {
+            bail!(
+                "SPIR-V for shader `{}` is not a whole number of words",
+                self.entrypoint
+            );
+        }
+        let words = bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte chunk")))
+            .collect::<Vec<_>>();
+        let mut compiler = Compiler::<Msl>::new(Module::from_words(&words)).with_context(|| {
+            format!(
+                "failed to initialize MSL translation for shader `{}`",
+                self.entrypoint
+            )
+        })?;
+        let stage = match self.stage {
+            ShaderStage::Vertex => spirv_cross2::spirv::ExecutionModel::Vertex,
+            ShaderStage::Fragment => spirv_cross2::spirv::ExecutionModel::Fragment,
+            ShaderStage::Compute => spirv_cross2::spirv::ExecutionModel::GLCompute,
+        };
+
+        let mut next = MetalBindingOffsets::default();
+        for (set, bindings) in self.set_layouts.iter().enumerate() {
+            let set = u32::try_from(set).context("shader descriptor set index exceeds u32")?;
+            let base = next;
+            for binding in bindings {
+                let target = next.bind_target(base, self, set, binding)?;
+                compiler
+                    .add_resource_binding(
+                        stage,
+                        ResourceBinding::from_qualified(set, binding.binding),
+                        &target,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to remap shader `{}` set {set}, binding {} for Metal",
+                            self.entrypoint, binding.binding
+                        )
+                    })?;
+            }
+        }
+
+        compiler
+            .compile(&CompilerOptions::default())
+            .map(|source| source.to_string())
+            .with_context(|| format!("failed to translate shader `{}` to MSL", self.entrypoint))
+    }
 }
 
 #[derive(Clone, Debug)]

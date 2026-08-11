@@ -276,6 +276,9 @@ impl Renderer {
         #[cfg(feature = "editor")] player_input_sender: PlayerInputSender,
         #[cfg(feature = "editor")] editor: dirk_engine::editor::EditorServices,
     ) -> Result<Self> {
+        #[cfg(target_vendor = "apple")]
+        info!("initializing renderer RHI with Metal");
+        #[cfg(not(target_vendor = "apple"))]
         info!("initializing renderer RHI with Vulkan");
 
         let surface_info = unsafe {

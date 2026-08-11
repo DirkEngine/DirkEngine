@@ -21,7 +21,6 @@ dirk_utils.workspace = true
 dirk_engine.workspace = true
 dirk_input.workspace = true
 dirk_rhi.workspace = true
-dirk_rhi_vulkan.workspace = true
 dirk_platform.workspace = true
 dirk_player.workspace = true
 dirk_universe.workspace = true
@@ -30,20 +29,27 @@ dirk_shaders.workspace = true
 dirk_events.workspace = true
 dirk_assets.workspace = true
 
-ash.workspace = true
-ash-window.workspace = true
 raw-window-handle.workspace = true
 glam.workspace = true
-gpu-allocator.workspace = true
 gltf.workspace = true
 slotmap.workspace = true
 egui = { workspace = true, optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+dirk_rhi_metal.workspace = true
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+dirk_rhi_vulkan.workspace = true
+ash.workspace = true
+ash-window.workspace = true
+gpu-allocator.workspace = true
 egui-ash-renderer = { workspace = true, optional = true }
 
 [build-dependencies]
 cargo-gpu-install.workspace = true
 anyhow.workspace = true
 rspirv-reflect.workspace = true
+spirv-cross2.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 

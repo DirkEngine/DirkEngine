@@ -2,20 +2,18 @@
 
 The renderer owns GPU rendering for the engine. Resource creation, uploads,
 presentation, synchronization, and render-graph execution go through
-`dirk_rhi`; the active backend is Vulkan. Existing typed pipelines,
-descriptors, and egui integration use the Vulkan backend's native accessors
-until those higher-level systems are migrated. `dirk_rhi_metal` implements the
-same RHI contract for the future native Metal renderer selection.
+`dirk_rhi`. The renderer selects `dirk_rhi_metal` on Apple platforms and
+`dirk_rhi_vulkan` elsewhere at compile time. Renderer code uses the selected
+backend directly through the shared RHI contract, so there is no runtime
+backend dispatch.
 
-On macOS, the renderer discovers the `AppKit` surface extensions and enables
-Vulkan portability enumeration for `MoltenVK`. It loads the Vulkan loader
-provided by the user's Vulkan SDK; no Vulkan SDK or `MoltenVK` library is
-linked, installed, or bundled by this crate.
+Shaders are compiled to SPIR-V by Rust GPU. Vulkan consumes that SPIR-V
+directly, while Apple builds also translate it to Metal Shading Language.
 
-Debug builds enable `VK_LAYER_KHRONOS_validation`, so its manifest must be
-discoverable through `VK_ADD_LAYER_PATH` or a standard Vulkan layer path.
+The editor remains temporarily Vulkan-specific and is disabled by default.
+Enable the `editor` feature only when building the Vulkan renderer.
 
 Register `RendererPlugin` with an `EngineBuilder` to install the renderer
 subsystem and its ECS integration systems. The plugin depends on
-`PlatformPlugin` and `AssetsPlugin`, reads engine metadata for Vulkan
-application info, and renders once per engine tick.
+`PlatformPlugin` and `AssetsPlugin`, passes engine metadata to the active
+backend, and renders once per engine tick.

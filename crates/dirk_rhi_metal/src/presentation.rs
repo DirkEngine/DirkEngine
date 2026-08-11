@@ -96,6 +96,14 @@ impl MetalSwapchain {
 }
 
 impl Swapchain<MetalBackend> for MetalSwapchain {
+    fn format(&self) -> Format {
+        self.format
+    }
+
+    fn extent(&self) -> Extent3d {
+        self.extent
+    }
+
     fn acquire(&mut self) -> Result<MetalSurfaceFrame> {
         let drawable = self
             .surface

@@ -46,7 +46,9 @@ all-features = true
 rustdoc-args = ["-Zunstable-options", "--cfg", "docsrs"]
 
 [features]
-default = ["editor", "cli"]
+# The editor renderer is Vulkan-specific while its RHI migration is pending.
+# Keep the default executable on the portable, non-editor render path.
+default = ["cli"]
 
 editor = [
     "dirk_engine/editor",
@@ -135,6 +137,7 @@ egui-ash-renderer = { version = "0.11", features = ["dynamic-rendering"] }
 cargo-gpu-install = "0.10.0-alpha.1"
 spirv-std         = "0.10.0-alpha.1"
 rspirv-reflect = "0.9"
+spirv-cross2 = { version = "0.7", default-features = false, features = ["msl"] }
 
 # Macro dependencies
 syn = { version = "2", features = ["full"] }
