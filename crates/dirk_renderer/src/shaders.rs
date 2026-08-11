@@ -60,3 +60,15 @@ impl ShaderCode {
 }
 
 include!(concat!(env!("OUT_DIR"), "/generated_shaders.rs"));
+
+#[cfg(all(test, target_vendor = "apple"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metal_vertex_shader_flips_vulkan_clip_space_y() {
+        let source = <MainVS as metadata::Shader>::CODE.msl;
+
+        assert!(source.contains("Invert Y-axis for Metal"));
+    }
+}

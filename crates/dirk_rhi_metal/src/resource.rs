@@ -192,6 +192,34 @@ pub struct MetalImageView {
 }
 
 impl MetalImageView {
+    /// Multisampled textures cannot create Metal texture views, so their only
+    /// representable RHI view reuses the source texture.
+    fn reuses_source_texture(
+        source_type: MTLTextureType,
+        view_type: ImageViewType,
+        array_layer_count: u32,
+    ) -> Result<bool> {
+        match source_type {
+            MTLTextureType::D2Multisample => match view_type {
+                ImageViewType::TwoD if array_layer_count == 1 => Ok(true),
+                ImageViewType::TwoD => Err(dirk_rhi::Error::InvalidResource(
+                    "a two-dimensional Metal view must select one array layer",
+                )),
+                ImageViewType::TwoDArray | ImageViewType::Cube => {
+                    Err(dirk_rhi::Error::InvalidResource(
+                        "multisampled Metal images only support two-dimensional views",
+                    ))
+                }
+            },
+            MTLTextureType::D2MultisampleArray | MTLTextureType::D3 => {
+                Err(dirk_rhi::Error::Unsupported(
+                    "the RHI cannot represent this Metal texture view type",
+                ))
+            }
+            _ => Ok(false),
+        }
+    }
+
     pub(crate) fn create(
         context: &Arc<Context>,
         desc: &ImageViewDesc<'_, crate::MetalBackend>,
@@ -214,39 +242,48 @@ impl MetalImageView {
                 "image view range exceeds the image",
             ));
         }
-        let texture_type = match desc.view_type {
-            ImageViewType::TwoD if desc.array_layer_count == 1 => MTLTextureType::D2,
-            ImageViewType::TwoD => {
-                return Err(dirk_rhi::Error::InvalidResource(
-                    "a two-dimensional Metal view must select one array layer",
-                ));
-            }
-            ImageViewType::TwoDArray => MTLTextureType::D2Array,
-            ImageViewType::Cube if desc.array_layer_count == 6 => MTLTextureType::Cube,
-            ImageViewType::Cube
-                if desc.array_layer_count.is_multiple_of(6)
-                    && desc.base_array_layer.is_multiple_of(6) =>
-            {
-                MTLTextureType::CubeArray
-            }
-            ImageViewType::Cube => {
-                return Err(dirk_rhi::Error::InvalidResource(
-                    "a Metal cube view must select aligned groups of six layers",
-                ));
-            }
+        let reuses_source = Self::reuses_source_texture(
+            desc.image.raw.texture_type(),
+            desc.view_type,
+            desc.array_layer_count,
+        )?;
+        let raw = if reuses_source {
+            desc.image.raw.clone()
+        } else {
+            let texture_type = match desc.view_type {
+                ImageViewType::TwoD if desc.array_layer_count == 1 => MTLTextureType::D2,
+                ImageViewType::TwoD => {
+                    return Err(dirk_rhi::Error::InvalidResource(
+                        "a two-dimensional Metal view must select one array layer",
+                    ));
+                }
+                ImageViewType::TwoDArray => MTLTextureType::D2Array,
+                ImageViewType::Cube if desc.array_layer_count == 6 => MTLTextureType::Cube,
+                ImageViewType::Cube
+                    if desc.array_layer_count.is_multiple_of(6)
+                        && desc.base_array_layer.is_multiple_of(6) =>
+                {
+                    MTLTextureType::CubeArray
+                }
+                ImageViewType::Cube => {
+                    return Err(dirk_rhi::Error::InvalidResource(
+                        "a Metal cube view must select aligned groups of six layers",
+                    ));
+                }
+            };
+            desc.image.raw.new_texture_view_from_slice(
+                convert::format(desc.image.format),
+                texture_type,
+                metal::NSRange::new(
+                    u64::from(desc.base_mip_level),
+                    u64::from(desc.mip_level_count),
+                ),
+                metal::NSRange::new(
+                    u64::from(desc.base_array_layer),
+                    u64::from(desc.array_layer_count),
+                ),
+            )
         };
-        let raw = desc.image.raw.new_texture_view_from_slice(
-            convert::format(desc.image.format),
-            texture_type,
-            metal::NSRange::new(
-                u64::from(desc.base_mip_level),
-                u64::from(desc.mip_level_count),
-            ),
-            metal::NSRange::new(
-                u64::from(desc.base_array_layer),
-                u64::from(desc.array_layer_count),
-            ),
-        );
         raw.set_label(desc.label);
         Ok(Self {
             context: context.clone(),
@@ -696,4 +733,19 @@ pub(crate) fn binding_visibility(layout: &MetalBindGroupLayout, binding: u32) ->
         .iter()
         .find(|entry| entry.binding == binding)
         .map_or(ShaderStages::NONE, |entry| entry.visibility)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multisampled_two_d_view_reuses_source_texture() -> Result<()> {
+        assert!(MetalImageView::reuses_source_texture(
+            MTLTextureType::D2Multisample,
+            ImageViewType::TwoD,
+            1,
+        )?);
+        Ok(())
+    }
 }

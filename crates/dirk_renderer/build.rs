@@ -220,8 +220,10 @@ impl ReflectedShader {
             }
         }
 
+        let mut options = CompilerOptions::default();
+        options.common.flip_vertex_y = true;
         compiler
-            .compile(&CompilerOptions::default())
+            .compile(&options)
             .map(|source| source.to_string())
             .with_context(|| format!("failed to translate shader `{}` to MSL", self.entrypoint))
     }
