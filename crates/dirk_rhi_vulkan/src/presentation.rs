@@ -329,6 +329,14 @@ impl VulkanSwapchain {
 }
 
 impl Swapchain<VulkanBackend> for VulkanSwapchain {
+    fn format(&self) -> Format {
+        self.generation.format
+    }
+
+    fn extent(&self) -> Extent3d {
+        self.generation.extent
+    }
+
     fn acquire(&mut self) -> Result<VulkanSurfaceFrame> {
         let semaphore_index = self.semaphore_index;
         self.semaphore_index = (self.semaphore_index + 1) % self.generation.semaphores.len();
