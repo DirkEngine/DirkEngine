@@ -11,25 +11,10 @@ pub type CommandBuffer = CommandEncoder<ActiveBackend>;
 pub struct CommandPool<Q: QueueKind> {
     rhi: Arc<ActiveRhi>,
     kind: PhantomData<Q>,
-    // Temporary compatibility allocator for egui-ash's synchronous uploads.
-    #[cfg(renderer_editor)]
-    legacy: dirk_rhi_vulkan::VulkanCommandPool,
 }
 impl<Q: QueueKind> CommandPool<Q> {
-    #[cfg_attr(
-        not(renderer_editor),
-        allow(
-            clippy::unnecessary_wraps,
-            reason = "the editor compatibility allocator is fallible; keep one feature-independent signature"
-        )
-    )]
-    pub fn build(rhi: &Arc<ActiveRhi>) -> Result<Self> {
-        Ok(Self {
-            rhi: rhi.clone(), kind: PhantomData,
-            #[cfg(renderer_editor)]
-            // SAFETY: renderer initialization is exclusive; egui waits for its uploads.
-            legacy: unsafe { dirk_rhi::Backend::create_command_pool(rhi.native(), dirk_rhi::QueueType::Graphics)? },
-        })
+    pub fn build(rhi: &Arc<ActiveRhi>) -> Self {
+        Self { rhi: rhi.clone(), kind: PhantomData }
     }
     pub fn begin(&self, label: &str) -> Result<CommandEncoder<ActiveBackend, Q>> {
         Ok(self.rhi.create_encoder(label)?)
@@ -43,9 +28,5 @@ impl<Q: QueueKind> CommandPool<Q> {
             .submit(vec![command.finish()?], &dirk_rhi::SubmitInfo::default())?
             .wait(u64::MAX)?;
         Ok(())
-    }
-    #[cfg(renderer_editor)]
-    pub fn raw(&self) -> ash::vk::CommandPool {
-        self.legacy.raw()
     }
 }

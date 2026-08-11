@@ -672,8 +672,6 @@ name = "dirk_renderer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ash",
- "ash-window",
  "cargo-gpu-install",
  "dirk_assets",
  "dirk_build",
@@ -690,10 +688,8 @@ dependencies = [
  "dirk_utils",
  "dirk_world",
  "egui",
- "egui-ash-renderer",
  "glam",
  "gltf",
- "gpu-allocator",
  "parking_lot",
  "pastey",
  "proc-macro2",
@@ -912,18 +908,6 @@ dependencies = [
  "profiling",
  "smallvec",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "egui-ash-renderer"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "598d16e7691705baf20e797a377890a16db80806b30648c0c002f6d6cbd0a28d"
-dependencies = [
- "ash",
- "egui",
- "log",
- "thiserror 2.0.18",
 ]
 
 [[package]]

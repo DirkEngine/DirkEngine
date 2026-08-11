@@ -47,8 +47,8 @@ impl RenderDevice {
         properties: RendererProperties,
         frame_counters: FrameCounters,
     ) -> Result<Self> {
-        let transfer_pool = CommandPool::build(&rhi)?;
-        let graphics_pool = CommandPool::build(&rhi)?;
+        let transfer_pool = CommandPool::build(&rhi);
+        let graphics_pool = CommandPool::build(&rhi);
 
         Ok(Self(Arc::new(RenderDeviceInner {
             transfer_pool,

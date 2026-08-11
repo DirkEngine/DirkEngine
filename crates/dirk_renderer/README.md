@@ -10,8 +10,8 @@ backend dispatch.
 Shaders are compiled to SPIR-V by Rust GPU. Vulkan consumes that SPIR-V
 directly, while Apple builds also translate it to Metal Shading Language.
 
-The editor remains temporarily Vulkan-specific and is disabled by default.
-Enable the `editor` feature only when building the Vulkan renderer.
+The optional editor painter also uses the shared RHI, including its managed
+egui textures and renderer viewport images, so it works with either backend.
 
 Register `RendererPlugin` with an `EngineBuilder` to install the renderer
 subsystem and its ECS integration systems. The plugin depends on
