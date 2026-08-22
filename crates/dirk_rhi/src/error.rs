@@ -127,6 +127,9 @@ pub enum InvalidResourceKind {
     /// The resource does not match its layout, format, or declared use.
     #[error("resource does not match its layout, format, or declared use")]
     Mismatch,
+    /// The resource was used without being declared for that use.
+    #[error("resource was used without being declared for that use")]
+    Undeclared,
     /// The resource memory domain does not permit this host access.
     #[error("memory domain does not permit this host access")]
     NotHostAccessible,

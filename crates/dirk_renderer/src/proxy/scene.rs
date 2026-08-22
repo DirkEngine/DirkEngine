@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use dirk_rhi::{
-    CommandBuffer as _, Extent3d, ImageUsages, MemoryDomain, Rect, SampleCount, TextureFormat,
-    Viewport,
+    CommandBuffer as _, Extent3d, MemoryDomain, Rect, SampleCount, TextureFormat, Viewport,
 };
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
@@ -77,7 +76,6 @@ impl SceneManager {
             width: settings.extent.width,
             height: settings.extent.height,
             format: self.device.properties.depth_format,
-            usage: ImageUsages::DEPTH_STENCIL_ATTACHMENT,
             samples: self.device.properties.msaa_samples,
             imported: None,
         });
@@ -89,7 +87,6 @@ impl SceneManager {
                 width: settings.extent.width,
                 height: settings.extent.height,
                 format: settings.format,
-                usage: ImageUsages::TRANSIENT_ATTACHMENT | ImageUsages::COLOR_ATTACHMENT,
                 samples: self.device.properties.msaa_samples,
                 imported: None,
             }))
@@ -107,7 +104,7 @@ impl SceneManager {
             pass.write_color_attachment(target, AttachmentInfo::clear_color(r, g, b, a));
         }
         pass.write_depth_attachment(depth, AttachmentInfo::clear_discard_depth(1., 0));
-        pass.execute(Box::new(move |_, cmd, _| {
+        pass.execute(Box::new(move |cmd, _| {
             self.record_scene_draws(models, cmd, world, &settings, camera)
         }));
     }

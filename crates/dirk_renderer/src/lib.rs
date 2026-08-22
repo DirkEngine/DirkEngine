@@ -12,7 +12,7 @@ use std::{
 use anyhow::Context;
 #[cfg(feature = "editor")]
 use ash::vk;
-use dirk_rhi::{Backend as _, Extent3d, ImageUsages, SampleCount};
+use dirk_rhi::{Backend as _, Extent3d, SampleCount};
 #[cfg(not(feature = "editor"))]
 use dirk_rhi::{CommandBuffer as _, ImageAspects, ImageCopy};
 
@@ -655,7 +655,6 @@ impl Renderer {
                 width: viewport.settings().extent.width,
                 height: viewport.settings().extent.height,
                 format: viewport.settings().format,
-                usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
                 samples: SampleCount::One,
                 imported: Some(viewport.import()),
             });
@@ -726,16 +725,10 @@ impl Renderer {
         #[cfg(feature = "editor")]
         let mut egui_target = None;
         for target in targets {
-            #[cfg(feature = "editor")]
-            let swapchain_usage = ImageUsages::COLOR_ATTACHMENT;
-            #[cfg(not(feature = "editor"))]
-            let swapchain_usage = ImageUsages::COLOR_ATTACHMENT | ImageUsages::COPY_DST;
-
             let swapchain = graph.import_texture(TextureDesc {
                 width: target.extent.width,
                 height: target.extent.height,
                 format: target.image.format(),
-                usage: swapchain_usage,
                 samples: SampleCount::One,
                 imported: Some(target.image.import()),
             });
@@ -762,9 +755,6 @@ impl Renderer {
                         width: viewport_extent.width,
                         height: viewport_extent.height,
                         format: viewport.settings().format,
-                        usage: ImageUsages::COLOR_ATTACHMENT
-                            | ImageUsages::SAMPLED
-                            | ImageUsages::COPY_SRC,
                         samples: SampleCount::One,
                         imported: Some(if rendered_this_frame {
                             viewport.import_after_render()
@@ -777,10 +767,12 @@ impl Renderer {
                     copy_pass
                         .read_transfer_src(viewport_source)
                         .write_transfer_dst(swapchain);
-                    copy_pass.execute(Box::new(move |_, cmd, images| {
+                    copy_pass.execute(Box::new(move |cmd, ctx| {
+                        let source = ctx.resolve(viewport_source)?;
+                        let destination = ctx.resolve(swapchain)?;
                         cmd.rhi_mut().copy_image(
-                            &images[viewport_source.index()].image,
-                            &images[swapchain.index()].image,
+                            &source.image,
+                            &destination.image,
                             &[ImageCopy {
                                 src_mip_level: 0,
                                 src_base_array_layer: 0,
@@ -804,9 +796,9 @@ impl Renderer {
             let mut egui_pass = graph.add_pass("egui");
             egui_pass.write_color_attachment(swapchain, frame_graph::AttachmentInfo::load_store());
             let egui = &mut self.egui;
-            egui_pass.execute(Box::new(move |device, cmd, _| {
+            egui_pass.execute(Box::new(move |cmd, ctx| {
                 egui.render(
-                    device,
+                    ctx.device(),
                     cmd,
                     vk::Extent2D {
                         width: extent.width,
