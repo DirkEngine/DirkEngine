@@ -1,10 +1,10 @@
-use std::{ffi::CString, sync::Arc};
+use std::{ffi::CString, fmt, sync::Arc};
 
 use ash::vk;
 use dirk_rhi::{
-    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Error,
-    Fence, GraphicsPipelineDesc, ImageDesc, ImageViewDesc, Result, SamplerDesc, ShaderDesc,
-    ShaderSource, ShaderStage, TimelineSemaphore,
+    BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Fence,
+    GraphicsPipelineDesc, ImageDesc, ImageViewDesc, InvalidResource as Ir, Result, SamplerDesc,
+    ShaderDesc, ShaderSource, ShaderStage, TimelineSemaphore,
 };
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use parking_lot::Mutex;
@@ -20,6 +20,16 @@ use crate::{
 /// Allocated Vulkan buffer with shared ownership.
 pub struct VulkanBuffer(Arc<BufferInner>);
 
+impl fmt::Debug for VulkanBuffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanBuffer")
+            .field("raw", &self.0.raw)
+            .field("size", &self.0.size)
+            .finish()
+    }
+}
+
 struct BufferInner {
     context: Arc<Context>,
     raw: vk::Buffer,
@@ -30,7 +40,7 @@ struct BufferInner {
 impl VulkanBuffer {
     pub(crate) fn create(context: &Arc<Context>, desc: &BufferDesc<'_>) -> Result<Self> {
         if desc.size == 0 {
-            return Err(Error::InvalidResource("buffer size must be non-zero"));
+            return Err(Ir::Empty.into());
         }
         let create_info = vk::BufferCreateInfo::default()
             .size(desc.size)
@@ -90,24 +100,22 @@ impl VulkanBuffer {
 }
 
 impl Buffer for VulkanBuffer {
+    fn size(&self) -> u64 {
+        self.0.size
+    }
+
     fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        let data_len = u64::try_from(data.len())
-            .map_err(|_| Error::InvalidResource("buffer write is too large"))?;
+        let data_len = u64::try_from(data.len()).map_err(|_| Ir::OutOfRange)?;
         if offset
             .checked_add(data_len)
             .is_none_or(|end| end > self.0.size)
         {
-            return Err(Error::InvalidResource("buffer write exceeds allocation"));
+            return Err(Ir::OutOfRange.into());
         }
         let allocation = self.0.allocation.lock();
-        let allocation = allocation.as_ref().ok_or(Error::InvalidResource(
-            "buffer allocation was already released",
-        ))?;
-        let mapped = allocation
-            .mapped_ptr()
-            .ok_or(Error::InvalidResource("buffer memory is not host visible"))?;
-        let host_offset = usize::try_from(offset)
-            .map_err(|_| Error::InvalidResource("buffer offset exceeds host address space"))?;
+        let allocation = allocation.as_ref().ok_or(Ir::BadState)?;
+        let mapped = allocation.mapped_ptr().ok_or(Ir::NotHostAccessible)?;
+        let host_offset = usize::try_from(offset).map_err(|_| Ir::OutOfRange)?;
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr(),
@@ -153,6 +161,15 @@ impl Drop for BufferInner {
 /// Owned or swapchain-provided Vulkan image.
 pub struct VulkanImage(Arc<ImageInner>);
 
+impl fmt::Debug for VulkanImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanImage")
+            .field("raw", &self.0.raw)
+            .finish()
+    }
+}
+
 enum ImageOwnership {
     Owned {
         context: Arc<Context>,
@@ -165,7 +182,7 @@ enum ImageOwnership {
 
 struct ImageInner {
     raw: vk::Image,
-    format: dirk_rhi::Format,
+    format: dirk_rhi::TextureFormat,
     extent: dirk_rhi::Extent3d,
     ownership: ImageOwnership,
 }
@@ -173,7 +190,7 @@ struct ImageInner {
 impl VulkanImage {
     pub(crate) fn create(context: &Arc<Context>, desc: &ImageDesc<'_>) -> Result<Self> {
         if desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0 {
-            return Err(Error::InvalidResource("image extent must be non-zero"));
+            return Err(Ir::Empty.into());
         }
         let image_type = if desc.extent.depth > 1 {
             vk::ImageType::TYPE_3D
@@ -233,7 +250,7 @@ impl VulkanImage {
     pub(crate) fn surface(
         generation: Arc<SwapchainGeneration>,
         raw: vk::Image,
-        format: dirk_rhi::Format,
+        format: dirk_rhi::TextureFormat,
         extent: dirk_rhi::Extent3d,
     ) -> Self {
         Self(Arc::new(ImageInner {
@@ -263,7 +280,7 @@ impl VulkanImage {
 
     #[must_use]
     /// Returns the neutral image format.
-    pub fn format(&self) -> dirk_rhi::Format {
+    pub fn format(&self) -> dirk_rhi::TextureFormat {
         self.0.format
     }
 
@@ -293,6 +310,15 @@ impl Drop for ImageInner {
 #[derive(Clone)]
 /// Shared Vulkan image view.
 pub struct VulkanImageView(Arc<ImageViewInner>);
+
+impl fmt::Debug for VulkanImageView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanImageView")
+            .field("raw", &self.0.raw)
+            .finish()
+    }
+}
 
 enum ImageViewOwnership {
     Owned(Arc<Context>),
@@ -376,6 +402,15 @@ impl Drop for ImageViewInner {
 /// Shared Vulkan texture sampler.
 pub struct VulkanSampler(Arc<SamplerInner>);
 
+impl fmt::Debug for VulkanSampler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanSampler")
+            .field("raw", &self.0.raw)
+            .finish()
+    }
+}
+
 struct SamplerInner {
     context: Arc<Context>,
     raw: vk::Sampler,
@@ -384,9 +419,7 @@ struct SamplerInner {
 impl VulkanSampler {
     pub(crate) fn create(context: &Arc<Context>, desc: &SamplerDesc<'_>) -> Result<Self> {
         if desc.max_anisotropy > context.capabilities.max_sampler_anisotropy {
-            return Err(Error::InvalidResource(
-                "sampler anisotropy exceeds device limit",
-            ));
+            return Err(Ir::OutOfRange.into());
         }
         let anisotropy = context.sampler_anisotropy && desc.max_anisotropy > 1;
         let create_info = vk::SamplerCreateInfo::default()
@@ -442,10 +475,11 @@ struct ShaderInner {
 impl VulkanShader {
     pub(crate) fn create(context: &Arc<Context>, desc: &ShaderDesc<'_>) -> Result<Self> {
         let ShaderSource::SpirV(code) = desc.source else {
-            return Err(Error::Unsupported("Vulkan shaders require SPIR-V source"));
+            return Err(
+                dirk_rhi::UnsupportedOperation::ShaderSource(desc.source.language()).into(),
+            );
         };
-        let entry = CString::new(desc.entry)
-            .map_err(|_| Error::InvalidResource("shader entry point contains a null byte"))?;
+        let entry = CString::new(desc.entry).map_err(|_| Ir::Malformed)?;
         let create_info = vk::ShaderModuleCreateInfo::default().code(code);
         let raw =
             unsafe { context.device.create_shader_module(&create_info, None) }.map_err(vk_error)?;
@@ -492,9 +526,7 @@ impl VulkanBindGroupLayout {
             .iter()
             .any(|entry| !bindings.insert(entry.binding))
         {
-            return Err(Error::InvalidResource(
-                "bind group layout binding is duplicated",
-            ));
+            return Err(Ir::Mismatch.into());
         }
         let entries = desc
             .entries
@@ -570,14 +602,10 @@ impl VulkanBindGroup {
         desc: &BindGroupDesc<'_, VulkanBackend>,
     ) -> Result<Self> {
         if desc.entries.len() != desc.layout.0.entries.len() {
-            return Err(Error::InvalidResource(
-                "bind group must populate every layout entry",
-            ));
+            return Err(Ir::Mismatch.into());
         }
         if !Arc::ptr_eq(context, desc.layout.context()) {
-            return Err(Error::InvalidResource(
-                "bind group layout belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         let DescriptorResources {
             data,
@@ -661,7 +689,7 @@ impl VulkanBindGroup {
         let mut seen = std::collections::HashSet::new();
         for entry in desc.entries {
             if !seen.insert(entry.binding) {
-                return Err(Error::InvalidResource("bind group binding is duplicated"));
+                return Err(Ir::Mismatch.into());
             }
             let expected = desc
                 .layout
@@ -669,9 +697,7 @@ impl VulkanBindGroup {
                 .entries
                 .iter()
                 .find(|layout| layout.binding == entry.binding)
-                .ok_or(Error::InvalidResource(
-                    "bind group binding is not in its layout",
-                ))?;
+                .ok_or(Ir::Mismatch)?;
             match (&entry.resource, expected.ty) {
                 (
                     BindingResource::Buffer {
@@ -722,9 +748,7 @@ impl VulkanBindGroup {
                     resources.views.push((*view).clone());
                 }
                 _ => {
-                    return Err(Error::InvalidResource(
-                        "bind group resource does not match its layout or RHI instance",
-                    ));
+                    return Err(Ir::Mismatch.into());
                 }
             }
         }
@@ -772,9 +796,7 @@ impl VulkanPipelineLayout {
             .iter()
             .any(|layout| !Arc::ptr_eq(context, layout.context()))
         {
-            return Err(Error::InvalidResource(
-                "pipeline layout resource belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         let raw_layouts = desc
             .bind_group_layouts
@@ -837,37 +859,39 @@ impl VulkanGraphicsPipeline {
     ) -> Result<Self> {
         if !Arc::ptr_eq(context, desc.layout.context())
             || !Arc::ptr_eq(context, desc.vertex.context())
-            || !Arc::ptr_eq(context, desc.fragment.context())
+            || desc
+                .fragment
+                .is_some_and(|fragment| !Arc::ptr_eq(context, fragment.context()))
         {
-            return Err(Error::InvalidResource(
-                "graphics pipeline resource belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         if desc.vertex.0.stage != ShaderStage::Vertex
-            || desc.fragment.0.stage != ShaderStage::Fragment
+            || desc
+                .fragment
+                .is_some_and(|fragment| fragment.0.stage != ShaderStage::Fragment)
         {
-            return Err(Error::InvalidResource(
-                "graphics pipeline shader stages are incorrect",
-            ));
+            return Err(Ir::Mismatch.into());
         }
-        let shader_stages = [
+        let mut shader_stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(desc.vertex.raw())
                 .name(&desc.vertex.0.entry),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(desc.fragment.raw())
-                .name(&desc.fragment.0.entry),
         ];
+        if let Some(fragment) = desc.fragment {
+            let fragment_stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment.raw())
+                .name(&fragment.0.entry);
+            shader_stages.push(fragment_stage);
+        }
         let bindings = desc
             .vertex_buffers
             .iter()
             .enumerate()
             .map(|(index, layout)| {
                 Ok(vk::VertexInputBindingDescription {
-                    binding: u32::try_from(index)
-                        .map_err(|_| Error::InvalidResource("too many vertex buffers"))?,
+                    binding: u32::try_from(index).map_err(|_| Ir::OutOfRange)?,
                     stride: layout.stride,
                     input_rate: convert::input_rate(layout.step_mode),
                 })
@@ -875,13 +899,12 @@ impl VulkanGraphicsPipeline {
             .collect::<Result<Vec<_>>>()?;
         let mut attributes = Vec::new();
         for (binding, layout) in desc.vertex_buffers.iter().enumerate() {
-            let binding = u32::try_from(binding)
-                .map_err(|_| Error::InvalidResource("too many vertex buffers"))?;
+            let binding = u32::try_from(binding).map_err(|_| Ir::OutOfRange)?;
             attributes.extend(layout.attributes.iter().map(|attribute| {
                 vk::VertexInputAttributeDescription {
                     location: attribute.location,
                     binding,
-                    format: convert::format(attribute.format),
+                    format: convert::vertex_format(attribute.format),
                     offset: attribute.offset,
                 }
             }));
@@ -890,37 +913,83 @@ impl VulkanGraphicsPipeline {
             .vertex_binding_descriptions(&bindings)
             .vertex_attribute_descriptions(&attributes);
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(convert::topology(desc.raster.topology));
+            .topology(convert::topology(desc.raster.topology))
+            .primitive_restart_enable(desc.primitive_restart);
         let viewport = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
+        let bias_enabled =
+            desc.depth_bias.constant_factor != 0.0 || desc.depth_bias.slope_factor != 0.0;
         let raster = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(convert::cull(desc.raster.cull_mode))
             .front_face(convert::front_face(desc.raster.front_face))
+            .depth_bias_enable(bias_enabled)
+            .depth_bias_constant_factor(desc.depth_bias.constant_factor)
+            .depth_bias_slope_factor(desc.depth_bias.slope_factor)
+            .depth_bias_clamp(desc.depth_bias.clamp)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(convert::samples(desc.samples));
+            .rasterization_samples(convert::samples(desc.samples))
+            .alpha_to_coverage_enable(desc.alpha_to_coverage);
         let color_attachments = desc
             .color_formats
             .iter()
-            .map(|_| {
-                vk::PipelineColorBlendAttachmentState::default()
+            .map(|_| match desc.blend {
+                Some(blend) => {
+                    let component = |component: dirk_rhi::BlendComponent| {
+                        vk::PipelineColorBlendAttachmentState::default()
+                            .blend_enable(true)
+                            .src_color_blend_factor(convert::blend_factor(component.source))
+                            .dst_color_blend_factor(convert::blend_factor(component.destination))
+                            .color_blend_op(convert::blend_op(component.operation))
+                            .src_alpha_blend_factor(convert::blend_factor(component.source))
+                            .dst_alpha_blend_factor(convert::blend_factor(component.destination))
+                            .alpha_blend_op(convert::blend_op(component.operation))
+                            .color_write_mask(vk::ColorComponentFlags::RGBA)
+                    };
+                    component(blend.color)
+                }
+                None => vk::PipelineColorBlendAttachmentState::default()
                     .blend_enable(false)
-                    .color_write_mask(vk::ColorComponentFlags::RGBA)
+                    .color_write_mask(vk::ColorComponentFlags::RGBA),
             })
             .collect::<Vec<_>>();
-        let color_blend =
-            vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_attachments);
+        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&color_attachments);
         let depth =
             desc.depth
                 .map_or_else(vk::PipelineDepthStencilStateCreateInfo::default, |depth| {
-                    vk::PipelineDepthStencilStateCreateInfo::default()
+                    let mut info = vk::PipelineDepthStencilStateCreateInfo::default()
                         .depth_test_enable(true)
                         .depth_write_enable(depth.write_enabled)
-                        .depth_compare_op(convert::compare(depth.compare))
+                        .depth_compare_op(convert::compare(depth.compare));
+                    if let Some(stencil) = depth.stencil {
+                        let face = |face: dirk_rhi::StencilFaceState| {
+                            vk::StencilOpState::default()
+                                .fail_op(convert::stencil_op(face.fail_op))
+                                .pass_op(convert::stencil_op(face.pass_op))
+                                .depth_fail_op(convert::stencil_op(face.depth_fail_op))
+                                .compare_op(convert::compare(face.compare))
+                                .compare_mask(stencil.read_mask)
+                                .write_mask(stencil.write_mask)
+                        };
+                        info = info
+                            .stencil_test_enable(true)
+                            .front(face(stencil.front))
+                            .back(face(stencil.back));
+                    } else {
+                        info = info.stencil_test_enable(false);
+                    }
+                    info
                 });
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::BLEND_CONSTANTS,
+            vk::DynamicState::STENCIL_REFERENCE,
+        ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let color_formats = desc
             .color_formats

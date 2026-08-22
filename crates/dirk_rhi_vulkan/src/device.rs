@@ -12,7 +12,10 @@ use ash::{
     khr::{surface, swapchain},
     vk,
 };
-use dirk_rhi::{Capabilities, Error, Format, QueueType, Result, RhiCreateInfo, SampleCount};
+use dirk_rhi::{
+    Capabilities, Error, InvalidResource as Ir, QueueType, Result, RhiCreateInfo, SampleCount,
+    TextureFormat,
+};
 use gpu_allocator::{
     AllocationSizes, AllocatorDebugSettings,
     vulkan::{Allocation, Allocator, AllocatorCreateDesc},
@@ -95,6 +98,7 @@ pub(crate) struct Context {
     pub(crate) families: QueueFamilies,
     pub(crate) queues: Queues,
     pub(crate) capabilities: Capabilities,
+    pub(crate) supported_depth_formats: &'static [TextureFormat],
     pub(crate) sampler_anisotropy: bool,
     pub(crate) non_coherent_atom_size: u64,
     pub(crate) enabled_instance_extensions: HashSet<String>,
@@ -156,10 +160,8 @@ impl Context {
     )]
     pub(crate) fn new(info: &RhiCreateInfo<'_>) -> Result<Arc<Self>> {
         let entry = unsafe { ash::Entry::load() }.map_err(backend_error)?;
-        let application_name = CString::new(info.application_name)
-            .map_err(|_| Error::InvalidResource("application name contains a null byte"))?;
-        let engine_name = CString::new(info.engine_name)
-            .map_err(|_| Error::InvalidResource("engine name contains a null byte"))?;
+        let application_name = CString::new(info.application_name).map_err(|_| Ir::Malformed)?;
+        let engine_name = CString::new(info.engine_name).map_err(|_| Ir::Malformed)?;
         let app_info = vk::ApplicationInfo::default()
             .application_name(&application_name)
             .application_version(version(info.application_version))
@@ -167,8 +169,8 @@ impl Context {
             .engine_version(version(info.engine_version))
             .api_version(vk::API_VERSION_1_3);
 
-        let mut extensions = if let Some(surface) = info.compatible_surface {
-            ash_window::enumerate_required_extensions(surface.display)
+        let mut extensions = if let Some((display, _window)) = info.compatible_surface {
+            ash_window::enumerate_required_extensions(display.into())
                 .map_err(vk_error)?
                 .to_vec()
         } else {
@@ -199,7 +201,9 @@ impl Context {
         for &extension in &extensions {
             let name = unsafe { CStr::from_ptr(extension) };
             if !extension_available(&available_extensions, name) {
-                return Err(Error::Unsupported("required Vulkan instance extension"));
+                return Err(backend_error(anyhow::anyhow!(
+                    "required Vulkan instance extension is unavailable"
+                )));
             }
         }
 
@@ -253,14 +257,14 @@ impl Context {
         };
 
         let surface_loader = surface::Instance::new(&entry, instance);
-        let temporary_surface = if let Some(surface) = info.compatible_surface {
+        let temporary_surface = if let Some((display, window)) = info.compatible_surface {
             Some(
                 unsafe {
                     ash_window::create_surface(
                         &entry,
                         instance,
-                        surface.display,
-                        surface.window,
+                        display.into(),
+                        window.into(),
                         None,
                     )
                 }
@@ -314,6 +318,7 @@ impl Context {
             families: selected.families,
             queues,
             capabilities: selected.capabilities,
+            supported_depth_formats: selected.supported_depth_formats,
             sampler_anisotropy: selected.sampler_anisotropy,
             non_coherent_atom_size: selected.non_coherent_atom_size,
             enabled_instance_extensions,
@@ -457,6 +462,7 @@ struct SelectedDevice {
     api_version: String,
     families: QueueFamilies,
     capabilities: Capabilities,
+    supported_depth_formats: &'static [dirk_rhi::TextureFormat],
     sampler_anisotropy: bool,
     non_coherent_atom_size: u64,
     extensions: Vec<vk::ExtensionProperties>,
@@ -476,6 +482,10 @@ fn select_physical_device(
         .ok_or(Error::NoDevice)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "device inspection keeps queried limits, features, and scoring together"
+)]
 fn inspect_device(
     instance: &ash::Instance,
     surface_loader: &surface::Instance,
@@ -510,20 +520,24 @@ fn inspect_device(
 
     let queue_properties = unsafe { instance.get_physical_device_queue_family_properties(raw) };
     let families = QueueFamilies::resolve(&queue_properties, surface_loader, surface, raw)?;
-    let depth_format = [
-        Format::Depth32Float,
-        Format::Depth32FloatStencil8,
-        Format::Depth24UnormStencil8,
-        Format::Depth16Unorm,
+    let supported_depth_formats: &'static [TextureFormat] = [
+        TextureFormat::Depth32Float,
+        TextureFormat::Depth24UnormStencil8,
+        TextureFormat::Depth16Unorm,
     ]
     .into_iter()
-    .find(|format| {
+    .filter(|format| {
         unsafe {
             instance.get_physical_device_format_properties(raw, crate::convert::format(*format))
         }
         .optimal_tiling_features
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-    })?;
+    })
+    .collect::<Vec<_>>()
+    .leak();
+    if supported_depth_formats.is_empty() {
+        return None;
+    }
 
     let sample_flags = properties.limits.framebuffer_color_sample_counts
         & properties.limits.framebuffer_depth_sample_counts;
@@ -575,13 +589,19 @@ fn inspect_device(
             ),
             families,
             capabilities: Capabilities {
-                depth_format,
                 max_samples,
                 max_sampler_anisotropy,
+                min_uniform_buffer_offset_alignment: properties
+                    .limits
+                    .min_uniform_buffer_offset_alignment,
+                min_storage_buffer_offset_alignment: properties
+                    .limits
+                    .min_storage_buffer_offset_alignment,
                 dedicated_compute_queue: families.compute != families.graphics,
                 dedicated_copy_queue: families.copy != families.graphics
                     && families.copy != families.compute,
             },
+            supported_depth_formats,
             sampler_anisotropy,
             non_coherent_atom_size: properties.limits.non_coherent_atom_size,
             extensions,

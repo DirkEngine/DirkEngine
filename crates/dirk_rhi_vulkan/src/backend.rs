@@ -3,8 +3,9 @@ use std::sync::Arc;
 use ash::vk;
 use dirk_rhi::{
     Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageViewDesc, PipelineLayoutDesc, QueueType, Result, RhiCreateInfo, SamplerDesc,
-    ShaderDesc, Submission, SurfaceCreateInfo, SwapchainDesc,
+    ImageDesc, ImageViewDesc, InvalidResource as Ir, PipelineLayoutDesc, QueueType, Result,
+    RhiCreateInfo, SamplerDesc, ShaderDesc, Submission, SurfaceCreateInfo, SwapchainDesc,
+    TextureFormat,
 };
 
 use crate::{
@@ -30,9 +31,7 @@ impl VulkanBackend {
         if Arc::ptr_eq(&self.context, context) {
             Ok(())
         } else {
-            Err(dirk_rhi::Error::InvalidResource(
-                "resource belongs to a different RHI instance",
-            ))
+            Err(Ir::ForeignInstance.into())
         }
     }
 
@@ -101,6 +100,10 @@ impl Backend for VulkanBackend {
         self.context.capabilities
     }
 
+    fn supported_depth_formats(&self) -> &'static [TextureFormat] {
+        self.context.supported_depth_formats
+    }
+
     fn wait_idle(&self) -> Result<()> {
         unsafe { self.context.device.device_wait_idle() }.map_err(vk_error)?;
         self.context.collect_all_garbage();
@@ -122,9 +125,7 @@ impl Backend for VulkanBackend {
 
     fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<VulkanImageView> {
         if !Arc::ptr_eq(&self.context, desc.image.context()) {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "image belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         VulkanImageView::create(&self.context, desc)
     }
@@ -166,7 +167,7 @@ impl Backend for VulkanBackend {
         VulkanCommandPool::create(&self.context, queue)
     }
 
-    fn create_command_buffer(&self, pool: &VulkanCommandPool) -> Result<VulkanCommandBuffer> {
+    fn create_command_buffer(&self, pool: &mut VulkanCommandPool) -> Result<VulkanCommandBuffer> {
         self.require_context(pool.context())?;
         VulkanCommandBuffer::create(pool)
     }
@@ -180,7 +181,9 @@ impl Backend for VulkanBackend {
     }
 
     fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
-        self.require_context(submission.fence.context())?;
+        if let Some(fence) = submission.fence {
+            self.require_context(fence.context())?;
+        }
         for command in submission.command_buffers {
             self.require_context(command.context())?;
         }
@@ -199,9 +202,7 @@ impl Backend for VulkanBackend {
             .iter()
             .any(|command| command.queue() != queue)
         {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "command buffer was allocated for a different queue",
-            ));
+            return Err(Ir::Mismatch.into());
         }
         let fence = submission.fence;
         let mut waits =
@@ -245,7 +246,7 @@ impl Backend for VulkanBackend {
                 .queue_submit2(
                     self.context.queue(queue),
                     std::slice::from_ref(&submit),
-                    fence.raw(),
+                    fence.map_or_else(vk::Fence::null, super::resource::VulkanFence::raw),
                 )
                 .map_err(vk_error)?;
         }
@@ -271,7 +272,9 @@ impl Backend for VulkanBackend {
                     .iter()
                     .map(|point| point.semaphore.retain()),
             );
-        fence.retain_resources(retained);
+        if let Some(fence) = fence {
+            fence.retain_resources(retained);
+        }
         Ok(())
     }
 

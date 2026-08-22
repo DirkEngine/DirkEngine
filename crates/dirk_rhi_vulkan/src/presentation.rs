@@ -2,8 +2,8 @@ use std::{ffi::CStr, sync::Arc};
 
 use ash::vk;
 use dirk_rhi::{
-    Error, Extent3d, Format, ImageUsages, Result, SurfaceCreateInfo, SurfaceFrame, SurfaceStatus,
-    Swapchain, SwapchainDesc,
+    Error, Extent3d, ImageUsages, InvalidResource as Ir, PresentMode, Result, SurfaceCreateInfo,
+    SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc, TextureFormat,
 };
 
 use crate::{
@@ -24,23 +24,23 @@ struct SurfaceInner {
 impl VulkanSurface {
     pub(crate) fn create(context: &Arc<Context>, info: SurfaceCreateInfo) -> Result<Self> {
         let required_extensions =
-            ash_window::enumerate_required_extensions(info.display).map_err(vk_error)?;
+            ash_window::enumerate_required_extensions(info.display.into()).map_err(vk_error)?;
         if required_extensions.iter().any(|&extension| {
             let extension = unsafe { CStr::from_ptr(extension) }.to_string_lossy();
             !context
                 .enabled_instance_extensions
                 .contains(extension.as_ref())
         }) {
-            return Err(Error::Unsupported(
-                "RHI was not created with extensions for this surface type",
-            ));
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the RHI was not created with the instance extensions required by this surface"
+            )));
         }
         let raw = unsafe {
             ash_window::create_surface(
                 &context.entry,
                 &context.instance,
-                info.display,
-                info.window,
+                info.display.into(),
+                info.window.into(),
                 None,
             )
         }
@@ -55,9 +55,9 @@ impl VulkanSurface {
         .map_err(vk_error)?;
         if !supported {
             unsafe { context.surface_loader.destroy_surface(raw, None) };
-            return Err(Error::Unsupported(
-                "selected Vulkan queue cannot present to this surface",
-            ));
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the selected Vulkan queue family cannot present to this surface"
+            )));
         }
         Ok(Self(Arc::new(SurfaceInner {
             context: context.clone(),
@@ -85,7 +85,7 @@ pub(crate) struct SwapchainGeneration {
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
-    format: Format,
+    format: TextureFormat,
     extent: Extent3d,
 }
 
@@ -96,7 +96,8 @@ impl SwapchainGeneration {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "swapchain creation keeps queried capabilities and borrowed Vulkan create-info data together"
+        clippy::too_many_arguments,
+        reason = "swapchain creation keeps queried capabilities, format preference, and presentation policy together"
     )]
     fn create(
         context: &Arc<Context>,
@@ -104,12 +105,12 @@ impl SwapchainGeneration {
         width: u32,
         height: u32,
         usage: ImageUsages,
+        preferred_formats: &[TextureFormat],
+        present_mode: PresentMode,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Arc<Self>> {
         if !Arc::ptr_eq(context, &surface.0.context) {
-            return Err(Error::InvalidResource(
-                "surface belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         let capabilities = unsafe {
             context
@@ -137,38 +138,59 @@ impl SwapchainGeneration {
                 .get_physical_device_surface_formats(context.physical_device, surface.raw())
         }
         .map_err(vk_error)?;
-        let surface_format = formats
+        let surface_format = preferred_formats
             .iter()
-            .find(|format| {
-                format.format == vk::Format::B8G8R8A8_SRGB
-                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            .find_map(|preferred| {
+                let requested = convert::format(*preferred);
+                formats
+                    .iter()
+                    .find(|format| {
+                        format.format == requested
+                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                    })
+                    .copied()
             })
-            .copied()
+            .or_else(|| {
+                formats
+                    .iter()
+                    .find(|format| {
+                        format.format == vk::Format::B8G8R8A8_SRGB
+                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                    })
+                    .copied()
+            })
             .or_else(|| {
                 formats
                     .iter()
                     .find(|format| convert::rhi_format(format.format).is_some())
                     .copied()
             })
-            .ok_or(Error::Unsupported("surface has no supported color format"))?;
-        let format = convert::rhi_format(surface_format.format).ok_or(Error::Unsupported(
-            "surface format is not represented by the RHI",
-        ))?;
+            .ok_or_else(|| {
+                Error::Backend(anyhow::anyhow!(
+                    "the surface exposes no color format representable by the RHI"
+                ))
+            })?;
+        let format = convert::rhi_format(surface_format.format).ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!(
+                "surface format is not represented by the RHI"
+            ))
+        })?;
         let present_modes = unsafe {
             context
                 .surface_loader
                 .get_physical_device_surface_present_modes(context.physical_device, surface.raw())
         }
         .map_err(vk_error)?;
-        let present_mode = present_modes
-            .into_iter()
-            .find(|mode| *mode == vk::PresentModeKHR::MAILBOX)
-            .unwrap_or(vk::PresentModeKHR::FIFO);
+        let present_mode = if present_modes.contains(&convert::present_mode(present_mode)) {
+            convert::present_mode(present_mode)
+        } else {
+            vk::PresentModeKHR::FIFO
+        };
         let image_usage = convert::image_usage(usage);
         if image_usage.is_empty() || !capabilities.supported_usage_flags.contains(image_usage) {
-            return Err(Error::Unsupported(
-                "surface does not support the requested swapchain image usage",
-            ));
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the surface does not support the requested swapchain image usage"
+            )));
         }
         let mut image_count = capabilities.min_image_count.saturating_add(1);
         if capabilities.max_image_count > 0 {
@@ -190,9 +212,11 @@ impl SwapchainGeneration {
         ]
         .into_iter()
         .find(|mode| capabilities.supported_composite_alpha.contains(*mode))
-        .ok_or(Error::Unsupported(
-            "surface has no supported composite alpha mode",
-        ))?;
+        .ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!(
+                "the surface exposes no supported composite alpha mode"
+            ))
+        })?;
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.raw())
             .min_image_count(image_count)
@@ -299,6 +323,8 @@ impl Drop for SwapchainGeneration {
 pub struct VulkanSwapchain {
     generation: Arc<SwapchainGeneration>,
     usage: ImageUsages,
+    preferred_formats: Vec<TextureFormat>,
+    present_mode: PresentMode,
     semaphore_index: usize,
 }
 
@@ -314,9 +340,13 @@ impl VulkanSwapchain {
                 desc.width,
                 desc.height,
                 desc.usage,
+                desc.preferred_formats,
+                desc.present_mode,
                 vk::SwapchainKHR::null(),
             )?,
             usage: desc.usage,
+            preferred_formats: desc.preferred_formats.to_vec(),
+            present_mode: desc.present_mode,
             semaphore_index: 0,
         })
     }
@@ -329,7 +359,7 @@ impl VulkanSwapchain {
 }
 
 impl Swapchain<VulkanBackend> for VulkanSwapchain {
-    fn format(&self) -> Format {
+    fn format(&self) -> TextureFormat {
         self.generation.format
     }
 
@@ -384,6 +414,8 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             width,
             height,
             self.usage,
+            &self.preferred_formats,
+            self.present_mode,
             self.generation.raw,
         )?;
         self.generation = generation;
@@ -391,11 +423,9 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
         Ok(())
     }
 
-    fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
+    fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
         if !Arc::ptr_eq(&self.generation.context, frame.context()) {
-            return Err(Error::InvalidResource(
-                "frame belongs to a different RHI instance",
-            ));
+            return Err(Ir::ForeignInstance.into());
         }
         let waits = [frame.render_finished()];
         let swapchains = [frame.generation.raw];
@@ -404,17 +434,16 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             .wait_semaphores(&waits)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-        let suboptimal = unsafe {
+        match unsafe {
             self.generation
                 .context
                 .swapchain_loader
                 .queue_present(self.generation.context.queues.present, &present_info)
+        } {
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(SurfaceStatus::Suboptimal),
+            Ok(false) => Ok(SurfaceStatus::Optimal),
+            Err(error) => Err(vk_error(error)),
         }
-        .map_err(vk_error)?;
-        if suboptimal {
-            return Err(Error::SurfaceOutOfDate);
-        }
-        Ok(())
     }
 }
 
@@ -451,7 +480,7 @@ impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
         &self.view
     }
 
-    fn format(&self) -> Format {
+    fn format(&self) -> TextureFormat {
         self.generation.format
     }
 

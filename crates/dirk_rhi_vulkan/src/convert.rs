@@ -1,41 +1,62 @@
 use ash::vk;
 use dirk_rhi::{
-    AddressMode, BindingType, BufferUsages, CompareOp, CullMode, FilterMode, Format, FrontFace,
-    ImageAspects, ImageState, ImageUsages, ImageViewType, IndexFormat, MemoryDomain,
-    PipelineStages, PrimitiveTopology, QueueType, SampleCount, ShaderStages, StoreOp,
-    VertexStepMode,
+    AddressMode, BindingType, BlendFactor, BlendOp, BufferUsages, CompareOp, CullMode, FilterMode,
+    FrontFace, ImageAspects, ImageState, ImageUsages, ImageViewType, IndexFormat, MemoryDomain,
+    PipelineStages, PresentMode, PrimitiveTopology, QueueType, SampleCount, ShaderStages,
+    StencilOp, StoreOp, TextureFormat, VertexFormat, VertexStepMode,
 };
 use gpu_allocator::MemoryLocation;
 
-pub(crate) fn format(value: Format) -> vk::Format {
+pub(crate) fn format(value: TextureFormat) -> vk::Format {
     match value {
-        Format::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
-        Format::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
-        Format::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
-        Format::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
-        Format::Rg32Float => vk::Format::R32G32_SFLOAT,
-        Format::Rgb32Float => vk::Format::R32G32B32_SFLOAT,
-        Format::Depth16Unorm => vk::Format::D16_UNORM,
-        Format::Depth24UnormStencil8 => vk::Format::D24_UNORM_S8_UINT,
-        Format::Depth32Float => vk::Format::D32_SFLOAT,
-        Format::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+        TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+        TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
+        TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+        TextureFormat::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
+        TextureFormat::R16Float => vk::Format::R16_SFLOAT,
+        TextureFormat::Rg16Float => vk::Format::R16G16_SFLOAT,
+        TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+        TextureFormat::R32Float => vk::Format::R32_SFLOAT,
+        TextureFormat::Rg32Float => vk::Format::R32G32_SFLOAT,
+        TextureFormat::Rgba32Float => vk::Format::R32G32B32A32_SFLOAT,
+        TextureFormat::R11G11B10Float => vk::Format::B10G11R11_UFLOAT_PACK32,
+        TextureFormat::Depth16Unorm => vk::Format::D16_UNORM,
+        TextureFormat::Depth24UnormStencil8 => vk::Format::D24_UNORM_S8_UINT,
+        TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
+        TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
     }
 }
 
-pub(crate) fn rhi_format(value: vk::Format) -> Option<Format> {
+pub(crate) fn rhi_format(value: vk::Format) -> Option<TextureFormat> {
     Some(match value {
-        vk::Format::R8G8B8A8_UNORM => Format::Rgba8Unorm,
-        vk::Format::R8G8B8A8_SRGB => Format::Rgba8Srgb,
-        vk::Format::B8G8R8A8_UNORM => Format::Bgra8Unorm,
-        vk::Format::B8G8R8A8_SRGB => Format::Bgra8Srgb,
-        vk::Format::R32G32_SFLOAT => Format::Rg32Float,
-        vk::Format::R32G32B32_SFLOAT => Format::Rgb32Float,
-        vk::Format::D16_UNORM => Format::Depth16Unorm,
-        vk::Format::D24_UNORM_S8_UINT => Format::Depth24UnormStencil8,
-        vk::Format::D32_SFLOAT => Format::Depth32Float,
-        vk::Format::D32_SFLOAT_S8_UINT => Format::Depth32FloatStencil8,
+        vk::Format::R8G8B8A8_UNORM => TextureFormat::Rgba8Unorm,
+        vk::Format::R8G8B8A8_SRGB => TextureFormat::Rgba8Srgb,
+        vk::Format::B8G8R8A8_UNORM => TextureFormat::Bgra8Unorm,
+        vk::Format::B8G8R8A8_SRGB => TextureFormat::Bgra8Srgb,
+        vk::Format::R16_SFLOAT => TextureFormat::R16Float,
+        vk::Format::R16G16_SFLOAT => TextureFormat::Rg16Float,
+        vk::Format::R16G16B16A16_SFLOAT => TextureFormat::Rgba16Float,
+        vk::Format::R32_SFLOAT => TextureFormat::R32Float,
+        vk::Format::R32G32_SFLOAT => TextureFormat::Rg32Float,
+        vk::Format::R32G32B32A32_SFLOAT => TextureFormat::Rgba32Float,
+        vk::Format::B10G11R11_UFLOAT_PACK32 => TextureFormat::R11G11B10Float,
+        vk::Format::D16_UNORM => TextureFormat::Depth16Unorm,
+        vk::Format::D24_UNORM_S8_UINT => TextureFormat::Depth24UnormStencil8,
+        vk::Format::D32_SFLOAT => TextureFormat::Depth32Float,
+        vk::Format::D32_SFLOAT_S8_UINT => TextureFormat::Depth32FloatStencil8,
         _ => return None,
     })
+}
+
+pub(crate) fn vertex_format(value: VertexFormat) -> vk::Format {
+    match value {
+        VertexFormat::Float32 => vk::Format::R32_SFLOAT,
+        VertexFormat::Float32x2 => vk::Format::R32G32_SFLOAT,
+        VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
+        VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
+        VertexFormat::Unorm8x4 => vk::Format::R8G8B8A8_UNORM,
+        VertexFormat::Uint16x4 => vk::Format::R16G16B16A16_UINT,
+    }
 }
 
 pub(crate) fn samples(value: SampleCount) -> vk::SampleCountFlags {
@@ -191,6 +212,12 @@ pub(crate) fn image_state(
                 | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         ),
+        ImageState::DepthStencilAttachmentReadOnly => (
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+            vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+        ),
         ImageState::Present => (
             vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
             vk::AccessFlags2::empty(),
@@ -280,6 +307,38 @@ pub(crate) fn compare(value: CompareOp) -> vk::CompareOp {
     }
 }
 
+pub(crate) fn stencil_op(value: StencilOp) -> vk::StencilOp {
+    match value {
+        StencilOp::Keep => vk::StencilOp::KEEP,
+        StencilOp::Zero => vk::StencilOp::ZERO,
+        StencilOp::Replace => vk::StencilOp::REPLACE,
+        StencilOp::IncrementClamp => vk::StencilOp::INCREMENT_AND_CLAMP,
+        StencilOp::DecrementClamp => vk::StencilOp::DECREMENT_AND_CLAMP,
+        StencilOp::Invert => vk::StencilOp::INVERT,
+    }
+}
+
+pub(crate) fn blend_factor(value: BlendFactor) -> vk::BlendFactor {
+    match value {
+        BlendFactor::Zero => vk::BlendFactor::ZERO,
+        BlendFactor::One => vk::BlendFactor::ONE,
+        BlendFactor::SourceAlpha => vk::BlendFactor::SRC_ALPHA,
+        BlendFactor::OneMinusSourceAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        BlendFactor::DestinationAlpha => vk::BlendFactor::DST_ALPHA,
+        BlendFactor::OneMinusDestinationAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+    }
+}
+
+pub(crate) fn blend_op(value: BlendOp) -> vk::BlendOp {
+    match value {
+        BlendOp::Add => vk::BlendOp::ADD,
+        BlendOp::Subtract => vk::BlendOp::SUBTRACT,
+        BlendOp::ReverseSubtract => vk::BlendOp::REVERSE_SUBTRACT,
+        BlendOp::Min => vk::BlendOp::MIN,
+        BlendOp::Max => vk::BlendOp::MAX,
+    }
+}
+
 pub(crate) fn index(value: IndexFormat) -> vk::IndexType {
     match value {
         IndexFormat::Uint16 => vk::IndexType::UINT16,
@@ -298,6 +357,14 @@ pub(crate) fn store(value: StoreOp) -> vk::AttachmentStoreOp {
     match value {
         StoreOp::Store => vk::AttachmentStoreOp::STORE,
         StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
+    }
+}
+
+pub(crate) fn present_mode(value: PresentMode) -> vk::PresentModeKHR {
+    match value {
+        PresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
     }
 }
 
@@ -323,16 +390,21 @@ mod tests {
     #[test]
     fn supported_formats_round_trip() {
         for format in [
-            Format::Rgba8Unorm,
-            Format::Rgba8Srgb,
-            Format::Bgra8Unorm,
-            Format::Bgra8Srgb,
-            Format::Rg32Float,
-            Format::Rgb32Float,
-            Format::Depth16Unorm,
-            Format::Depth24UnormStencil8,
-            Format::Depth32Float,
-            Format::Depth32FloatStencil8,
+            TextureFormat::Rgba8Unorm,
+            TextureFormat::Rgba8Srgb,
+            TextureFormat::Bgra8Unorm,
+            TextureFormat::Bgra8Srgb,
+            TextureFormat::R16Float,
+            TextureFormat::Rg16Float,
+            TextureFormat::Rgba16Float,
+            TextureFormat::R32Float,
+            TextureFormat::Rg32Float,
+            TextureFormat::Rgba32Float,
+            TextureFormat::R11G11B10Float,
+            TextureFormat::Depth16Unorm,
+            TextureFormat::Depth24UnormStencil8,
+            TextureFormat::Depth32Float,
+            TextureFormat::Depth32FloatStencil8,
         ] {
             assert_eq!(rhi_format(super::format(format)), Some(format));
         }

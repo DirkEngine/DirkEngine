@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use ash::vk;
 use dirk_rhi::{
-    BufferCopy, BufferImageCopy, ColorAttachment, CommandBuffer, DependencyInfo, DepthAttachment,
-    FilterMode, ImageBlit, ImageCopy, IndexFormat, LoadOp, QueueType, Rect, RenderingInfo, Result,
-    Viewport,
+    BufferCopy, BufferImageCopy, Color, ColorAttachment, CommandBuffer, DependencyInfo,
+    DepthAttachment, FilterMode, ImageBlit, ImageCopy, IndexFormat, LoadOp, QueueType, Rect,
+    RenderingInfo, Result, Viewport,
 };
 
 use crate::{
@@ -190,11 +190,11 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D::default(),
                 extent: vk::Extent2D {
-                    width: info.extent.width,
-                    height: info.extent.height,
+                    width: info.width,
+                    height: info.height,
                 },
             })
-            .layer_count(1)
+            .layer_count(info.layer_count)
             .color_attachments(&color_attachments);
         if let Some(depth) = depth_attachment.as_ref() {
             rendering = rendering.depth_attachment(depth);
@@ -251,6 +251,50 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 .context
                 .device
                 .cmd_set_scissor(self.raw, 0, std::slice::from_ref(&scissor));
+        }
+    }
+
+    fn set_blend_constants(&mut self, color: Color) {
+        unsafe {
+            self.pool
+                .context
+                .device
+                .cmd_set_blend_constants(self.raw, &[color.r, color.g, color.b, color.a]);
+        }
+    }
+
+    fn set_stencil_reference(&mut self, front: u32, back: u32) {
+        unsafe {
+            self.pool.context.device.cmd_set_stencil_reference(
+                self.raw,
+                vk::StencilFaceFlags::FRONT_AND_BACK,
+                front,
+            );
+            if back != front {
+                self.pool.context.device.cmd_set_stencil_reference(
+                    self.raw,
+                    vk::StencilFaceFlags::BACK,
+                    back,
+                );
+            }
+        }
+    }
+
+    fn draw(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        unsafe {
+            self.pool.context.device.cmd_draw(
+                self.raw,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
         }
     }
 
@@ -458,19 +502,25 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
             .iter()
             .map(|region| vk::ImageBlit {
                 src_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    aspect_mask: convert::aspects(region.aspects),
                     mip_level: region.src_mip_level,
-                    base_array_layer: 0,
-                    layer_count: 1,
+                    base_array_layer: region.src_base_array_layer,
+                    layer_count: region.array_layer_count,
                 },
-                src_offsets: [vk::Offset3D::default(), extent_offset(region.src_extent)],
+                src_offsets: [
+                    offset3d(region.src_origin),
+                    offset3d(plus_extent(region.src_origin, region.src_extent)),
+                ],
                 dst_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    aspect_mask: convert::aspects(region.aspects),
                     mip_level: region.dst_mip_level,
-                    base_array_layer: 0,
-                    layer_count: 1,
+                    base_array_layer: region.dst_base_array_layer,
+                    layer_count: region.array_layer_count,
                 },
-                dst_offsets: [vk::Offset3D::default(), extent_offset(region.dst_extent)],
+                dst_offsets: [
+                    offset3d(region.dst_origin),
+                    offset3d(plus_extent(region.dst_origin, region.dst_extent)),
+                ],
             })
             .collect::<Vec<_>>();
         unsafe {
@@ -488,16 +538,52 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
     }
 
     fn barrier(&mut self, dependency: &DependencyInfo<'_, VulkanBackend>) {
+        for barrier in dependency.buffer_barriers {
+            self.assert_context(barrier.buffer.context());
+        }
         for barrier in dependency.image_barriers {
             self.assert_context(barrier.image.context());
         }
+        self.retained.extend(
+            dependency
+                .buffer_barriers
+                .iter()
+                .map(|barrier| barrier.buffer.retain()),
+        );
         self.retained.extend(
             dependency
                 .image_barriers
                 .iter()
                 .map(|barrier| barrier.image.retain()),
         );
-        let barriers = dependency
+        let memory_barriers = dependency
+            .memory_barriers
+            .iter()
+            .map(|barrier| {
+                vk::MemoryBarrier2::default()
+                    .src_stage_mask(convert::pipeline_stages(barrier.src_stages))
+                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_stage_mask(convert::pipeline_stages(barrier.dst_stages))
+                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+            })
+            .collect::<Vec<_>>();
+        let buffer_barriers = dependency
+            .buffer_barriers
+            .iter()
+            .map(|barrier| {
+                vk::BufferMemoryBarrier2::default()
+                    .src_stage_mask(convert::pipeline_stages(barrier.src_stages))
+                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_stage_mask(convert::pipeline_stages(barrier.dst_stages))
+                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .buffer(barrier.buffer.raw())
+                    .offset(barrier.offset)
+                    .size(barrier.size)
+            })
+            .collect::<Vec<_>>();
+        let image_barriers = dependency
             .image_barriers
             .iter()
             .map(|barrier| {
@@ -522,13 +608,36 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                     })
             })
             .collect::<Vec<_>>();
-        let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        let dependency = vk::DependencyInfo::default()
+            .memory_barriers(&memory_barriers)
+            .buffer_memory_barriers(&buffer_barriers)
+            .image_memory_barriers(&image_barriers);
         unsafe {
             self.pool
                 .context
                 .device
                 .cmd_pipeline_barrier2(self.raw, &dependency);
         }
+    }
+}
+
+fn offset3d(origin: dirk_rhi::Origin3d) -> vk::Offset3D {
+    vk::Offset3D {
+        x: origin.x.cast_signed(),
+        y: origin.y.cast_signed(),
+        z: origin.z.cast_signed(),
+    }
+}
+
+fn plus_extent(origin: dirk_rhi::Origin3d, extent: dirk_rhi::Extent3d) -> dirk_rhi::Origin3d {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "texel coordinates fit in 32 bits by the RHI's own range validation"
+    )]
+    dirk_rhi::Origin3d {
+        x: origin.x.saturating_add(extent.width),
+        y: origin.y.saturating_add(extent.height),
+        z: origin.z.saturating_add(extent.depth),
     }
 }
 
@@ -615,13 +724,5 @@ fn stencil_clear(value: LoadOp<u32>) -> u32 {
         value
     } else {
         0
-    }
-}
-
-fn extent_offset(extent: dirk_rhi::Extent3d) -> vk::Offset3D {
-    vk::Offset3D {
-        x: i32::try_from(extent.width).unwrap_or(i32::MAX),
-        y: i32::try_from(extent.height).unwrap_or(i32::MAX),
-        z: i32::try_from(extent.depth).unwrap_or(i32::MAX),
     }
 }
