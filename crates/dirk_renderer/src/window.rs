@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dirk_platform::WindowId;
-use dirk_rhi::{Backend as _, Extent3d, Format};
+use dirk_rhi::{Backend as _, Extent3d, TextureFormat};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
@@ -25,9 +25,18 @@ pub struct Window {
 
 impl Window {
     pub fn build(rhi: &Arc<ActiveRhi>, plat_window: &dirk_platform::Window) -> Result<Self> {
+        // The platform window outlives the surface created from these handles.
+        let (display, handle) = unsafe {
+            (
+                raw_window_handle::DisplayHandle::borrow_raw(
+                    plat_window.display_handle()?.as_raw(),
+                ),
+                raw_window_handle::WindowHandle::borrow_raw(plat_window.window_handle()?.as_raw()),
+            )
+        };
         let surface = rhi.create_surface(dirk_rhi::SurfaceCreateInfo {
-            display: plat_window.display_handle()?.as_raw(),
-            window: plat_window.window_handle()?.as_raw(),
+            display,
+            window: handle,
         })?;
 
         let window_size = plat_window.size();
@@ -48,7 +57,7 @@ impl Window {
     pub fn extent(&self) -> Extent3d {
         self.swapchain.extent()
     }
-    pub fn format(&self) -> Format {
+    pub fn format(&self) -> TextureFormat {
         self.swapchain.format()
     }
     pub fn next_image(&mut self) -> Result<RenderImage> {

@@ -280,9 +280,11 @@ impl Renderer {
     ) -> Result<Self> {
         info!("initializing renderer RHI with Vulkan");
 
-        let surface_info = dirk_rhi::SurfaceCreateInfo {
-            display: window.display_handle()?.as_raw(),
-            window: window.window_handle()?.as_raw(),
+        let surface_info = unsafe {
+            (
+                raw_window_handle::DisplayHandle::borrow_raw(window.display_handle()?.as_raw()),
+                raw_window_handle::WindowHandle::borrow_raw(window.window_handle()?.as_raw()),
+            )
         };
         let version = |version: Version| (version.major(), version.minor(), version.patch());
         let rhi = Arc::new(ActiveRhi::new(&dirk_rhi::RhiCreateInfo {
@@ -301,7 +303,11 @@ impl Renderer {
             msaa_samples: capabilities.max_samples,
             anisotropy: capabilities.max_sampler_anisotropy > 1,
             surface_format,
-            depth_format: capabilities.depth_format,
+            depth_format: rhi.supported_depth_formats().first().copied().ok_or(
+                crate::errors::Error::Rhi(dirk_rhi::Error::InvalidResource(
+                    dirk_rhi::InvalidResource::Empty,
+                )),
+            )?,
         };
 
         let current_frame = Arc::new(AtomicUsize::new(0));
@@ -609,9 +615,9 @@ impl Renderer {
         for target in presentation_targets {
             self.windows
                 .get_mut(&target.window)
-                .ok_or(dirk_rhi::Error::InvalidResource(
-                    "presentation window no longer exists",
-                ))?
+                .ok_or(dirk_rhi::Error::Backend(anyhow::anyhow!(
+                    "presentation window no longer exists"
+                )))?
                 .present(target.image)?;
         }
 
@@ -897,7 +903,7 @@ impl Renderer {
                 surface_frames: &surface_frames,
                 wait_timelines: &[],
                 signal_timelines: &signal_timelines,
-                fence: self.frames[frame_index].fence.rhi(),
+                fence: Some(self.frames[frame_index].fence.rhi()),
             },
         )?;
 

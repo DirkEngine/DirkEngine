@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use dirk_rhi::{Backend as _, Extent3d, Format, SurfaceFrame as _, Swapchain as _, SwapchainDesc};
+use dirk_rhi::{
+    Backend as _, Extent3d, SurfaceFrame as _, Swapchain as _, SwapchainDesc, TextureFormat,
+};
 
 use crate::{
     Result,
@@ -31,7 +33,7 @@ impl RenderImage {
         &self.inner
     }
 
-    pub fn format(&self) -> Format {
+    pub fn format(&self) -> TextureFormat {
         self.inner.format()
     }
 }
@@ -57,6 +59,8 @@ impl Swapchain {
             usage: dirk_rhi::ImageUsages::COLOR_ATTACHMENT
                 | dirk_rhi::ImageUsages::COPY_DST
                 | dirk_rhi::ImageUsages::PRESENT,
+            preferred_formats: &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm],
+            present_mode: dirk_rhi::PresentMode::Mailbox,
         })?;
         Ok(Self {
             rhi: rhi.clone(),
@@ -68,7 +72,7 @@ impl Swapchain {
         self.inner.extent()
     }
 
-    pub fn format(&self) -> Format {
+    pub fn format(&self) -> TextureFormat {
         self.inner.format()
     }
 

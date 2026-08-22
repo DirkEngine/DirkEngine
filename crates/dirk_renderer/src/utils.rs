@@ -1,4 +1,4 @@
-use dirk_rhi::{Format, SampleCount, VertexAttribute};
+use dirk_rhi::{SampleCount, TextureFormat, VertexAttribute, VertexFormat};
 
 use crate::{
     resources::{
@@ -22,17 +22,17 @@ impl VertexInput for Vertex {
     const ATTRIBUTES: &'static [VertexAttribute] = &[
         VertexAttribute {
             location: 0,
-            format: Format::Rgb32Float,
+            format: VertexFormat::Float32x3,
             offset: std::mem::offset_of!(Self, position) as u32,
         },
         VertexAttribute {
             location: 1,
-            format: Format::Rgb32Float,
+            format: VertexFormat::Float32x3,
             offset: std::mem::offset_of!(Self, normal) as u32,
         },
         VertexAttribute {
             location: 2,
-            format: Format::Rg32Float,
+            format: VertexFormat::Float32x2,
             offset: std::mem::offset_of!(Self, texcoord) as u32,
         },
     ];
@@ -54,6 +54,6 @@ pub struct RendererProperties {
     pub msaa_samples: SampleCount,
     #[allow(unused)]
     pub anisotropy: bool,
-    pub surface_format: Format,
-    pub depth_format: Format,
+    pub surface_format: TextureFormat,
+    pub depth_format: TextureFormat,
 }

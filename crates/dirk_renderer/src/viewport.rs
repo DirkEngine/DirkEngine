@@ -1,5 +1,5 @@
 use dirk_player::PlayerId;
-use dirk_rhi::{Extent3d, Format, ImageAspects, ImageUsages, SampleCount};
+use dirk_rhi::{Extent3d, ImageAspects, ImageUsages, SampleCount, TextureFormat};
 use dirk_universe::{Entity, WorldId};
 
 use crate::{
@@ -152,7 +152,7 @@ impl Viewport {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ViewportSettings {
     pub extent: Extent3d,
-    pub format: Format,
+    pub format: TextureFormat,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,
@@ -160,7 +160,7 @@ pub(crate) struct ViewportSettings {
 }
 
 impl ViewportSettings {
-    pub(crate) fn new(extent: Extent3d, format: Format) -> Self {
+    pub(crate) fn new(extent: Extent3d, format: TextureFormat) -> Self {
         Self {
             extent,
             format,

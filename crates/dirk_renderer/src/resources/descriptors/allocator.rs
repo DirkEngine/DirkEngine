@@ -81,14 +81,7 @@ impl<L: SetLayout> DescriptorAllocator<L> {
     fn require_binding(binding: u32, ty: BindingType) -> Result<()> {
         match L::BINDINGS.iter().find(|entry| entry.binding == binding) {
             Some(entry) if entry.ty == ty => Ok(()),
-            Some(_) => Err(dirk_rhi::Error::InvalidResource(
-                "renderer bind-group resource type does not match its layout",
-            )
-            .into()),
-            None => Err(dirk_rhi::Error::InvalidResource(
-                "renderer bind-group binding is absent from its layout",
-            )
-            .into()),
+            _ => Err(dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Mismatch).into()),
         }
     }
 }

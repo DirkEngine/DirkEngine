@@ -5,9 +5,9 @@ use crate::{
     resources::{ActiveImage, ActiveImageView, command_pool::CommandBuffer, device::RenderDevice},
 };
 use dirk_rhi::{
-    Backend as _, Color, CommandBuffer as _, DependencyInfo, Extent3d, Format, ImageAspects,
-    ImageBarrier, ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp,
-    RenderingInfo, SampleCount, StoreOp,
+    Backend as _, Color, CommandBuffer as _, DependencyInfo, Extent3d, ImageAspects, ImageBarrier,
+    ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp, RenderingInfo,
+    SampleCount, StoreOp, TextureFormat,
 };
 
 /// Opaque index into the graph texture table.
@@ -25,7 +25,7 @@ impl TextureHandle {
 pub struct TextureDesc {
     pub width: u32,
     pub height: u32,
-    pub format: Format,
+    pub format: TextureFormat,
     pub usage: ImageUsages,
     pub samples: SampleCount,
     pub imported: Option<ImportedTexture>,
@@ -490,9 +490,12 @@ impl<'a> GraphExecutor<'a> {
                     stencil_load: info.stencil_load(),
                     stencil_store: info.store,
                 });
+                let extent = pass.extent.unwrap_or_else(|| Extent3d::new_2d(1, 1));
                 cmd.rhi_mut().begin_rendering(&RenderingInfo {
                     label: &pass.name,
-                    extent: pass.extent.unwrap_or_else(|| Extent3d::new_2d(1, 1)),
+                    width: extent.width,
+                    height: extent.height,
+                    layer_count: 1,
                     color_attachments: &colors,
                     depth_attachment: depth,
                 })?;
@@ -535,14 +538,16 @@ fn record_barriers(
         })
         .collect::<Vec<_>>();
     cmd.rhi_mut().barrier(&DependencyInfo {
+        memory_barriers: &[],
+        buffer_barriers: &[],
         image_barriers: &barriers,
     });
 }
 
-fn format_aspects(format: Format) -> ImageAspects {
+fn format_aspects(format: TextureFormat) -> ImageAspects {
     match format {
-        Format::Depth16Unorm | Format::Depth32Float => ImageAspects::DEPTH,
-        Format::Depth24UnormStencil8 | Format::Depth32FloatStencil8 => {
+        TextureFormat::Depth16Unorm | TextureFormat::Depth32Float => ImageAspects::DEPTH,
+        TextureFormat::Depth24UnormStencil8 | TextureFormat::Depth32FloatStencil8 => {
             ImageAspects::DEPTH | ImageAspects::STENCIL
         }
         _ => ImageAspects::COLOR,
@@ -563,7 +568,7 @@ mod tests {
         TextureDesc {
             width: 64,
             height: 64,
-            format: Format::Bgra8Unorm,
+            format: TextureFormat::Bgra8Unorm,
             usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::COPY_SRC,
             samples: SampleCount::One,
             imported: None,

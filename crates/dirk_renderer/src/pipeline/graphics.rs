@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use dirk_rhi::{
     Backend as _, BindGroupLayoutDesc, BindGroupLayoutEntry, CommandBuffer as _, CompareOp,
-    CullMode, DepthState, FrontFace, GraphicsPipelineDesc, PipelineLayoutDesc, PrimitiveTopology,
-    RasterState,
+    CullMode, DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, PipelineLayoutDesc,
+    PrimitiveTopology, RasterState,
 };
 use tracing::debug;
 
@@ -120,19 +120,24 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
             label: Spec::NAME,
             layout: &layout,
             vertex: &vertex,
-            fragment: &fragment,
+            fragment: Some(&fragment),
             vertex_buffers: &[vertex_layout],
             raster: RasterState {
                 topology: PrimitiveTopology::TriangleList,
                 front_face: FrontFace::CounterClockwise,
                 cull_mode: CullMode::Back,
             },
+            blend: None,
             color_formats: &[device.properties.surface_format],
             depth: Some(DepthState {
                 format: device.properties.depth_format,
                 write_enabled: true,
                 compare: CompareOp::Less,
+                stencil: None,
             }),
+            depth_bias: DepthBiasState::default(),
+            primitive_restart: false,
+            alpha_to_coverage: false,
             samples: device.properties.msaa_samples,
         })?;
 
@@ -274,9 +279,10 @@ mod tests {
             <MainPipelineSpec as GraphicsPipelineSpec>::VertexShader,
             <MainPipelineSpec as GraphicsPipelineSpec>::FragmentShader,
         >(MainPipelineSpec::NAME)
-        .unwrap();
+        .expect("main pipeline shader layouts should merge");
         validate_pipeline_descriptor_layout::<MainPipelineSpec>(MainPipelineSpec::NAME, &reflected)
-            .unwrap();
-        validate_pipeline_vertex_input::<MainPipelineSpec>(MainPipelineSpec::NAME).unwrap();
+            .expect("main pipeline descriptor layout should match reflection");
+        validate_pipeline_vertex_input::<MainPipelineSpec>(MainPipelineSpec::NAME)
+            .expect("main pipeline vertex input should match reflection");
     }
 }

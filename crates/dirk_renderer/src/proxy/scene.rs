@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use dirk_rhi::{
-    CommandBuffer as _, Extent3d, Format, ImageUsages, MemoryDomain, Rect, SampleCount, Viewport,
+    CommandBuffer as _, Extent3d, ImageUsages, MemoryDomain, Rect, SampleCount, TextureFormat,
+    Viewport,
 };
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
@@ -24,7 +25,7 @@ use crate::{
 
 pub(crate) struct SceneRenderSettings {
     pub extent: Extent3d,
-    pub format: Format,
+    pub format: TextureFormat,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,

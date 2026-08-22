@@ -2,8 +2,8 @@
 
 use dirk_rhi::{
     Backend as _, Buffer as _, BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d,
-    FilterMode, Format, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
-    ImageViewDesc, ImageViewType, MemoryDomain, SampleCount, SamplerDesc,
+    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
+    ImageViewDesc, ImageViewType, MemoryDomain, SampleCount, SamplerDesc, TextureFormat,
 };
 
 use crate::{
@@ -24,7 +24,7 @@ pub struct Image {
 
 pub struct ImageCreateInfo {
     pub extent: Extent3d,
-    pub format: Format,
+    pub format: TextureFormat,
     pub usage: ImageUsages,
     pub mip_levels: u32,
     pub samples: SampleCount,
@@ -34,10 +34,7 @@ pub struct ImageCreateInfo {
 impl Image {
     pub fn create_image(device: &RenderDevice, info: &ImageCreateInfo) -> Result<Self> {
         if info.mip_levels == 0 {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "renderer images require at least one mip level",
-            )
-            .into());
+            return Err(dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Empty).into());
         }
         let inner = device.rhi.create_image(&ImageDesc {
             label: "renderer image",
@@ -89,17 +86,17 @@ impl Image {
                 .collect(),
             gltf::image::Format::R8G8B8A8 => texture.pixels.clone(),
             _ => {
-                return Err(dirk_rhi::Error::Unsupported(
-                    "only RGB8 and RGBA8 glTF textures are supported",
-                )
-                .into());
+                return Err(
+                    dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Mismatch).into(),
+                );
             }
         };
         let mip_levels = Self::mip_levels(texture.width, texture.height);
         let staging = CustomBuffer::create_custom(
             device,
-            u64::try_from(pixels.len())
-                .map_err(|_| dirk_rhi::Error::InvalidResource("texture upload is too large"))?,
+            u64::try_from(pixels.len()).map_err(|_| {
+                dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::OutOfRange)
+            })?,
             dirk_rhi::BufferUsages::COPY_SRC,
             MemoryDomain::Upload,
         )?;
@@ -109,7 +106,7 @@ impl Image {
             device,
             &ImageCreateInfo {
                 extent: Extent3d::new_2d(texture.width, texture.height),
-                format: Format::Rgba8Srgb,
+                format: TextureFormat::Rgba8Srgb,
                 usage: ImageUsages::COPY_DST | ImageUsages::COPY_SRC | ImageUsages::SAMPLED,
                 mip_levels,
                 samples: SampleCount::One,
@@ -118,6 +115,8 @@ impl Image {
         )?;
         let mut command = device.graphics_pool.begin_single_time()?;
         command.rhi_mut().barrier(&DependencyInfo {
+            memory_barriers: &[],
+            buffer_barriers: &[],
             image_barriers: &[ImageBarrier {
                 image: image.rhi_image(),
                 old_state: ImageState::Undefined,
@@ -169,6 +168,8 @@ impl Image {
     ) -> dirk_rhi::Result<()> {
         for mip in 1..self.mip_levels {
             command.barrier(&DependencyInfo {
+                memory_barriers: &[],
+                buffer_barriers: &[],
                 image_barriers: &[ImageBarrier {
                     image: &self.inner,
                     old_state: ImageState::CopyDestination,
@@ -186,15 +187,23 @@ impl Image {
                 &[ImageBlit {
                     src_mip_level: mip - 1,
                     dst_mip_level: mip,
+                    src_base_array_layer: 0,
+                    dst_base_array_layer: 0,
+                    array_layer_count: 1,
+                    src_origin: dirk_rhi::Origin3d::default(),
+                    dst_origin: dirk_rhi::Origin3d::default(),
                     src_extent: Extent3d::new_2d(
                         (width >> (mip - 1)).max(1),
                         (height >> (mip - 1)).max(1),
                     ),
                     dst_extent: Extent3d::new_2d((width >> mip).max(1), (height >> mip).max(1)),
+                    aspects: self.aspects,
                 }],
                 FilterMode::Linear,
             )?;
             command.barrier(&DependencyInfo {
+                memory_barriers: &[],
+                buffer_barriers: &[],
                 image_barriers: &[ImageBarrier {
                     image: &self.inner,
                     old_state: ImageState::CopySource,
@@ -208,6 +217,8 @@ impl Image {
             });
         }
         command.barrier(&DependencyInfo {
+            memory_barriers: &[],
+            buffer_barriers: &[],
             image_barriers: &[ImageBarrier {
                 image: &self.inner,
                 old_state: ImageState::CopyDestination,

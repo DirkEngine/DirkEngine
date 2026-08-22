@@ -69,7 +69,7 @@ impl<Type: BuffType> Buffer<Type> {
 
     pub fn upload_slice<T: Copy>(device: &RenderDevice, data: &[T]) -> Result<Self> {
         let size = u64::try_from(size_of_val(data))
-            .map_err(|_| dirk_rhi::Error::InvalidResource("buffer upload is too large"))?;
+            .map_err(|_| dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::OutOfRange))?;
         let staging = Buffer::<Custom>::create_custom(
             device,
             size,

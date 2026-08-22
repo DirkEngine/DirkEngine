@@ -1,5 +1,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
+use parking_lot::Mutex;
+
 #[cfg(feature = "editor")]
 use std::ops::Deref;
 
@@ -32,9 +34,12 @@ impl Pool for Transfer {
 }
 
 /// Typed renderer wrapper around an RHI command pool.
+///
+/// The inner pool is mutex-guarded because the RHI requires exclusive access
+/// for command-buffer allocation while renderer pools are shared by `&self`.
 pub struct CommandPool<Type: Pool> {
     rhi: Arc<ActiveRhi>,
-    inner: ActiveCommandPool,
+    inner: Mutex<ActiveCommandPool>,
     pool_type: PhantomData<Type>,
 }
 
@@ -42,7 +47,7 @@ impl<Type: Pool> CommandPool<Type> {
     /// Creates a resettable command pool for this marker's queue.
     pub fn build(rhi: &Arc<ActiveRhi>) -> Result<Self> {
         Ok(Self {
-            inner: rhi.create_command_pool(Type::QUEUE)?,
+            inner: Mutex::new(rhi.create_command_pool(Type::QUEUE)?),
             rhi: rhi.clone(),
             pool_type: PhantomData,
         })
@@ -50,11 +55,12 @@ impl<Type: Pool> CommandPool<Type> {
 
     #[cfg(feature = "editor")]
     pub fn raw(&self) -> vk::CommandPool {
-        self.inner.raw()
+        self.inner.lock().raw()
     }
 
     pub fn allocate_buffer(&self) -> Result<CommandBuffer> {
-        let inner = self.rhi.create_command_buffer(&self.inner)?;
+        let mut pool = self.inner.lock();
+        let inner = self.rhi.create_command_buffer(&mut pool)?;
         Ok(CommandBuffer {
             #[cfg(feature = "editor")]
             raw: inner.raw(),
@@ -110,7 +116,7 @@ impl CommandBuffer {
                 surface_frames: &[],
                 wait_timelines: &[],
                 signal_timelines: &[],
-                fence: &fence,
+                fence: Some(&fence),
             },
         )?;
         fence.wait(u64::MAX)?;

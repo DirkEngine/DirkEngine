@@ -770,8 +770,8 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
 
     quote! {
         use dirk_rhi::{
-            BindGroupLayoutEntry, BindingType, Format, ShaderStage, ShaderStages,
-            VertexAttribute, VertexBufferLayout, VertexStepMode,
+            BindGroupLayoutEntry, BindingType, ShaderStage, ShaderStages, VertexAttribute,
+            VertexBufferLayout, VertexFormat, VertexStepMode,
         };
         use crate::shaders::metadata::{FragmentShader, Shader, VertexShader};
 
@@ -892,7 +892,7 @@ fn generate_vertex_attribute(input: &VertexInput) -> TokenStream {
     quote! {
         VertexAttribute {
             location: #location,
-            format: Format::#format,
+            format: VertexFormat::#format,
             offset: #offset,
         }
     }
@@ -934,8 +934,8 @@ fn rhi_shader_stages(name: &str) -> Ident {
 
 fn rhi_format(name: &str) -> Ident {
     let name = match name {
-        "R32G32_SFLOAT" => "Rg32Float",
-        "R32G32B32_SFLOAT" => "Rgb32Float",
+        "R32G32_SFLOAT" => "Float32x2",
+        "R32G32B32_SFLOAT" => "Float32x3",
         _ => panic!("unsupported reflected vertex format {name}"),
     };
     Ident::new(name, Span::call_site())
