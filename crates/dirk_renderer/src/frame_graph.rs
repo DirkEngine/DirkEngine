@@ -682,7 +682,9 @@ pub struct PassContext<'ctx> {
 
 impl PassContext<'_> {
     /// Renderer device shared by all passes.
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
+    ///
+    /// Unused when every pass renders through portable commands alone.
+    #[allow(unused)]
     pub fn device(&self) -> &RenderDevice {
         self.device
     }
