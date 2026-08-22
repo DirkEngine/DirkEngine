@@ -35,9 +35,9 @@ impl EguiState {
             dirk_rhi::TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
             dirk_rhi::TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
             dirk_rhi::TextureFormat::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
-            _ => {
+            unsupported => {
                 return Err(dirk_rhi::Error::Unsupported(
-                    "egui requires an eight-bit color swapchain",
+                    dirk_rhi::UnsupportedOperation::TextureFormat(unsupported),
                 )
                 .into());
             }

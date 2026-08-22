@@ -59,6 +59,9 @@ pub enum UnsupportedOperation {
     /// The supplied shader source representation is not accepted natively.
     #[error("{0} shader source is not supported by this backend")]
     ShaderSource(#[source] ShaderLanguage),
+    /// A requested texture format is unavailable on this backend or surface.
+    #[error("texture format {0:?} is not supported by this backend")]
+    TextureFormat(crate::types::TextureFormat),
 }
 
 /// Source representation of a shader program.
