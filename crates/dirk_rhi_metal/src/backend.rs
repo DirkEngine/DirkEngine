@@ -68,9 +68,10 @@ impl Backend for MetalBackend {
         Ok(Self {
             context,
             capabilities: Capabilities {
-                depth_format: dirk_rhi::Format::Depth32Float,
                 max_samples,
                 max_sampler_anisotropy: 16,
+                min_uniform_buffer_offset_alignment: 256,
+                min_storage_buffer_offset_alignment: 16,
                 dedicated_compute_queue: false,
                 dedicated_copy_queue: false,
             },
@@ -79,6 +80,12 @@ impl Backend for MetalBackend {
 
     fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+
+    fn supported_depth_formats(&self) -> &'static [dirk_rhi::TextureFormat] {
+        // Apple GPUs prefer combined float depth/stencil; Intel Macs also
+        // accept packed 24-bit formats, which map to the float pair here.
+        &[dirk_rhi::TextureFormat::Depth32Float]
     }
 
     fn wait_idle(&self) -> Result<()> {
@@ -146,7 +153,7 @@ impl Backend for MetalBackend {
         })
     }
 
-    fn create_command_buffer(&self, pool: &MetalCommandPool) -> Result<MetalCommandBuffer> {
+    fn create_command_buffer(&self, pool: &mut MetalCommandPool) -> Result<MetalCommandBuffer> {
         require_context(&self.context, &pool.context)?;
         Ok(MetalCommandBuffer::create(pool))
     }
@@ -165,16 +172,16 @@ impl Backend for MetalBackend {
     }
 
     fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
-        require_context(&self.context, &submission.fence.context)?;
+        if let Some(fence) = submission.fence {
+            require_context(&self.context, &fence.context)?;
+        }
         let mut commands = submission
             .command_buffers
             .iter()
             .map(|command| {
                 require_context(&self.context, &command.context)?;
                 if command.queue != queue {
-                    return Err(dirk_rhi::Error::InvalidResource(
-                        "command buffer was allocated for a different queue",
-                    ));
+                    return Err(dirk_rhi::InvalidResource::Mismatch.into());
                 }
                 command.command_for_submit()
             })
@@ -204,7 +211,9 @@ impl Backend for MetalBackend {
         for point in submission.signal_timelines {
             last.encode_signal_event(&point.semaphore.event, point.value);
         }
-        last.encode_signal_event(&submission.fence.event, submission.fence.value());
+        if let Some(fence) = submission.fence {
+            last.encode_signal_event(&fence.event, fence.value());
+        }
         for command in commands {
             command.commit();
         }

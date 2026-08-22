@@ -5,8 +5,8 @@ use std::sync::{
 
 use core_graphics_types::geometry::CGSize;
 use dirk_rhi::{
-    Extent3d, Format, ImageUsages, Result, SurfaceCreateInfo, SurfaceFrame, SurfaceStatus,
-    Swapchain, SwapchainDesc,
+    Extent3d, ImageUsages, InvalidResource as Ir, Result, SurfaceCreateInfo, SurfaceFrame,
+    SurfaceStatus, Swapchain, SwapchainDesc, TextureFormat,
 };
 use metal::foreign_types::ForeignType;
 use metal::{MTLPixelFormat, MetalDrawable, MetalLayer};
@@ -29,7 +29,7 @@ pub struct MetalSurface(Arc<SurfaceInner>);
 
 impl MetalSurface {
     pub(crate) fn create(context: &Arc<Context>, info: SurfaceCreateInfo) -> Result<Self> {
-        let raw_layer = match info.window {
+        let raw_layer = match info.window.as_raw() {
             RawWindowHandle::AppKit(handle) => {
                 // SAFETY: `SurfaceCreateInfo` carries a borrowed native window
                 // handle supplied by the platform window implementation.
@@ -41,9 +41,9 @@ impl MetalSurface {
                 unsafe { raw_window_metal::Layer::from_ui_view(handle.ui_view) }
             }
             _ => {
-                return Err(dirk_rhi::Error::Unsupported(
-                    "Metal surfaces require an AppKit or UIKit window",
-                ));
+                return Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
+                    "Metal surfaces require an AppKit or UIKit window"
+                )));
             }
         };
         let pointer = raw_layer.into_raw().as_ptr().cast::<metal::CAMetalLayer>();
@@ -63,7 +63,7 @@ impl MetalSurface {
 pub struct MetalSwapchain {
     pub(crate) context: Arc<Context>,
     surface: MetalSurface,
-    format: Format,
+    format: TextureFormat,
     extent: Extent3d,
 }
 
@@ -74,7 +74,13 @@ impl MetalSwapchain {
     ) -> Result<Self> {
         require_context(context, &desc.surface.0.context)?;
         validate_extent(desc.width, desc.height)?;
-        let format = Format::Bgra8Srgb;
+        let supported = [TextureFormat::Bgra8Srgb, TextureFormat::Bgra8Unorm];
+        let format = desc
+            .preferred_formats
+            .iter()
+            .find(|preferred| supported.contains(preferred))
+            .copied()
+            .unwrap_or(TextureFormat::Bgra8Srgb);
         desc.surface
             .0
             .layer
@@ -96,7 +102,7 @@ impl MetalSwapchain {
 }
 
 impl Swapchain<MetalBackend> for MetalSwapchain {
-    fn format(&self) -> Format {
+    fn format(&self) -> TextureFormat {
         self.format
     }
 
@@ -133,14 +139,14 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         Ok(())
     }
 
-    fn present(&mut self, frame: MetalSurfaceFrame) -> Result<()> {
+    fn present(&mut self, frame: MetalSurfaceFrame) -> Result<SurfaceStatus> {
         require_context(&self.context, &frame.context)?;
         if frame.was_submitted() {
-            Ok(())
+            // `CAMetalLayer` presents at vertical blank and never reports a
+            // suboptimal chain.
+            Ok(SurfaceStatus::Optimal)
         } else {
-            Err(dirk_rhi::Error::InvalidResource(
-                "Metal surface frame must be submitted before presentation",
-            ))
+            Err(Ir::BadState.into())
         }
     }
 }
@@ -151,7 +157,7 @@ pub struct MetalSurfaceFrame {
     pub(crate) drawable: MetalDrawable,
     image: MetalImage,
     view: MetalImageView,
-    format: Format,
+    format: TextureFormat,
     extent: Extent3d,
     submitted: AtomicBool,
 }
@@ -175,7 +181,7 @@ impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
         &self.view
     }
 
-    fn format(&self) -> Format {
+    fn format(&self) -> TextureFormat {
         self.format
     }
 
@@ -190,9 +196,7 @@ impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
 
 fn validate_extent(width: u32, height: u32) -> Result<()> {
     if width == 0 || height == 0 {
-        Err(dirk_rhi::Error::InvalidResource(
-            "swapchain extent must be non-zero",
-        ))
+        Err(dirk_rhi::Error::InvalidResource(Ir::Empty))
     } else {
         Ok(())
     }

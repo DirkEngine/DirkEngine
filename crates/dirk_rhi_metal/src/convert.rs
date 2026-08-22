@@ -1,39 +1,97 @@
 use dirk_rhi::{
-    AddressMode, CompareOp, CullMode, FilterMode, Format, FrontFace, PrimitiveTopology,
-    SampleCount, StoreOp, VertexStepMode,
+    AddressMode, BlendFactor, BlendOp, CompareOp, CullMode, FilterMode, FrontFace,
+    PrimitiveTopology, SampleCount, StencilOp as RhiStencilOp, StoreOp, TextureFormat,
+    VertexFormat, VertexStepMode,
 };
 use metal::{
-    MTLCompareFunction, MTLCullMode, MTLIndexType, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
-    MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLStoreAction,
-    MTLVertexFormat, MTLVertexStepFunction, MTLWinding,
+    MTLBlendFactor, MTLBlendOperation, MTLCompareFunction, MTLCullMode, MTLIndexType,
+    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLSamplerAddressMode, MTLSamplerMinMagFilter,
+    MTLSamplerMipFilter, MTLStencilOperation, MTLStoreAction, MTLVertexFormat,
+    MTLVertexStepFunction, MTLWinding,
 };
 
-pub(crate) fn format(value: Format) -> MTLPixelFormat {
+pub(crate) fn format(value: TextureFormat) -> MTLPixelFormat {
     match value {
-        Format::Rgba8Unorm => MTLPixelFormat::RGBA8Unorm,
-        Format::Rgba8Srgb => MTLPixelFormat::RGBA8Unorm_sRGB,
-        Format::Bgra8Unorm => MTLPixelFormat::BGRA8Unorm,
-        Format::Bgra8Srgb => MTLPixelFormat::BGRA8Unorm_sRGB,
-        Format::Rg32Float => MTLPixelFormat::RG32Float,
-        Format::Rgb32Float => MTLPixelFormat::RGBA32Float,
-        Format::Depth16Unorm => MTLPixelFormat::Depth16Unorm,
-        Format::Depth24UnormStencil8 => MTLPixelFormat::Depth24Unorm_Stencil8,
-        Format::Depth32Float => MTLPixelFormat::Depth32Float,
-        Format::Depth32FloatStencil8 => MTLPixelFormat::Depth32Float_Stencil8,
+        TextureFormat::Rgba8Unorm => MTLPixelFormat::RGBA8Unorm,
+        TextureFormat::Rgba8Srgb => MTLPixelFormat::RGBA8Unorm_sRGB,
+        TextureFormat::Bgra8Unorm => MTLPixelFormat::BGRA8Unorm,
+        TextureFormat::Bgra8Srgb => MTLPixelFormat::BGRA8Unorm_sRGB,
+        TextureFormat::R16Float => MTLPixelFormat::R16Float,
+        TextureFormat::Rg16Float => MTLPixelFormat::RG16Float,
+        TextureFormat::Rgba16Float => MTLPixelFormat::RGBA16Float,
+        TextureFormat::R32Float => MTLPixelFormat::R32Float,
+        TextureFormat::Rg32Float => MTLPixelFormat::RG32Float,
+        TextureFormat::Rgba32Float => MTLPixelFormat::RGBA32Float,
+        TextureFormat::R11G11B10Float => MTLPixelFormat::RG11B10Float,
+        TextureFormat::Depth16Unorm => MTLPixelFormat::Depth16Unorm,
+        TextureFormat::Depth32Float => MTLPixelFormat::Depth32Float,
+        // Apple GPUs have no packed 24-bit depth; it maps to float32+stencil.
+        TextureFormat::Depth24UnormStencil8 | TextureFormat::Depth32FloatStencil8 => {
+            MTLPixelFormat::Depth32Float_Stencil8
+        }
     }
 }
 
-pub(crate) const fn bytes_per_pixel(value: Format) -> u64 {
+pub(crate) fn vertex_format(value: VertexFormat) -> MTLVertexFormat {
     match value {
-        Format::Rgba8Unorm
-        | Format::Rgba8Srgb
-        | Format::Bgra8Unorm
-        | Format::Bgra8Srgb
-        | Format::Depth32Float
-        | Format::Depth24UnormStencil8 => 4,
-        Format::Rg32Float | Format::Depth32FloatStencil8 => 8,
-        Format::Rgb32Float => 12,
-        Format::Depth16Unorm => 2,
+        VertexFormat::Float32 => MTLVertexFormat::Float,
+        VertexFormat::Float32x2 => MTLVertexFormat::Float2,
+        VertexFormat::Float32x3 => MTLVertexFormat::Float3,
+        VertexFormat::Float32x4 => MTLVertexFormat::Float4,
+        VertexFormat::Unorm8x4 => MTLVertexFormat::UChar4Normalized,
+        VertexFormat::Uint16x4 => MTLVertexFormat::UShort4,
+    }
+}
+
+pub(crate) fn stencil_op(value: RhiStencilOp) -> MTLStencilOperation {
+    match value {
+        RhiStencilOp::Keep => MTLStencilOperation::Keep,
+        RhiStencilOp::Zero => MTLStencilOperation::Zero,
+        RhiStencilOp::Replace => MTLStencilOperation::Replace,
+        RhiStencilOp::IncrementClamp => MTLStencilOperation::IncrementClamp,
+        RhiStencilOp::DecrementClamp => MTLStencilOperation::DecrementClamp,
+        RhiStencilOp::Invert => MTLStencilOperation::Invert,
+    }
+}
+
+pub(crate) fn blend_factor(value: BlendFactor) -> MTLBlendFactor {
+    match value {
+        BlendFactor::Zero => MTLBlendFactor::Zero,
+        BlendFactor::One => MTLBlendFactor::One,
+        BlendFactor::SourceAlpha => MTLBlendFactor::SourceAlpha,
+        BlendFactor::OneMinusSourceAlpha => MTLBlendFactor::OneMinusSourceAlpha,
+        BlendFactor::DestinationAlpha => MTLBlendFactor::DestinationAlpha,
+        BlendFactor::OneMinusDestinationAlpha => MTLBlendFactor::OneMinusDestinationAlpha,
+    }
+}
+
+pub(crate) fn blend_op(value: BlendOp) -> MTLBlendOperation {
+    match value {
+        BlendOp::Add => MTLBlendOperation::Add,
+        BlendOp::Subtract => MTLBlendOperation::Subtract,
+        BlendOp::ReverseSubtract => MTLBlendOperation::ReverseSubtract,
+        BlendOp::Min => MTLBlendOperation::Min,
+        BlendOp::Max => MTLBlendOperation::Max,
+    }
+}
+
+pub(crate) const fn bytes_per_pixel(value: TextureFormat) -> u64 {
+    match value {
+        TextureFormat::Rgba8Unorm
+        | TextureFormat::Rgba8Srgb
+        | TextureFormat::Bgra8Unorm
+        | TextureFormat::Bgra8Srgb
+        | TextureFormat::Rg16Float
+        | TextureFormat::R32Float
+        | TextureFormat::R11G11B10Float
+        | TextureFormat::Depth32Float
+        | TextureFormat::Depth24UnormStencil8 => 4,
+        TextureFormat::R16Float | TextureFormat::Depth16Unorm => 2,
+        // Packed float depth plus an 8-bit stencil face.
+        TextureFormat::Rgba16Float
+        | TextureFormat::Rg32Float
+        | TextureFormat::Depth32FloatStencil8 => 8,
+        TextureFormat::Rgba32Float => 16,
     }
 }
 
@@ -94,14 +152,6 @@ pub(crate) fn cull(value: CullMode) -> MTLCullMode {
         CullMode::None => MTLCullMode::None,
         CullMode::Front => MTLCullMode::Front,
         CullMode::Back => MTLCullMode::Back,
-    }
-}
-
-pub(crate) fn vertex_format(value: Format) -> Option<MTLVertexFormat> {
-    match value {
-        Format::Rg32Float => Some(MTLVertexFormat::Float2),
-        Format::Rgb32Float => Some(MTLVertexFormat::Float3),
-        _ => None,
     }
 }
 
