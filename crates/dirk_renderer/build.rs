@@ -917,8 +917,8 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
         #[cfg(feature = "editor")]
         mod editor {
             use super::{
-                BindGroupLayoutEntry, BindingType, Format, FragmentShader, Shader, ShaderCode,
-                ShaderStage, ShaderStages, VertexAttribute, VertexBufferLayout, VertexShader,
+                BindGroupLayoutEntry, BindingType, FragmentShader, Shader, ShaderCode, ShaderStage,
+                ShaderStages, VertexAttribute, VertexBufferLayout, VertexFormat, VertexShader,
                 VertexStepMode,
             };
 

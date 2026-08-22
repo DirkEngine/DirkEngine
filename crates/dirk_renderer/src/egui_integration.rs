@@ -5,9 +5,9 @@ use dirk_platform::{Theme, WindowId, WindowInputEvent};
 use dirk_rhi::{
     AddressMode, Backend as _, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor,
     BlendOp, BlendState, BufferImageCopy, BufferUsages, CommandBuffer as _, CullMode,
-    DependencyInfo, Extent3d, FilterMode, Format, FrontFace, ImageAspects, ImageBarrier,
-    ImageState, ImageUsages, IndexFormat, MemoryDomain, Origin3d, PrimitiveTopology, RasterState,
-    Rect, SampleCount, SamplerDesc, ShaderStages, Viewport,
+    DependencyInfo, Extent3d, FilterMode, FrontFace, ImageAspects, ImageBarrier, ImageState,
+    ImageUsages, IndexFormat, InvalidResource as Ir, MemoryDomain, Origin3d, PrimitiveTopology,
+    RasterState, Rect, SampleCount, SamplerDesc, ShaderStages, Viewport,
 };
 use dirk_shaders::types::EguiUbo;
 use egui::{
@@ -52,6 +52,11 @@ pub struct EguiFrameInput {
     pub focused: bool,
     pub theme: Option<Theme>,
     pub events: Vec<WindowInputEvent>,
+}
+
+/// Builds a typed invalid-resource error for egui bookkeeping violations.
+fn invalid_resource(kind: Ir) -> dirk_rhi::Error {
+    dirk_rhi::Error::InvalidResource(kind)
 }
 
 impl EguiState {
@@ -143,16 +148,16 @@ impl EguiState {
     }
 
     pub fn add_user_texture(&mut self, view: &ActiveImageView) -> Result<TextureId> {
-        let id =
-            loop {
-                let id = TextureId::User(self.next_user_texture);
-                self.next_user_texture = self.next_user_texture.checked_add(1).ok_or(
-                    dirk_rhi::Error::InvalidResource("egui user texture identifiers are exhausted"),
-                )?;
-                if !self.textures.contains_key(&id) {
-                    break id;
-                }
-            };
+        let id = loop {
+            let id = TextureId::User(self.next_user_texture);
+            self.next_user_texture = self
+                .next_user_texture
+                .checked_add(1)
+                .ok_or(invalid_resource(Ir::OutOfRange))?;
+            if !self.textures.contains_key(&id) {
+                break id;
+            }
+        };
         let binding = self
             .texture_allocator
             .sampled_image(0, view, &self.user_sampler)?;
@@ -210,10 +215,7 @@ impl EguiState {
             return Ok(());
         };
         if prepared.frame != frame {
-            return Err(dirk_rhi::Error::InvalidResource(
-                "egui was prepared for a different frame",
-            )
-            .into());
+            return Err(invalid_resource(Ir::BadState).into());
         }
 
         let resources = &self.frames[frame];
@@ -243,12 +245,10 @@ impl EguiState {
             else {
                 continue;
             };
-            let texture =
-                self.textures
-                    .get(&draw.texture)
-                    .ok_or(dirk_rhi::Error::InvalidResource(
-                        "egui draw references an unknown texture",
-                    ))?;
+            let texture = self
+                .textures
+                .get(&draw.texture)
+                .ok_or(invalid_resource(Ir::BadState))?;
             rendering.bind_descriptor_sets(&(&resources.set, texture.binding()));
             rendering.command().rhi_mut().set_scissor(scissor);
             rendering.command().rhi_mut().draw_indexed(
@@ -273,20 +273,14 @@ impl EguiState {
 
         if let Some([x, y]) = delta.pos {
             let origin = Origin3d {
-                x: u32::try_from(x).map_err(|_| {
-                    dirk_rhi::Error::InvalidResource("egui texture x offset is too large")
-                })?,
-                y: u32::try_from(y).map_err(|_| {
-                    dirk_rhi::Error::InvalidResource("egui texture y offset is too large")
-                })?,
+                x: u32::try_from(x).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+                y: u32::try_from(y).map_err(|_| invalid_resource(Ir::OutOfRange))?,
                 z: 0,
             };
             let texture = self
                 .textures
                 .get_mut(&id)
-                .ok_or(dirk_rhi::Error::InvalidResource(
-                    "egui updated an unknown texture",
-                ))?;
+                .ok_or(invalid_resource(Ir::BadState))?;
             let EguiTexture::Managed {
                 image,
                 binding,
@@ -294,9 +288,7 @@ impl EguiState {
                 extent,
             } = texture
             else {
-                return Err(
-                    dirk_rhi::Error::InvalidResource("egui cannot update a user texture").into(),
-                );
+                return Err(invalid_resource(Ir::BadState).into());
             };
             if origin
                 .x
@@ -307,10 +299,7 @@ impl EguiState {
                     .checked_add(height)
                     .is_none_or(|bottom| bottom > extent.height)
             {
-                return Err(dirk_rhi::Error::InvalidResource(
-                    "egui texture update exceeds the allocated image",
-                )
-                .into());
+                return Err(invalid_resource(Ir::OutOfRange).into());
             }
             record_texture_upload(
                 cmd,
@@ -335,7 +324,7 @@ impl EguiState {
             device,
             &ImageCreateInfo {
                 extent,
-                format: Format::Rgba8Srgb,
+                format: dirk_rhi::TextureFormat::Rgba8Srgb,
                 usage: ImageUsages::COPY_DST | ImageUsages::SAMPLED,
                 mip_levels: 1,
                 samples: SampleCount::One,
@@ -369,10 +358,8 @@ impl EguiState {
 
 fn stage_texture(device: &RenderDevice, image: &ImageData) -> Result<(CustomBuffer, u32, u32)> {
     let [width, height] = image.size();
-    let width = u32::try_from(width)
-        .map_err(|_| dirk_rhi::Error::InvalidResource("egui texture width is too large"))?;
-    let height = u32::try_from(height)
-        .map_err(|_| dirk_rhi::Error::InvalidResource("egui texture height is too large"))?;
+    let width = u32::try_from(width).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+    let height = u32::try_from(height).map_err(|_| invalid_resource(Ir::OutOfRange))?;
     let pixels = match image {
         ImageData::Color(image) => image
             .pixels
@@ -382,8 +369,7 @@ fn stage_texture(device: &RenderDevice, image: &ImageData) -> Result<(CustomBuff
     };
     let staging = CustomBuffer::create_custom(
         device,
-        u64::try_from(pixels.len())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui texture upload is too large"))?,
+        u64::try_from(pixels.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?,
         BufferUsages::COPY_SRC,
         MemoryDomain::Upload,
     )?;
@@ -414,8 +400,8 @@ struct EguiFrameResources {
 
 impl EguiFrameResources {
     fn new(device: &RenderDevice, allocator: &DescriptorAllocator<EguiFrameSet>) -> Result<Self> {
-        let uniform_size = u64::try_from(size_of::<EguiUbo>())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui uniform is too large"))?;
+        let uniform_size =
+            u64::try_from(size_of::<EguiUbo>()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
         let uniform = UniformBuffer::create(device, uniform_size, MemoryDomain::Upload)?;
         let set = allocator.uniform_buffer(0, uniform.rhi(), uniform_size)?;
         Ok(Self {
@@ -550,17 +536,17 @@ impl crate::shaders::metadata::VertexInput for EguiVertex {
     const ATTRIBUTES: &'static [dirk_rhi::VertexAttribute] = &[
         dirk_rhi::VertexAttribute {
             location: 0,
-            format: Format::Rg32Float,
+            format: dirk_rhi::VertexFormat::Float32x2,
             offset: std::mem::offset_of!(Self, position) as u32,
         },
         dirk_rhi::VertexAttribute {
             location: 1,
-            format: Format::Rg32Float,
+            format: dirk_rhi::VertexFormat::Float32x2,
             offset: std::mem::offset_of!(Self, tex_coord) as u32,
         },
         dirk_rhi::VertexAttribute {
             location: 2,
-            format: Format::Rgba32Float,
+            format: dirk_rhi::VertexFormat::Float32x4,
             offset: std::mem::offset_of!(Self, color) as u32,
         },
     ];
@@ -590,12 +576,12 @@ fn flatten_meshes(primitives: &[ClippedPrimitive]) -> Result<FlattenedMesh> {
             warn!("egui callback primitives are not supported");
             continue;
         };
-        let first_index = u32::try_from(indices.len())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui has too many indices"))?;
-        let index_count = u32::try_from(mesh.indices.len())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui mesh has too many indices"))?;
-        let vertex_offset = i32::try_from(vertices.len())
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui has too many vertices"))?;
+        let first_index =
+            u32::try_from(indices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        let index_count =
+            u32::try_from(mesh.indices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        let vertex_offset =
+            i32::try_from(vertices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
         vertices.extend(mesh.vertices.iter().map(|vertex| {
             let color = vertex.color.to_array();
             EguiVertex {
@@ -633,8 +619,7 @@ fn ensure_buffer(
     let new_capacity = required.next_power_of_two();
     *buffer = Some(CustomBuffer::create_custom(
         device,
-        u64::try_from(new_capacity)
-            .map_err(|_| dirk_rhi::Error::InvalidResource("egui mesh buffer is too large"))?,
+        u64::try_from(new_capacity).map_err(|_| invalid_resource(Ir::OutOfRange))?,
         usage,
         MemoryDomain::Upload,
     )?);
@@ -651,6 +636,8 @@ fn record_texture_upload(
     old_state: ImageState,
 ) {
     cmd.rhi_mut().barrier(&DependencyInfo {
+        memory_barriers: &[],
+        buffer_barriers: &[],
         image_barriers: &[ImageBarrier {
             image: image.rhi_image(),
             old_state,
@@ -676,6 +663,8 @@ fn record_texture_upload(
         }],
     );
     cmd.rhi_mut().barrier(&DependencyInfo {
+        memory_barriers: &[],
+        buffer_barriers: &[],
         image_barriers: &[ImageBarrier {
             image: image.rhi_image(),
             old_state: ImageState::CopyDestination,
@@ -737,8 +726,11 @@ fn clip_scissor(clip: egui::Rect, pixels_per_point: f32, extent: Extent3d) -> Op
     (scissor.width > 0 && scissor.height > 0).then_some(scissor)
 }
 
-fn is_srgb_format(format: Format) -> bool {
-    matches!(format, Format::Rgba8Srgb | Format::Bgra8Srgb)
+fn is_srgb_format(format: dirk_rhi::TextureFormat) -> bool {
+    matches!(
+        format,
+        dirk_rhi::TextureFormat::Rgba8Srgb | dirk_rhi::TextureFormat::Bgra8Srgb
+    )
 }
 
 fn translate_events(
@@ -845,9 +837,9 @@ mod tests {
 
     #[test]
     fn detects_common_srgb_formats() {
-        assert!(is_srgb_format(Format::Rgba8Srgb));
-        assert!(is_srgb_format(Format::Bgra8Srgb));
-        assert!(!is_srgb_format(Format::Rgba8Unorm));
+        assert!(is_srgb_format(dirk_rhi::TextureFormat::Rgba8Srgb));
+        assert!(is_srgb_format(dirk_rhi::TextureFormat::Bgra8Srgb));
+        assert!(!is_srgb_format(dirk_rhi::TextureFormat::Rgba8Unorm));
     }
 
     #[test]
