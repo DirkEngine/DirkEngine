@@ -4,7 +4,6 @@ description = "Vulkan backend for DirkEngine's render hardware interface"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
 version.workspace = true
 
 homepage.workspace = true
