@@ -250,6 +250,26 @@ impl dirk_engine::Subsystem for Renderer {
 }
 
 impl Renderer {
+    fn best_sample_count(
+        rhi: &ActiveRhi,
+        color: dirk_rhi::TextureFormat,
+        depth: dirk_rhi::TextureFormat,
+    ) -> SampleCount {
+        let color_counts =
+            rhi.supported_sample_counts(color, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
+        let depth_counts =
+            rhi.supported_sample_counts(depth, dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT);
+        [
+            SampleCount::Eight,
+            SampleCount::Four,
+            SampleCount::Two,
+            SampleCount::One,
+        ]
+        .into_iter()
+        .find(|&count| color_counts.supports(count) && depth_counts.supports(count))
+        .unwrap_or(SampleCount::One)
+    }
+
     fn build_frames(render_device: &RenderDevice) -> Result<[Frame; MAX_FRAMES_IN_FLIGHT]> {
         let build_frame = || -> Result<Frame> {
             Ok(Frame {
@@ -300,23 +320,8 @@ impl Renderer {
                 .ok_or(crate::errors::Error::Rhi(dirk_rhi::Error::from(
                     dirk_rhi::InvalidResourceKind::Empty,
                 )))?;
-        let color_samples =
-            rhi.supported_sample_counts(surface_format, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
-        let depth_samples = rhi.supported_sample_counts(
-            depth_format,
-            dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT,
-        );
-        let msaa_samples = [
-            dirk_rhi::SampleCount::Eight,
-            dirk_rhi::SampleCount::Four,
-            dirk_rhi::SampleCount::Two,
-            dirk_rhi::SampleCount::One,
-        ]
-        .into_iter()
-        .find(|&count| color_samples.supports(count) && depth_samples.supports(count))
-        .unwrap_or(dirk_rhi::SampleCount::One);
         let properties = RendererProperties {
-            msaa_samples,
+            msaa_samples: Self::best_sample_count(&rhi, surface_format, depth_format),
             anisotropy: capabilities.max_sampler_anisotropy > 1,
             surface_format,
             depth_format,
