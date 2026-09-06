@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use dirk_rhi::{
-    Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageViewDesc, PipelineLayoutDesc, QueueType, Result, RhiCreateInfo, SamplerDesc,
-    ShaderDesc, Submission, SurfaceCreateInfo, SwapchainDesc,
+    Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, FormatCapabilities,
+    GraphicsPipelineDesc, ImageDesc, ImageUsages, ImageViewDesc, PipelineLayoutDesc, QueueType,
+    Result, RhiCreateInfo, SampleCount, SampleCounts, SamplerDesc, ShaderDesc, Submission,
+    SurfaceCreateInfo, SwapchainDesc, TextureFormat,
 };
 use metal::{CommandQueue, Device, MTLCommandBufferStatus};
 
@@ -54,24 +55,17 @@ impl Backend for MetalBackend {
 
     fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
         let device = Device::system_default().ok_or(dirk_rhi::Error::NoDevice)?;
-        let max_samples = [
-            dirk_rhi::SampleCount::Eight,
-            dirk_rhi::SampleCount::Four,
-            dirk_rhi::SampleCount::Two,
-        ]
-        .into_iter()
-        .find(|samples| device.supports_texture_sample_count(crate::convert::samples(*samples)))
-        .unwrap_or(dirk_rhi::SampleCount::One);
         let queue = device.new_command_queue();
         queue.set_label(&format!("{} graphics queue", info.application_name));
         let context = Arc::new(Context { device, queue });
         Ok(Self {
             context,
             capabilities: Capabilities {
-                max_samples,
                 max_sampler_anisotropy: 16,
                 min_uniform_buffer_offset_alignment: 256,
                 min_storage_buffer_offset_alignment: 16,
+                buffer_copy_offset_alignment: 4,
+                buffer_copy_row_pitch_alignment: 256,
                 dedicated_compute_queue: false,
                 dedicated_copy_queue: false,
             },
@@ -86,6 +80,44 @@ impl Backend for MetalBackend {
         // Apple GPUs prefer combined float depth/stencil; Intel Macs also
         // accept packed 24-bit formats, which map to the float pair here.
         &[dirk_rhi::TextureFormat::Depth32Float]
+    }
+
+    fn format_capabilities(&self, format: TextureFormat) -> FormatCapabilities {
+        let attachment = match format {
+            TextureFormat::Depth16Unorm
+            | TextureFormat::Depth24UnormStencil8
+            | TextureFormat::Depth32Float
+            | TextureFormat::Depth32FloatStencil8 => ImageUsages::DEPTH_STENCIL_ATTACHMENT,
+            _ => ImageUsages::COLOR_ATTACHMENT | ImageUsages::STORAGE,
+        };
+        FormatCapabilities {
+            usages: ImageUsages::COPY_SRC
+                | ImageUsages::COPY_DST
+                | ImageUsages::SAMPLED
+                | attachment,
+        }
+    }
+
+    fn supported_sample_counts(
+        &self,
+        _format: TextureFormat,
+        _usages: ImageUsages,
+    ) -> SampleCounts {
+        let mut counts = SampleCounts::ONE;
+        for (count, flag) in [
+            (SampleCount::Two, SampleCounts::TWO),
+            (SampleCount::Four, SampleCounts::FOUR),
+            (SampleCount::Eight, SampleCounts::EIGHT),
+        ] {
+            if self
+                .context
+                .device
+                .supports_texture_sample_count(crate::convert::samples(count))
+            {
+                counts |= flag;
+            }
+        }
+        counts
     }
 
     fn wait_idle(&self) -> Result<()> {
@@ -181,7 +213,7 @@ impl Backend for MetalBackend {
             .map(|command| {
                 require_context(&self.context, &command.context)?;
                 if command.queue != queue {
-                    return Err(dirk_rhi::InvalidResource::Mismatch.into());
+                    return Err(dirk_rhi::InvalidResourceKind::Mismatch.into());
                 }
                 command.command_for_submit()
             })
@@ -205,8 +237,8 @@ impl Backend for MetalBackend {
         }
         let last = &commands[commands.len() - 1];
         for frame in submission.surface_frames {
+            frame.mark_submitted()?;
             last.present_drawable(&frame.drawable);
-            frame.mark_submitted();
         }
         for point in submission.signal_timelines {
             last.encode_signal_event(&point.semaphore.event, point.value);
@@ -221,7 +253,7 @@ impl Backend for MetalBackend {
     }
 
     fn create_surface(&self, info: SurfaceCreateInfo) -> Result<MetalSurface> {
-        MetalSurface::create(&self.context, info)
+        MetalSurface::create(&self.context, &info)
     }
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<MetalSwapchain> {

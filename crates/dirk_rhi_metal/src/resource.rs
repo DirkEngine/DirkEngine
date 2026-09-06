@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 
 use dirk_rhi::{
     BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Fence,
-    GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageUsages, ImageViewDesc, ImageViewType,
-    InvalidResource as Ir, MemoryDomain, PipelineLayoutDesc, Result, SamplerDesc, ShaderDesc,
-    ShaderSource, ShaderStage, ShaderStages, TimelineSemaphore,
+    GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageDimension, ImageUsages, ImageViewDesc,
+    ImageViewType, InvalidResourceKind as Ir, MemoryDomain, PipelineLayoutDesc, Result,
+    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderStages, TimelineSemaphore,
 };
 use metal::{
-    CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLResourceOptions,
-    MTLSamplerMipFilter, MTLStorageMode, MTLTextureType, MTLTextureUsage, RenderPipelineDescriptor,
-    RenderPipelineState, SamplerDescriptor, SamplerState, SharedEvent, StencilDescriptor, Texture,
-    TextureDescriptor, VertexDescriptor,
+    CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLColorWriteMask,
+    MTLResourceOptions, MTLSamplerMipFilter, MTLStorageMode, MTLTextureType, MTLTextureUsage,
+    RenderPipelineDescriptor, RenderPipelineState, SamplerDescriptor, SamplerState, SharedEvent,
+    StencilDescriptor, Texture, TextureDescriptor, VertexDescriptor,
 };
 
 use crate::{backend::Context, backend_error, convert};
@@ -28,6 +28,7 @@ pub struct MetalBuffer {
     pub(crate) raw: metal::Buffer,
     pub(crate) size: u64,
     pub(crate) memory: MemoryDomain,
+    host_access: Arc<parking_lot::Mutex<()>>,
 }
 
 impl std::fmt::Debug for MetalBuffer {
@@ -43,7 +44,7 @@ impl std::fmt::Debug for MetalBuffer {
 impl MetalBuffer {
     pub(crate) fn create(context: &Arc<Context>, desc: &BufferDesc<'_>) -> Result<Self> {
         if desc.size == 0 {
-            return Err(dirk_rhi::Error::InvalidResource(Ir::Empty));
+            return Err(dirk_rhi::Error::from(Ir::Empty));
         }
         let options = match desc.memory {
             MemoryDomain::Device => MTLResourceOptions::StorageModePrivate,
@@ -56,6 +57,7 @@ impl MetalBuffer {
             raw,
             size: desc.size,
             memory: desc.memory,
+            host_access: Arc::new(parking_lot::Mutex::new(())),
         })
     }
 }
@@ -66,21 +68,43 @@ impl Buffer for MetalBuffer {
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        let _guard = self.host_access.lock();
         if self.memory == MemoryDomain::Device {
-            return Err(dirk_rhi::InvalidResource::NotHostAccessible.into());
+            return Err(dirk_rhi::InvalidResourceKind::NotHostAccessible.into());
         }
         let length =
             u64::try_from(data.len()).map_err(|error| dirk_rhi::Error::Backend(error.into()))?;
         if offset.checked_add(length).is_none_or(|end| end > self.size) {
-            return Err(dirk_rhi::InvalidResource::OutOfRange.into());
+            return Err(dirk_rhi::InvalidResourceKind::OutOfRange.into());
         }
-        let offset = usize::try_from(offset).map_err(|_| dirk_rhi::InvalidResource::OutOfRange)?;
+        let offset =
+            usize::try_from(offset).map_err(|_| dirk_rhi::InvalidResourceKind::OutOfRange)?;
         // SAFETY: Bounds are checked above and shared Metal buffer memory is
         // host visible for the lifetime of `self`.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr(),
                 self.raw.contents().cast::<u8>().add(offset),
+                data.len(),
+            );
+        }
+        Ok(())
+    }
+
+    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
+        let _guard = self.host_access.lock();
+        if self.memory != MemoryDomain::Readback {
+            return Err(Ir::NotHostAccessible.into());
+        }
+        let length = u64::try_from(data.len()).map_err(backend_error)?;
+        if offset.checked_add(length).is_none_or(|end| end > self.size) {
+            return Err(Ir::OutOfRange.into());
+        }
+        let offset = usize::try_from(offset).map_err(|_| Ir::OutOfRange)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.raw.contents().cast::<u8>().add(offset),
+                data.as_mut_ptr(),
                 data.len(),
             );
         }
@@ -117,7 +141,7 @@ impl MetalImage {
             || desc.mip_levels == 0
             || desc.array_layers == 0
         {
-            return Err(dirk_rhi::Error::InvalidResource(Ir::Empty));
+            return Err(dirk_rhi::Error::from(Ir::Empty));
         }
         if desc.array_layers > 1 && desc.samples != dirk_rhi::SampleCount::One {
             return Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
@@ -134,14 +158,30 @@ impl MetalImage {
         {
             return Err(Ir::Mismatch.into());
         }
-        let texture_type = if desc.extent.depth > 1 {
-            MTLTextureType::D3
-        } else if desc.array_layers > 1 {
-            MTLTextureType::D2Array
-        } else if desc.samples != dirk_rhi::SampleCount::One {
-            MTLTextureType::D2Multisample
-        } else {
-            MTLTextureType::D2
+        let (texture_type, array_length) = match desc.dimension {
+            ImageDimension::TwoD if desc.extent.depth == 1 => {
+                let ty = if desc.array_layers > 1 {
+                    MTLTextureType::D2Array
+                } else if desc.samples != dirk_rhi::SampleCount::One {
+                    MTLTextureType::D2Multisample
+                } else {
+                    MTLTextureType::D2
+                };
+                (ty, desc.array_layers)
+            }
+            ImageDimension::ThreeD if desc.array_layers == 1 => (MTLTextureType::D3, 1),
+            ImageDimension::Cube
+                if desc.extent.depth == 1 && desc.array_layers.is_multiple_of(6) =>
+            {
+                let cubes = desc.array_layers / 6;
+                let ty = if cubes == 1 {
+                    MTLTextureType::Cube
+                } else {
+                    MTLTextureType::CubeArray
+                };
+                (ty, cubes)
+            }
+            _ => return Err(Ir::Mismatch.into()),
         };
         let descriptor = TextureDescriptor::new();
         descriptor.set_texture_type(texture_type);
@@ -150,7 +190,7 @@ impl MetalImage {
         descriptor.set_height(u64::from(desc.extent.height));
         descriptor.set_depth(u64::from(desc.extent.depth));
         descriptor.set_mipmap_level_count(u64::from(desc.mip_levels));
-        descriptor.set_array_length(u64::from(desc.array_layers));
+        descriptor.set_array_length(u64::from(array_length));
         descriptor.set_sample_count(convert::samples(desc.samples));
         descriptor.set_storage_mode(if desc.usage.contains(ImageUsages::TRANSIENT_ATTACHMENT) {
             MTLStorageMode::Memoryless
@@ -224,10 +264,11 @@ impl MetalImageView {
         match source_type {
             MTLTextureType::D2Multisample => match view_type {
                 ImageViewType::TwoD if array_layer_count == 1 => Ok(true),
-                ImageViewType::TwoD => Err(dirk_rhi::Error::InvalidResource(Ir::Mismatch)),
-                ImageViewType::TwoDArray | ImageViewType::Cube => {
-                    Err(dirk_rhi::Error::InvalidResource(Ir::Mismatch))
-                }
+                ImageViewType::TwoD
+                | ImageViewType::TwoDArray
+                | ImageViewType::ThreeD
+                | ImageViewType::Cube
+                | ImageViewType::CubeArray => Err(dirk_rhi::Error::from(Ir::Mismatch)),
             },
             MTLTextureType::D2MultisampleArray | MTLTextureType::D3 => {
                 Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
@@ -267,14 +308,15 @@ impl MetalImageView {
             let texture_type = match desc.view_type {
                 ImageViewType::TwoD if desc.array_layer_count == 1 => MTLTextureType::D2,
                 ImageViewType::TwoD | ImageViewType::TwoDArray => MTLTextureType::D2Array,
+                ImageViewType::ThreeD => MTLTextureType::D3,
                 ImageViewType::Cube if desc.array_layer_count == 6 => MTLTextureType::Cube,
-                ImageViewType::Cube
+                ImageViewType::Cube | ImageViewType::CubeArray
                     if desc.array_layer_count.is_multiple_of(6)
                         && desc.base_array_layer.is_multiple_of(6) =>
                 {
                     MTLTextureType::CubeArray
                 }
-                ImageViewType::Cube => {
+                ImageViewType::Cube | ImageViewType::CubeArray => {
                     return Err(Ir::Mismatch.into());
                 }
             };
@@ -433,7 +475,7 @@ impl MetalBindGroup {
                 .entries
                 .iter()
                 .find(|layout| layout.binding == entry.binding)
-                .ok_or(dirk_rhi::Error::InvalidResource(Ir::Mismatch))?;
+                .ok_or_else(|| dirk_rhi::Error::from(Ir::Mismatch))?;
             let resource = match (&entry.resource, layout_entry.ty) {
                 (
                     BindingResource::Buffer {
@@ -441,14 +483,14 @@ impl MetalBindGroup {
                         offset,
                         size,
                     },
-                    BindingType::UniformBuffer | BindingType::StorageBuffer,
+                    BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. },
                 ) => {
                     require_context(context, &buffer.context)?;
                     if offset
                         .checked_add(*size)
                         .is_none_or(|end| end > buffer.size)
                     {
-                        return Err(dirk_rhi::Error::InvalidResource(Ir::OutOfRange));
+                        return Err(dirk_rhi::Error::from(Ir::OutOfRange));
                     }
                     OwnedBinding::Buffer {
                         buffer: (*buffer).clone(),
@@ -468,13 +510,13 @@ impl MetalBindGroup {
                     OwnedBinding::StorageImage((*view).clone())
                 }
                 _ => {
-                    return Err(dirk_rhi::Error::InvalidResource(Ir::Mismatch));
+                    return Err(dirk_rhi::Error::from(Ir::Mismatch));
                 }
             };
             entries.push((entry.binding, resource));
         }
         if entries.len() != desc.layout.entries.len() {
-            return Err(dirk_rhi::Error::InvalidResource(Ir::Mismatch));
+            return Err(dirk_rhi::Error::from(Ir::Mismatch));
         }
         entries.sort_unstable_by_key(|entry| entry.0);
         Ok(Self {
@@ -513,7 +555,7 @@ impl MetalPipelineLayout {
             for entry in layout.entries.iter() {
                 let end = u64::from(entry.binding) + 1;
                 match entry.ty {
-                    BindingType::UniformBuffer | BindingType::StorageBuffer => {
+                    BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. } => {
                         next.buffers = next
                             .buffers
                             .max(offsets.last().map_or(0, |base| base.buffers) + end);
@@ -577,7 +619,7 @@ impl MetalGraphicsPipeline {
                 .fragment
                 .is_some_and(|fragment| fragment.stage != ShaderStage::Fragment)
         {
-            return Err(dirk_rhi::Error::InvalidResource(Ir::Mismatch));
+            return Err(dirk_rhi::Error::from(Ir::Mismatch));
         }
         let vertex_descriptor = VertexDescriptor::new();
         for (buffer_index, layout) in desc.vertex_buffers.iter().enumerate() {
@@ -586,7 +628,7 @@ impl MetalGraphicsPipeline {
             let metal_layout = vertex_descriptor
                 .layouts()
                 .object_at(metal_index)
-                .ok_or(dirk_rhi::Error::InvalidResource(Ir::OutOfRange))?;
+                .ok_or_else(|| dirk_rhi::Error::from(Ir::OutOfRange))?;
             metal_layout.set_stride(u64::from(layout.stride));
             metal_layout.set_step_function(convert::vertex_step(layout.step_mode));
             metal_layout.set_step_rate(1);
@@ -594,7 +636,7 @@ impl MetalGraphicsPipeline {
                 let metal_attribute = vertex_descriptor
                     .attributes()
                     .object_at(u64::from(attribute.location))
-                    .ok_or(dirk_rhi::Error::InvalidResource(Ir::OutOfRange))?;
+                    .ok_or_else(|| dirk_rhi::Error::from(Ir::OutOfRange))?;
                 metal_attribute.set_format(convert::vertex_format(attribute.format));
                 metal_attribute.set_offset(u64::from(attribute.offset));
                 metal_attribute.set_buffer_index(metal_index);
@@ -609,40 +651,36 @@ impl MetalGraphicsPipeline {
         descriptor.set_vertex_descriptor(Some(vertex_descriptor));
         descriptor.set_sample_count(convert::samples(desc.samples));
         descriptor.set_alpha_to_coverage_enabled(desc.alpha_to_coverage);
-        for (index, format) in desc.color_formats.iter().enumerate() {
-            descriptor
-                .color_attachments()
-                .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
-                .ok_or(dirk_rhi::Error::InvalidResource(Ir::OutOfRange))?
-                .set_pixel_format(convert::format(*format));
-        }
-        for attachment in desc.color_formats.iter().enumerate() {
-            let (index, _format) = attachment;
+        for (index, target) in desc.color_targets.iter().enumerate() {
             let state = descriptor
                 .color_attachments()
                 .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
-                .ok_or(dirk_rhi::Error::InvalidResource(Ir::OutOfRange))?;
-            state.set_pixel_format(convert::format(desc.color_formats[index]));
-            if let Some(blend) = desc.blend {
-                let apply = |state: &metal::RenderPipelineColorAttachmentDescriptorRef,
-                             component: dirk_rhi::BlendComponent| {
-                    state.set_blending_enabled(true);
-                    state.set_source_rgb_blend_factor(convert::blend_factor(component.source));
-                    state.set_destination_rgb_blend_factor(convert::blend_factor(
-                        component.destination,
-                    ));
-                    state.set_rgb_blend_operation(convert::blend_op(component.operation));
-                    state.set_source_alpha_blend_factor(convert::blend_factor(component.source));
-                    state.set_destination_alpha_blend_factor(convert::blend_factor(
-                        component.destination,
-                    ));
-                    state.set_alpha_blend_operation(convert::blend_op(component.operation));
-                };
-                apply(state, blend.color);
-                // The alpha equation is driven by the same component pair in
-                // the RHI model; Metal exposes separate controls only when a
-                // backend opts into distinct factors.
-                let _ = blend.alpha;
+                .ok_or_else(|| dirk_rhi::Error::from(Ir::OutOfRange))?;
+            state.set_pixel_format(convert::format(target.format));
+            let mut write_mask = MTLColorWriteMask::empty();
+            for (rhi, metal) in [
+                (dirk_rhi::ColorWrites::RED, MTLColorWriteMask::Red),
+                (dirk_rhi::ColorWrites::GREEN, MTLColorWriteMask::Green),
+                (dirk_rhi::ColorWrites::BLUE, MTLColorWriteMask::Blue),
+                (dirk_rhi::ColorWrites::ALPHA, MTLColorWriteMask::Alpha),
+            ] {
+                if target.write_mask.contains(rhi) {
+                    write_mask |= metal;
+                }
+            }
+            state.set_write_mask(write_mask);
+            if let Some(blend) = target.blend {
+                state.set_blending_enabled(true);
+                state.set_source_rgb_blend_factor(convert::blend_factor(blend.color.source));
+                state.set_destination_rgb_blend_factor(convert::blend_factor(
+                    blend.color.destination,
+                ));
+                state.set_rgb_blend_operation(convert::blend_op(blend.color.operation));
+                state.set_source_alpha_blend_factor(convert::blend_factor(blend.alpha.source));
+                state.set_destination_alpha_blend_factor(convert::blend_factor(
+                    blend.alpha.destination,
+                ));
+                state.set_alpha_blend_operation(convert::blend_op(blend.alpha.operation));
             }
         }
         descriptor.set_alpha_to_coverage_enabled(desc.alpha_to_coverage);
@@ -771,7 +809,7 @@ pub(crate) fn require_context(expected: &Arc<Context>, actual: &Arc<Context>) ->
     if Arc::ptr_eq(expected, actual) {
         Ok(())
     } else {
-        Err(dirk_rhi::Error::InvalidResource(Ir::ForeignInstance))
+        Err(dirk_rhi::Error::from(Ir::ForeignInstance))
     }
 }
 

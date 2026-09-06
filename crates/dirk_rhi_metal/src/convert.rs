@@ -29,6 +29,7 @@ pub(crate) fn format(value: TextureFormat) -> MTLPixelFormat {
         TextureFormat::Depth24UnormStencil8 | TextureFormat::Depth32FloatStencil8 => {
             MTLPixelFormat::Depth32Float_Stencil8
         }
+        _ => MTLPixelFormat::Invalid,
     }
 }
 
@@ -51,6 +52,8 @@ pub(crate) fn stencil_op(value: RhiStencilOp) -> MTLStencilOperation {
         RhiStencilOp::IncrementClamp => MTLStencilOperation::IncrementClamp,
         RhiStencilOp::DecrementClamp => MTLStencilOperation::DecrementClamp,
         RhiStencilOp::Invert => MTLStencilOperation::Invert,
+        RhiStencilOp::IncrementWrap => MTLStencilOperation::IncrementWrap,
+        RhiStencilOp::DecrementWrap => MTLStencilOperation::DecrementWrap,
     }
 }
 
@@ -58,10 +61,18 @@ pub(crate) fn blend_factor(value: BlendFactor) -> MTLBlendFactor {
     match value {
         BlendFactor::Zero => MTLBlendFactor::Zero,
         BlendFactor::One => MTLBlendFactor::One,
+        BlendFactor::SourceColor => MTLBlendFactor::SourceColor,
+        BlendFactor::OneMinusSourceColor => MTLBlendFactor::OneMinusSourceColor,
         BlendFactor::SourceAlpha => MTLBlendFactor::SourceAlpha,
         BlendFactor::OneMinusSourceAlpha => MTLBlendFactor::OneMinusSourceAlpha,
+        BlendFactor::DestinationColor => MTLBlendFactor::DestinationColor,
+        BlendFactor::OneMinusDestinationColor => MTLBlendFactor::OneMinusDestinationColor,
         BlendFactor::DestinationAlpha => MTLBlendFactor::DestinationAlpha,
         BlendFactor::OneMinusDestinationAlpha => MTLBlendFactor::OneMinusDestinationAlpha,
+        BlendFactor::ConstantColor => MTLBlendFactor::BlendColor,
+        BlendFactor::OneMinusConstantColor => MTLBlendFactor::OneMinusBlendColor,
+        BlendFactor::ConstantAlpha => MTLBlendFactor::BlendAlpha,
+        BlendFactor::OneMinusConstantAlpha => MTLBlendFactor::OneMinusBlendAlpha,
     }
 }
 
@@ -72,26 +83,6 @@ pub(crate) fn blend_op(value: BlendOp) -> MTLBlendOperation {
         BlendOp::ReverseSubtract => MTLBlendOperation::ReverseSubtract,
         BlendOp::Min => MTLBlendOperation::Min,
         BlendOp::Max => MTLBlendOperation::Max,
-    }
-}
-
-pub(crate) const fn bytes_per_pixel(value: TextureFormat) -> u64 {
-    match value {
-        TextureFormat::Rgba8Unorm
-        | TextureFormat::Rgba8Srgb
-        | TextureFormat::Bgra8Unorm
-        | TextureFormat::Bgra8Srgb
-        | TextureFormat::Rg16Float
-        | TextureFormat::R32Float
-        | TextureFormat::R11G11B10Float
-        | TextureFormat::Depth32Float
-        | TextureFormat::Depth24UnormStencil8 => 4,
-        TextureFormat::R16Float | TextureFormat::Depth16Unorm => 2,
-        // Packed float depth plus an 8-bit stencil face.
-        TextureFormat::Rgba16Float
-        | TextureFormat::Rg32Float
-        | TextureFormat::Depth32FloatStencil8 => 8,
-        TextureFormat::Rgba32Float => 16,
     }
 }
 
@@ -128,6 +119,8 @@ pub(crate) fn compare(value: CompareOp) -> MTLCompareFunction {
         CompareOp::LessEqual => MTLCompareFunction::LessEqual,
         CompareOp::Equal => MTLCompareFunction::Equal,
         CompareOp::Greater => MTLCompareFunction::Greater,
+        CompareOp::NotEqual => MTLCompareFunction::NotEqual,
+        CompareOp::GreaterEqual => MTLCompareFunction::GreaterEqual,
         CompareOp::Always => MTLCompareFunction::Always,
     }
 }

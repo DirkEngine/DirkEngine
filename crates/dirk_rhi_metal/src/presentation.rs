@@ -1,12 +1,15 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    num::NonZeroU32,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use core_graphics_types::geometry::CGSize;
 use dirk_rhi::{
-    Extent3d, ImageUsages, InvalidResource as Ir, Result, SurfaceCreateInfo, SurfaceFrame,
-    SurfaceStatus, Swapchain, SwapchainDesc, TextureFormat,
+    ColorSpace, Extent3d, ImageUsages, InvalidResourceKind as Ir, Result, SurfaceCreateInfo,
+    SurfaceFormat, SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc, TextureFormat,
 };
 use metal::foreign_types::ForeignType;
 use metal::{MTLPixelFormat, MetalDrawable, MetalLayer};
@@ -21,6 +24,7 @@ use crate::{
 struct SurfaceInner {
     context: Arc<Context>,
     layer: MetalLayer,
+    _target: Arc<dyn dirk_rhi::SurfaceTarget>,
 }
 
 /// Metal presentation surface backed by a `CAMetalLayer`.
@@ -28,8 +32,11 @@ struct SurfaceInner {
 pub struct MetalSurface(Arc<SurfaceInner>);
 
 impl MetalSurface {
-    pub(crate) fn create(context: &Arc<Context>, info: SurfaceCreateInfo) -> Result<Self> {
-        let raw_layer = match info.window.as_raw() {
+    pub(crate) fn create(context: &Arc<Context>, info: &SurfaceCreateInfo) -> Result<Self> {
+        let window = info.window_handle().map_err(|error| {
+            dirk_rhi::Error::Backend(anyhow::anyhow!("window handle is unavailable: {error:?}"))
+        })?;
+        let raw_layer = match window.as_raw() {
             RawWindowHandle::AppKit(handle) => {
                 // SAFETY: `SurfaceCreateInfo` carries a borrowed native window
                 // handle supplied by the platform window implementation.
@@ -55,6 +62,7 @@ impl MetalSurface {
         Ok(Self(Arc::new(SurfaceInner {
             context: context.clone(),
             layer,
+            _target: info.target().clone(),
         })))
     }
 }
@@ -63,8 +71,9 @@ impl MetalSurface {
 pub struct MetalSwapchain {
     pub(crate) context: Arc<Context>,
     surface: MetalSurface,
-    format: TextureFormat,
+    format: SurfaceFormat,
     extent: Extent3d,
+    image_count: NonZeroU32,
 }
 
 impl MetalSwapchain {
@@ -73,36 +82,50 @@ impl MetalSwapchain {
         desc: &SwapchainDesc<'_, MetalBackend>,
     ) -> Result<Self> {
         require_context(context, &desc.surface.0.context)?;
-        validate_extent(desc.width, desc.height)?;
-        let supported = [TextureFormat::Bgra8Srgb, TextureFormat::Bgra8Unorm];
+        let supported = [
+            SurfaceFormat {
+                texture: TextureFormat::Bgra8Srgb,
+                color_space: ColorSpace::Srgb,
+            },
+            SurfaceFormat {
+                texture: TextureFormat::Bgra8Unorm,
+                color_space: ColorSpace::Srgb,
+            },
+        ];
         let format = desc
             .preferred_formats
             .iter()
             .find(|preferred| supported.contains(preferred))
             .copied()
-            .unwrap_or(TextureFormat::Bgra8Srgb);
+            .unwrap_or(supported[0]);
         desc.surface
             .0
             .layer
-            .set_pixel_format(crate::convert::format(format));
+            .set_pixel_format(crate::convert::format(format.texture));
         desc.surface.0.layer.set_framebuffer_only(
             !desc.usage.contains(ImageUsages::COPY_SRC)
                 && !desc.usage.contains(ImageUsages::COPY_DST)
                 && !desc.usage.contains(ImageUsages::SAMPLED)
                 && !desc.usage.contains(ImageUsages::STORAGE),
         );
-        set_extent(&desc.surface.0.layer, desc.width, desc.height);
+        set_extent(&desc.surface.0.layer, desc.width.get(), desc.height.get());
+        let image_count = desc.desired_image_count.unwrap_or(NonZeroU32::MIN);
+        desc.surface
+            .0
+            .layer
+            .set_maximum_drawable_count(u64::from(image_count.get()));
         Ok(Self {
             context: context.clone(),
             surface: desc.surface.clone(),
             format,
-            extent: Extent3d::new_2d(desc.width, desc.height),
+            extent: Extent3d::new_2d(desc.width.get(), desc.height.get()),
+            image_count,
         })
     }
 }
 
 impl Swapchain<MetalBackend> for MetalSwapchain {
-    fn format(&self) -> TextureFormat {
+    fn format(&self) -> SurfaceFormat {
         self.format
     }
 
@@ -110,16 +133,23 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         self.extent
     }
 
-    fn acquire(&mut self) -> Result<MetalSurfaceFrame> {
+    fn image_count(&self) -> NonZeroU32 {
+        self.image_count
+    }
+
+    fn acquire(&mut self, timeout_ns: u64) -> Result<MetalSurfaceFrame> {
+        if timeout_ns == 0 {
+            return Err(dirk_rhi::Error::Timeout);
+        }
         let drawable = self
             .surface
             .0
             .layer
             .next_drawable()
-            .ok_or(dirk_rhi::Error::SurfaceOutOfDate)?
+            .ok_or(dirk_rhi::Error::SwapchainOutOfDate)?
             .to_owned();
         let texture = drawable.texture().to_owned();
-        let image = MetalImage::surface(&self.context, texture.clone(), self.format);
+        let image = MetalImage::surface(&self.context, texture.clone(), self.format.texture);
         let view = MetalImageView::surface(&self.context, texture);
         Ok(MetalSurfaceFrame {
             context: self.context.clone(),
@@ -132,10 +162,17 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         })
     }
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        validate_extent(width, height)?;
-        set_extent(&self.surface.0.layer, width, height);
-        self.extent = Extent3d::new_2d(width, height);
+    fn discard(&mut self, frame: MetalSurfaceFrame) -> Result<()> {
+        require_context(&self.context, &frame.context)?;
+        if frame.was_submitted() {
+            return Err(Ir::BadState.into());
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
+        set_extent(&self.surface.0.layer, width.get(), height.get());
+        self.extent = Extent3d::new_2d(width.get(), height.get());
         Ok(())
     }
 
@@ -157,14 +194,17 @@ pub struct MetalSurfaceFrame {
     pub(crate) drawable: MetalDrawable,
     image: MetalImage,
     view: MetalImageView,
-    format: TextureFormat,
+    format: SurfaceFormat,
     extent: Extent3d,
     submitted: AtomicBool,
 }
 
 impl MetalSurfaceFrame {
-    pub(crate) fn mark_submitted(&self) {
-        self.submitted.store(true, Ordering::Release);
+    pub(crate) fn mark_submitted(&self) -> Result<()> {
+        self.submitted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| Ir::BadState.into())
     }
 
     pub(crate) fn was_submitted(&self) -> bool {
@@ -181,7 +221,7 @@ impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
         &self.view
     }
 
-    fn format(&self) -> TextureFormat {
+    fn format(&self) -> SurfaceFormat {
         self.format
     }
 
@@ -191,14 +231,6 @@ impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
 
     fn status(&self) -> SurfaceStatus {
         SurfaceStatus::Optimal
-    }
-}
-
-fn validate_extent(width: u32, height: u32) -> Result<()> {
-    if width == 0 || height == 0 {
-        Err(dirk_rhi::Error::InvalidResource(Ir::Empty))
-    } else {
-        Ok(())
     }
 }
 

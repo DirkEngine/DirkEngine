@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dirk_rhi::{
     BufferCopy, BufferImageCopy, Color, CommandBuffer as RhiCommandBuffer, DependencyInfo,
-    FilterMode, ImageBlit, ImageCopy, IndexFormat, InvalidResource as Ir, Origin3d, QueueType,
+    FilterMode, ImageBlit, ImageCopy, IndexFormat, InvalidResourceKind as Ir, Origin3d, QueueType,
     Rect, RenderingInfo, Result, ShaderStages, Viewport,
 };
 use metal::foreign_types::ForeignType;
@@ -75,23 +75,27 @@ impl MetalCommandBuffer {
         state
             .command
             .clone()
-            .ok_or(dirk_rhi::Error::InvalidResource(Ir::BadState))
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))
     }
 
-    fn with_blit(&mut self, encode: impl FnOnce(&metal::BlitCommandEncoderRef)) {
+    fn with_blit(&mut self, encode: impl FnOnce(&metal::BlitCommandEncoderRef)) -> Result<()> {
         let state = self.state.get_mut();
         if state.render.is_some() {
-            return;
+            return Err(Ir::BadState.into());
         }
-        if let Some(command) = &state.command {
-            let encoder = command.new_blit_command_encoder();
-            encode(encoder);
-            encoder.end_encoding();
-        }
+        let command = state.command.as_ref().ok_or(Ir::BadState)?;
+        let encoder = command.new_blit_command_encoder();
+        encode(encoder);
+        encoder.end_encoding();
+        Ok(())
     }
 }
 
 impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
+    fn queue_type(&self) -> QueueType {
+        self.queue
+    }
+
     fn begin(&mut self, label: &str, _one_time_submit: bool) -> Result<()> {
         let state = self.state.get_mut();
         if state.command.is_some() && !state.submitted {
@@ -117,7 +121,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
     fn end(&mut self) -> Result<()> {
         let state = self.state.get_mut();
         if state.render.is_some() {
-            return Err(dirk_rhi::Error::InvalidResource(Ir::BadState));
+            return Err(dirk_rhi::Error::from(Ir::BadState));
         }
         if state.command.is_none() || state.ended {
             return Err(Ir::BadState.into());
@@ -134,14 +138,14 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         let command = state
             .command
             .as_ref()
-            .ok_or(dirk_rhi::Error::InvalidResource(Ir::BadState))?;
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
         let descriptor = RenderPassDescriptor::new();
         for (index, attachment) in info.color_attachments.iter().enumerate() {
             require_context(&self.context, &attachment.view.context)?;
             let metal_attachment = descriptor
                 .color_attachments()
                 .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
-                .ok_or(dirk_rhi::Error::InvalidResource(Ir::OutOfRange))?;
+                .ok_or_else(|| dirk_rhi::Error::from(Ir::OutOfRange))?;
             metal_attachment.set_texture(Some(&attachment.view.raw));
             metal_attachment.set_load_action(convert::load(&attachment.load));
             if let dirk_rhi::LoadOp::Clear(color) = attachment.load {
@@ -170,7 +174,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             {
                 let depth = descriptor
                     .depth_attachment()
-                    .ok_or(dirk_rhi::Error::InvalidResource(Ir::BadState))?;
+                    .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
                 depth.set_texture(Some(&attachment.view.raw));
                 depth.set_load_action(convert::load(&attachment.depth_load));
                 depth.set_store_action(convert::store(attachment.depth_store, false));
@@ -185,7 +189,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             {
                 let stencil = descriptor
                     .stencil_attachment()
-                    .ok_or(dirk_rhi::Error::InvalidResource(Ir::BadState))?;
+                    .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
                 stencil.set_texture(Some(&attachment.view.raw));
                 stencil.set_load_action(convert::load(&attachment.stencil_load));
                 stencil.set_store_action(convert::store(attachment.stencil_store, false));
@@ -206,45 +210,45 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             .get_mut()
             .render
             .take()
-            .ok_or(dirk_rhi::Error::InvalidResource(Ir::BadState))?;
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
         encoder.end_encoding();
         Ok(())
     }
 
-    fn set_viewport(&mut self, viewport: Viewport) {
-        if let Some(encoder) = &self.state.get_mut().render {
-            encoder.set_viewport(MTLViewport {
-                originX: f64::from(viewport.x),
-                originY: f64::from(viewport.y),
-                width: f64::from(viewport.width),
-                height: f64::from(viewport.height),
-                znear: f64::from(viewport.min_depth),
-                zfar: f64::from(viewport.max_depth),
-            });
-        }
+    fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_viewport(MTLViewport {
+            originX: f64::from(viewport.x),
+            originY: f64::from(viewport.y),
+            width: f64::from(viewport.width),
+            height: f64::from(viewport.height),
+            znear: f64::from(viewport.min_depth),
+            zfar: f64::from(viewport.max_depth),
+        });
+        Ok(())
     }
 
-    fn set_scissor(&mut self, scissor: Rect) {
-        if let Some(encoder) = &self.state.get_mut().render {
-            encoder.set_scissor_rect(MTLScissorRect {
-                x: u64::try_from(scissor.x.max(0)).unwrap_or(0),
-                y: u64::try_from(scissor.y.max(0)).unwrap_or(0),
-                width: u64::from(scissor.width),
-                height: u64::from(scissor.height),
-            });
-        }
+    fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_scissor_rect(MTLScissorRect {
+            x: u64::try_from(scissor.x.max(0)).unwrap_or(0),
+            y: u64::try_from(scissor.y.max(0)).unwrap_or(0),
+            width: u64::from(scissor.width),
+            height: u64::from(scissor.height),
+        });
+        Ok(())
     }
 
-    fn set_blend_constants(&mut self, color: Color) {
-        if let Some(encoder) = &self.state.get_mut().render {
-            encoder.set_blend_color(color.r, color.g, color.b, color.a);
-        }
+    fn set_blend_constants(&mut self, color: Color) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_blend_color(color.r, color.g, color.b, color.a);
+        Ok(())
     }
 
-    fn set_stencil_reference(&mut self, front: u32, back: u32) {
-        if let Some(encoder) = &self.state.get_mut().render {
-            encoder.set_stencil_front_back_reference_value(front, back);
-        }
+    fn set_stencil_reference(&mut self, front: u32, back: u32) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_stencil_front_back_reference_value(front, back);
+        Ok(())
     }
 
     fn draw(
@@ -253,10 +257,10 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
-    ) {
+    ) -> Result<()> {
         let state = self.state.get_mut();
         let (Some(encoder), Some(pipeline)) = (&state.render, &state.pipeline) else {
-            return;
+            return Err(Ir::BadState.into());
         };
         encoder.draw_primitives_instanced_base_instance(
             pipeline.topology,
@@ -265,27 +269,26 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             u64::from(instance_count),
             u64::from(first_instance),
         );
+        Ok(())
     }
 
-    fn bind_graphics_pipeline(&mut self, pipeline: &MetalGraphicsPipeline) {
-        if require_context(&self.context, &pipeline.context).is_err() {
-            return;
-        }
+    fn bind_graphics_pipeline(&mut self, pipeline: &MetalGraphicsPipeline) -> Result<()> {
+        require_context(&self.context, &pipeline.context)?;
         let state = self.state.get_mut();
-        if let Some(encoder) = &state.render {
-            encoder.set_render_pipeline_state(&pipeline.raw);
-            encoder.set_front_facing_winding(pipeline.winding);
-            encoder.set_cull_mode(pipeline.cull);
-            if let Some(depth) = &pipeline.depth {
-                encoder.set_depth_stencil_state(depth);
-            }
-            encoder.set_depth_bias(
-                pipeline.depth_bias.constant_factor,
-                pipeline.depth_bias.slope_factor,
-                pipeline.depth_bias.clamp,
-            );
-            state.pipeline = Some(pipeline.clone());
+        let encoder = state.render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_render_pipeline_state(&pipeline.raw);
+        encoder.set_front_facing_winding(pipeline.winding);
+        encoder.set_cull_mode(pipeline.cull);
+        if let Some(depth) = &pipeline.depth {
+            encoder.set_depth_stencil_state(depth);
         }
+        encoder.set_depth_bias(
+            pipeline.depth_bias.constant_factor,
+            pipeline.depth_bias.slope_factor,
+            pipeline.depth_bias.clamp,
+        );
+        state.pipeline = Some(pipeline.clone());
+        Ok(())
     }
 
     fn bind_groups(
@@ -293,30 +296,26 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         layout: &MetalPipelineLayout,
         first_group: u32,
         groups: &[&MetalBindGroup],
-    ) {
-        if require_context(&self.context, &layout.context).is_err() {
-            return;
-        }
-        let Some(encoder) = &self.state.get_mut().render else {
-            return;
-        };
+        dynamic_offsets: &[u64],
+    ) -> Result<()> {
+        require_context(&self.context, &layout.context)?;
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        let mut dynamic_offsets = dynamic_offsets.iter();
         for (relative, group) in groups.iter().enumerate() {
-            let Ok(relative) = u32::try_from(relative) else {
-                return;
-            };
-            let Some(group_index) = first_group.checked_add(relative) else {
-                return;
-            };
-            let Some(offsets) = layout.offsets.get(group_index as usize) else {
-                return;
-            };
-            let Some(expected_layout) = layout.layouts.get(group_index as usize) else {
-                return;
-            };
+            let relative = u32::try_from(relative).map_err(|_| Ir::OutOfRange)?;
+            let group_index = first_group.checked_add(relative).ok_or(Ir::OutOfRange)?;
+            let offsets = layout
+                .offsets
+                .get(group_index as usize)
+                .ok_or(Ir::Mismatch)?;
+            let expected_layout = layout
+                .layouts
+                .get(group_index as usize)
+                .ok_or(Ir::Mismatch)?;
             if !Arc::ptr_eq(&group.layout.context, &expected_layout.context)
                 || group.layout.entries.as_ref() != expected_layout.entries.as_ref()
             {
-                return;
+                return Err(Ir::Mismatch.into());
             }
             for (binding, resource) in group.entries.iter() {
                 let visibility = binding_visibility(&group.layout, *binding);
@@ -325,11 +324,29 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                 let sampler_index = offsets.samplers + u64::from(*binding);
                 match resource {
                     OwnedBinding::Buffer { buffer, offset } => {
+                        let dynamic = expected_layout
+                            .entries
+                            .iter()
+                            .find(|entry| entry.binding == *binding)
+                            .is_some_and(|entry| match entry.ty {
+                                dirk_rhi::BindingType::UniformBuffer { dynamic_offset }
+                                | dirk_rhi::BindingType::StorageBuffer { dynamic_offset, .. } => {
+                                    dynamic_offset
+                                }
+                                _ => false,
+                            });
+                        let offset = if dynamic {
+                            offset
+                                .checked_add(*dynamic_offsets.next().ok_or(Ir::Mismatch)?)
+                                .ok_or(Ir::OutOfRange)?
+                        } else {
+                            *offset
+                        };
                         if visibility.contains(ShaderStages::VERTEX) {
-                            encoder.set_vertex_buffer(buffer_index, Some(&buffer.raw), *offset);
+                            encoder.set_vertex_buffer(buffer_index, Some(&buffer.raw), offset);
                         }
                         if visibility.contains(ShaderStages::FRAGMENT) {
-                            encoder.set_fragment_buffer(buffer_index, Some(&buffer.raw), *offset);
+                            encoder.set_fragment_buffer(buffer_index, Some(&buffer.raw), offset);
                         }
                     }
                     OwnedBinding::SampledImage { view, sampler } => {
@@ -347,24 +364,36 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                 }
             }
         }
-    }
-
-    fn bind_vertex_buffer(&mut self, slot: u32, buffer: &MetalBuffer, offset: u64) {
-        if let Some(encoder) = &self.state.get_mut().render {
-            encoder.set_vertex_buffer(
-                VERTEX_BUFFER_BASE + u64::from(slot),
-                Some(&buffer.raw),
-                offset,
-            );
+        if dynamic_offsets.next().is_some() {
+            return Err(Ir::Mismatch.into());
         }
+        Ok(())
     }
 
-    fn bind_index_buffer(&mut self, buffer: &MetalBuffer, offset: u64, format: IndexFormat) {
+    fn bind_vertex_buffer(&mut self, slot: u32, buffer: &MetalBuffer, offset: u64) -> Result<()> {
+        require_context(&self.context, &buffer.context)?;
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_vertex_buffer(
+            VERTEX_BUFFER_BASE + u64::from(slot),
+            Some(&buffer.raw),
+            offset,
+        );
+        Ok(())
+    }
+
+    fn bind_index_buffer(
+        &mut self,
+        buffer: &MetalBuffer,
+        offset: u64,
+        format: IndexFormat,
+    ) -> Result<()> {
+        require_context(&self.context, &buffer.context)?;
         self.state.get_mut().index = Some(IndexBinding {
             buffer: buffer.clone(),
             offset,
             format,
         });
+        Ok(())
     }
 
     fn draw_indexed(
@@ -374,12 +403,12 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         first_index: u32,
         vertex_offset: i32,
         first_instance: u32,
-    ) {
+    ) -> Result<()> {
         let state = self.state.get_mut();
         let (Some(encoder), Some(pipeline), Some(index)) =
             (&state.render, &state.pipeline, &state.index)
         else {
-            return;
+            return Err(Ir::BadState.into());
         };
         let index_size = match index.format {
             IndexFormat::Uint16 => 2,
@@ -395,9 +424,17 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             i64::from(vertex_offset),
             u64::from(first_instance),
         );
+        Ok(())
     }
 
-    fn copy_buffer(&mut self, src: &MetalBuffer, dst: &MetalBuffer, regions: &[BufferCopy]) {
+    fn copy_buffer(
+        &mut self,
+        src: &MetalBuffer,
+        dst: &MetalBuffer,
+        regions: &[BufferCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
         self.with_blit(|encoder| {
             for region in regions {
                 encoder.copy_from_buffer(
@@ -408,7 +445,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                     region.size,
                 );
             }
-        });
+        })
     }
 
     fn copy_buffer_to_image(
@@ -416,12 +453,13 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         src: &MetalBuffer,
         dst: &MetalImage,
         regions: &[BufferImageCopy],
-    ) {
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
         self.with_blit(|encoder| {
             for region in regions {
-                let bytes_per_row =
-                    u64::from(region.extent.width) * convert::bytes_per_pixel(dst.format);
-                let bytes_per_image = bytes_per_row * u64::from(region.extent.height);
+                let bytes_per_row = u64::from(region.buffer_bytes_per_row.get());
+                let bytes_per_image = bytes_per_row * u64::from(region.buffer_rows_per_image.get());
                 for layer in 0..region.array_layer_count {
                     encoder.copy_from_buffer_to_texture(
                         &src.raw,
@@ -432,15 +470,52 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                         &dst.raw,
                         u64::from(region.base_array_layer + layer),
                         u64::from(region.mip_level),
-                        MTLOrigin::default(),
+                        origin(region.image_origin),
                         MTLBlitOption::empty(),
                     );
                 }
             }
-        });
+        })
     }
 
-    fn copy_image(&mut self, src: &MetalImage, dst: &MetalImage, regions: &[ImageCopy]) {
+    fn copy_image_to_buffer(
+        &mut self,
+        src: &MetalImage,
+        dst: &MetalBuffer,
+        regions: &[BufferImageCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
+        self.with_blit(|encoder| {
+            for region in regions {
+                let bytes_per_row = u64::from(region.buffer_bytes_per_row.get());
+                let bytes_per_image = bytes_per_row * u64::from(region.buffer_rows_per_image.get());
+                for layer in 0..region.array_layer_count {
+                    encoder.copy_from_texture_to_buffer(
+                        &src.raw,
+                        u64::from(region.base_array_layer + layer),
+                        u64::from(region.mip_level),
+                        origin(region.image_origin),
+                        size(region.extent),
+                        &dst.raw,
+                        region.buffer_offset + bytes_per_image * u64::from(layer),
+                        bytes_per_row,
+                        bytes_per_image,
+                        MTLBlitOption::empty(),
+                    );
+                }
+            }
+        })
+    }
+
+    fn copy_image(
+        &mut self,
+        src: &MetalImage,
+        dst: &MetalImage,
+        regions: &[ImageCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
         self.with_blit(|encoder| {
             for region in regions {
                 for layer in 0..region.array_layer_count {
@@ -457,7 +532,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                     );
                 }
             }
-        });
+        })
     }
 
     fn blit_image(
@@ -481,7 +556,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
             }
             self.with_blit(|encoder| {
                 encoder.generate_mipmaps(&src.raw);
-            });
+            })?;
             return Ok(());
         }
         if regions
@@ -512,13 +587,14 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                     },
                 );
             }
-        });
+        })?;
         Ok(())
     }
 
-    fn barrier(&mut self, _dependency: &DependencyInfo<'_, MetalBackend>) {
+    fn barrier(&mut self, _dependency: &DependencyInfo<'_, MetalBackend>) -> Result<()> {
         // Resources use Metal's tracked hazard mode, so encoder boundaries are
         // sufficient for render-graph transitions and visibility.
+        Ok(())
     }
 }
 
