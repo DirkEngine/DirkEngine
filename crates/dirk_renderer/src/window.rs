@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use dirk_platform::WindowId;
 use dirk_rhi::{Backend as _, Extent3d, TextureFormat};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
     Result,
@@ -25,19 +24,9 @@ pub struct Window {
 
 impl Window {
     pub fn build(rhi: &Arc<ActiveRhi>, plat_window: &dirk_platform::Window) -> Result<Self> {
-        // The platform window outlives the surface created from these handles.
-        let (display, handle) = unsafe {
-            (
-                raw_window_handle::DisplayHandle::borrow_raw(
-                    plat_window.display_handle()?.as_raw(),
-                ),
-                raw_window_handle::WindowHandle::borrow_raw(plat_window.window_handle()?.as_raw()),
-            )
-        };
-        let surface = rhi.create_surface(dirk_rhi::SurfaceCreateInfo {
-            display,
-            window: handle,
-        })?;
+        let surface = rhi.create_surface(dirk_rhi::SurfaceCreateInfo::new(
+            plat_window.surface_target(),
+        ))?;
 
         let window_size = plat_window.size();
         let size = Extent3d::new_2d(window_size.width, window_size.height);

@@ -735,13 +735,11 @@ impl PassContext<'_> {
     #[cfg_attr(feature = "editor", allow(unused))]
     pub fn resolve(&self, handle: TextureHandle) -> Result<&ResolvedImage> {
         if !self.declared.iter().any(|(index, _)| *index == handle.0) {
-            return Err(
-                dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Undeclared).into(),
-            );
+            return Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Undeclared).into());
         }
-        self.images.get(handle.index()).ok_or_else(|| {
-            dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::OutOfRange).into()
-        })
+        self.images
+            .get(handle.index())
+            .ok_or_else(|| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange).into())
     }
 }
 
@@ -784,6 +782,7 @@ impl<'a> GraphExecutor<'a> {
                 let aspects = format_aspects(desc.format);
                 let image = device.rhi.create_image(&ImageDesc {
                     label: "render graph texture",
+                    dimension: dirk_rhi::ImageDimension::TwoD,
                     extent: Extent3d::new_2d(desc.width, desc.height),
                     format: desc.format,
                     usage,
@@ -824,7 +823,7 @@ impl<'a> GraphExecutor<'a> {
 
     fn execute(mut self, cmd: &mut CommandBuffer) -> Result<()> {
         for pass in &mut self.passes {
-            record_barriers(cmd, &self.images, &pass.barriers);
+            record_barriers(cmd, &self.images, &pass.barriers)?;
             let has_rendering = !pass.colors.is_empty() || pass.depth.is_some();
 
             if has_rendering {
@@ -870,7 +869,7 @@ impl<'a> GraphExecutor<'a> {
                 cmd.rhi_mut().end_rendering()?;
             }
         }
-        record_barriers(cmd, &self.images, &self.final_barriers);
+        record_barriers(cmd, &self.images, &self.final_barriers)?;
         Ok(())
     }
 }
@@ -879,9 +878,9 @@ fn record_barriers(
     cmd: &mut CommandBuffer,
     images: &[ResolvedImage],
     barriers: &[CompiledBarrier],
-) {
+) -> Result<()> {
     if barriers.is_empty() {
-        return;
+        return Ok(());
     }
     let barriers = barriers
         .iter()
@@ -896,6 +895,7 @@ fn record_barriers(
                 mip_level_count: barrier.range.mip_level_count,
                 base_array_layer: barrier.range.base_array_layer,
                 array_layer_count: barrier.range.array_layer_count,
+                queue_transfer: None,
             }
         })
         .collect::<Vec<_>>();
@@ -903,7 +903,8 @@ fn record_barriers(
         memory_barriers: &[],
         buffer_barriers: &[],
         image_barriers: &barriers,
-    });
+    })?;
+    Ok(())
 }
 
 fn format_aspects(format: TextureFormat) -> ImageAspects {

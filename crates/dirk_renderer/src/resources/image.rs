@@ -1,9 +1,12 @@
 //! Renderer images and texture uploads backed by the RHI.
 
+use std::num::NonZeroU32;
+
 use dirk_rhi::{
     Backend as _, Buffer as _, BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d,
-    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageState, ImageUsages,
-    ImageViewDesc, ImageViewType, MemoryDomain, SampleCount, SamplerDesc, TextureFormat,
+    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageDimension, ImageState,
+    ImageUsages, ImageViewDesc, ImageViewType, MemoryDomain, Origin3d, SampleCount, SamplerDesc,
+    TextureFormat,
 };
 
 use crate::{
@@ -34,10 +37,11 @@ pub struct ImageCreateInfo {
 impl Image {
     pub fn create_image(device: &RenderDevice, info: &ImageCreateInfo) -> Result<Self> {
         if info.mip_levels == 0 {
-            return Err(dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Empty).into());
+            return Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty).into());
         }
         let inner = device.rhi.create_image(&ImageDesc {
             label: "renderer image",
+            dimension: ImageDimension::TwoD,
             extent: info.extent,
             format: info.format,
             usage: info.usage,
@@ -86,17 +90,14 @@ impl Image {
                 .collect(),
             gltf::image::Format::R8G8B8A8 => texture.pixels.clone(),
             _ => {
-                return Err(
-                    dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Mismatch).into(),
-                );
+                return Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Mismatch).into());
             }
         };
         let mip_levels = Self::mip_levels(texture.width, texture.height);
         let staging = CustomBuffer::create_custom(
             device,
-            u64::try_from(pixels.len()).map_err(|_| {
-                dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::OutOfRange)
-            })?,
+            u64::try_from(pixels.len())
+                .map_err(|_| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange))?,
             dirk_rhi::BufferUsages::COPY_SRC,
             MemoryDomain::Upload,
         )?;
@@ -126,20 +127,32 @@ impl Image {
                 mip_level_count: mip_levels,
                 base_array_layer: 0,
                 array_layer_count: 1,
+                queue_transfer: None,
             }],
-        });
+        })?;
+        let bytes_per_row = texture
+            .width
+            .checked_mul(4)
+            .and_then(NonZeroU32::new)
+            .ok_or(dirk_rhi::Error::from(
+                dirk_rhi::InvalidResourceKind::OutOfRange,
+            ))?;
         command.rhi_mut().copy_buffer_to_image(
             staging.rhi(),
             image.rhi_image(),
             &[BufferImageCopy {
                 buffer_offset: 0,
+                buffer_bytes_per_row: bytes_per_row,
+                buffer_rows_per_image: NonZeroU32::new(texture.height)
+                    .expect("glTF textures have non-zero height"),
                 mip_level: 0,
                 base_array_layer: 0,
                 array_layer_count: 1,
+                image_origin: Origin3d::default(),
                 extent: Extent3d::new_2d(texture.width, texture.height),
                 aspects: ImageAspects::COLOR,
             }],
-        );
+        )?;
         image.record_mips(command.rhi_mut(), texture.width, texture.height)?;
         command.end_and_submit()?;
 
@@ -179,8 +192,9 @@ impl Image {
                     mip_level_count: 1,
                     base_array_layer: 0,
                     array_layer_count: 1,
+                    queue_transfer: None,
                 }],
-            });
+            })?;
             command.blit_image(
                 &self.inner,
                 &self.inner,
@@ -213,8 +227,9 @@ impl Image {
                     mip_level_count: 1,
                     base_array_layer: 0,
                     array_layer_count: 1,
+                    queue_transfer: None,
                 }],
-            });
+            })?;
         }
         command.barrier(&DependencyInfo {
             memory_barriers: &[],
@@ -228,8 +243,9 @@ impl Image {
                 mip_level_count: 1,
                 base_array_layer: 0,
                 array_layer_count: 1,
+                queue_transfer: None,
             }],
-        });
+        })?;
         Ok(())
     }
 

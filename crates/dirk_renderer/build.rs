@@ -878,7 +878,7 @@ fn generate_descriptor_binding(binding: &DescriptorBinding) -> TokenStream {
     quote! {
         BindGroupLayoutEntry {
             binding: #binding_index,
-            ty: BindingType::#descriptor_type,
+            ty: #descriptor_type,
             visibility: ShaderStages::#stage_flags,
         }
     }
@@ -911,15 +911,21 @@ fn shader_const_prefix(entrypoint: &str) -> String {
         .collect()
 }
 
-fn rhi_binding_type(name: &str) -> Ident {
-    let name = match name {
-        "UNIFORM_BUFFER" => "UniformBuffer",
-        "STORAGE_BUFFER" => "StorageBuffer",
-        "COMBINED_IMAGE_SAMPLER" | "SAMPLED_IMAGE" | "SAMPLER" => "SampledImage",
-        "STORAGE_IMAGE" => "StorageImage",
+fn rhi_binding_type(name: &str) -> TokenStream {
+    match name {
+        "UNIFORM_BUFFER" => quote!(BindingType::UniformBuffer {
+            dynamic_offset: false
+        }),
+        "STORAGE_BUFFER" => quote!(BindingType::StorageBuffer {
+            read_only: false,
+            dynamic_offset: false,
+        }),
+        "COMBINED_IMAGE_SAMPLER" | "SAMPLED_IMAGE" | "SAMPLER" => {
+            quote!(BindingType::SampledImage)
+        }
+        "STORAGE_IMAGE" => quote!(BindingType::StorageImage),
         _ => panic!("unsupported reflected descriptor type {name}"),
-    };
-    Ident::new(name, Span::call_site())
+    }
 }
 
 fn rhi_shader_stages(name: &str) -> Ident {

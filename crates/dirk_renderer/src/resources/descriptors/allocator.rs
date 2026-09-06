@@ -43,7 +43,12 @@ impl<L: SetLayout> DescriptorAllocator<L> {
         buffer: &ActiveBuffer,
         size: u64,
     ) -> Result<DescriptorSet<L>> {
-        Self::require_binding(binding, BindingType::UniformBuffer)?;
+        Self::require_binding(
+            binding,
+            BindingType::UniformBuffer {
+                dynamic_offset: false,
+            },
+        )?;
         self.create(&[BindGroupEntry {
             binding,
             resource: BindingResource::Buffer {
@@ -81,7 +86,7 @@ impl<L: SetLayout> DescriptorAllocator<L> {
     fn require_binding(binding: u32, ty: BindingType) -> Result<()> {
         match L::BINDINGS.iter().find(|entry| entry.binding == binding) {
             Some(entry) if entry.ty == ty => Ok(()),
-            _ => Err(dirk_rhi::Error::InvalidResource(dirk_rhi::InvalidResource::Mismatch).into()),
+            _ => Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Mismatch).into()),
         }
     }
 }

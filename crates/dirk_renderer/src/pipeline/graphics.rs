@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
 use dirk_rhi::{
-    Backend as _, BindGroupLayoutDesc, BindGroupLayoutEntry, CommandBuffer as _, CompareOp,
-    CullMode, DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, PipelineLayoutDesc,
-    PrimitiveTopology, RasterState,
+    Backend as _, BindGroupLayoutDesc, BindGroupLayoutEntry, ColorTargetState, ColorWrites,
+    CommandBuffer as _, CompareOp, CullMode, DepthBiasState, DepthState, FrontFace,
+    GraphicsPipelineDesc, PipelineLayoutDesc, PrimitiveTopology, RasterState,
 };
 use tracing::debug;
 
@@ -127,8 +127,14 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
                 front_face: FrontFace::CounterClockwise,
                 cull_mode: CullMode::Back,
             },
-            blend: None,
-            color_formats: &[device.properties.surface_format],
+            color_targets: &[ColorTargetState {
+                format: device.properties.surface_format,
+                blend: None,
+                write_mask: ColorWrites::RED
+                    | ColorWrites::GREEN
+                    | ColorWrites::BLUE
+                    | ColorWrites::ALPHA,
+            }],
             depth: Some(DepthState {
                 format: device.properties.depth_format,
                 write_enabled: true,
@@ -136,7 +142,7 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
                 stencil: None,
             }),
             depth_bias: DepthBiasState::default(),
-            primitive_restart: false,
+            primitive_restart: None,
             alpha_to_coverage: false,
             samples: device.properties.msaa_samples,
         })?;
@@ -151,13 +157,13 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
     pub fn bind<'cmd>(
         &'cmd self,
         command: &'cmd mut CommandBuffer,
-    ) -> GraphicsPipelineRenderingContext<'cmd, Spec> {
-        command.rhi_mut().bind_graphics_pipeline(&self.pipeline);
-        GraphicsPipelineRenderingContext {
+    ) -> Result<GraphicsPipelineRenderingContext<'cmd, Spec>> {
+        command.rhi_mut().bind_graphics_pipeline(&self.pipeline)?;
+        Ok(GraphicsPipelineRenderingContext {
             command,
             layout: &self.layout,
             _spec: PhantomData,
-        }
+        })
     }
 }
 
@@ -165,15 +171,19 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipelineRenderingContext<'_, Spec> {
     pub fn bind_descriptor_sets<'a>(
         &mut self,
         sets: &'a <Spec::DescriptorSets as DescriptorSetInput>::Refs<'a>,
-    ) {
+    ) -> Result<()> {
         let groups = Spec::DescriptorSets::groups(sets);
-        self.command.rhi_mut().bind_groups(self.layout, 0, &groups);
-    }
-
-    pub fn bind_vertex_buffer(&mut self, vertex_buffer: &VertexBuffer<Spec::Input>) {
         self.command
             .rhi_mut()
-            .bind_vertex_buffer(0, vertex_buffer.buffer(), 0);
+            .bind_groups(self.layout, 0, &groups, &[])
+            .map_err(Into::into)
+    }
+
+    pub fn bind_vertex_buffer(&mut self, vertex_buffer: &VertexBuffer<Spec::Input>) -> Result<()> {
+        self.command
+            .rhi_mut()
+            .bind_vertex_buffer(0, vertex_buffer.buffer(), 0)
+            .map_err(Into::into)
     }
 
     pub fn command(&mut self) -> &mut CommandBuffer {

@@ -1,9 +1,10 @@
 //! Renderer presentation wrappers backed by the active RHI.
 
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use dirk_rhi::{
-    Backend as _, Extent3d, SurfaceFrame as _, Swapchain as _, SwapchainDesc, TextureFormat,
+    Backend as _, ColorSpace, Extent3d, SurfaceFormat, SurfaceFrame as _, Swapchain as _,
+    SwapchainDesc, TextureFormat,
 };
 
 use crate::{
@@ -34,7 +35,7 @@ impl RenderImage {
     }
 
     pub fn format(&self) -> TextureFormat {
-        self.inner.format()
+        self.inner.format().texture
     }
 }
 
@@ -51,15 +52,30 @@ impl Swapchain {
         surface: &ActiveSurface,
         window_size: Extent3d,
     ) -> Result<Self> {
+        let width = NonZeroU32::new(window_size.width)
+            .ok_or(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty))?;
+        let height = NonZeroU32::new(window_size.height)
+            .ok_or(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty))?;
+        let preferred_formats = [
+            SurfaceFormat {
+                texture: TextureFormat::Bgra8Unorm,
+                color_space: ColorSpace::Srgb,
+            },
+            SurfaceFormat {
+                texture: TextureFormat::Rgba8Unorm,
+                color_space: ColorSpace::Srgb,
+            },
+        ];
         let inner = rhi.create_swapchain(&SwapchainDesc {
             label: "renderer window swapchain",
             surface,
-            width: window_size.width,
-            height: window_size.height,
+            width,
+            height,
             usage: dirk_rhi::ImageUsages::COLOR_ATTACHMENT
                 | dirk_rhi::ImageUsages::COPY_DST
                 | dirk_rhi::ImageUsages::PRESENT,
-            preferred_formats: &[TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm],
+            preferred_formats: &preferred_formats,
+            desired_image_count: NonZeroU32::new(3),
             present_mode: dirk_rhi::PresentMode::Mailbox,
         })?;
         Ok(Self {
@@ -73,18 +89,22 @@ impl Swapchain {
     }
 
     pub fn format(&self) -> TextureFormat {
-        self.inner.format()
+        self.inner.format().texture
     }
 
     pub fn acquire_next_image(&mut self) -> Result<RenderImage> {
         Ok(RenderImage {
-            inner: self.inner.acquire()?,
+            inner: self.inner.acquire(u64::MAX)?,
         })
     }
 
     pub fn recreate(&mut self, window_size: Extent3d) -> Result<()> {
         self.rhi.wait_idle()?;
-        self.inner.resize(window_size.width, window_size.height)?;
+        let width = NonZeroU32::new(window_size.width)
+            .ok_or(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty))?;
+        let height = NonZeroU32::new(window_size.height)
+            .ok_or(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty))?;
+        self.inner.resize(width, height)?;
         Ok(())
     }
 

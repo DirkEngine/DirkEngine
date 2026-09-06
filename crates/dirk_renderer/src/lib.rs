@@ -299,15 +299,33 @@ impl Renderer {
         let primary_window = Window::build(&rhi, window)?;
         let surface_format = primary_window.format();
         let capabilities = rhi.capabilities();
+        let depth_format =
+            rhi.supported_depth_formats()
+                .first()
+                .copied()
+                .ok_or(crate::errors::Error::Rhi(dirk_rhi::Error::from(
+                    dirk_rhi::InvalidResourceKind::Empty,
+                )))?;
+        let color_samples =
+            rhi.supported_sample_counts(surface_format, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
+        let depth_samples = rhi.supported_sample_counts(
+            depth_format,
+            dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT,
+        );
+        let msaa_samples = [
+            dirk_rhi::SampleCount::Eight,
+            dirk_rhi::SampleCount::Four,
+            dirk_rhi::SampleCount::Two,
+            dirk_rhi::SampleCount::One,
+        ]
+        .into_iter()
+        .find(|&count| color_samples.supports(count) && depth_samples.supports(count))
+        .unwrap_or(dirk_rhi::SampleCount::One);
         let properties = RendererProperties {
-            msaa_samples: capabilities.max_samples,
+            msaa_samples,
             anisotropy: capabilities.max_sampler_anisotropy > 1,
             surface_format,
-            depth_format: rhi.supported_depth_formats().first().copied().ok_or(
-                crate::errors::Error::Rhi(dirk_rhi::Error::InvalidResource(
-                    dirk_rhi::InvalidResource::Empty,
-                )),
-            )?,
+            depth_format,
         };
 
         let current_frame = Arc::new(AtomicUsize::new(0));

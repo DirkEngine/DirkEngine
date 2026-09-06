@@ -158,7 +158,7 @@ impl SceneManager {
             proxy.write_ubo(frame)?;
         }
 
-        let mut ctx = self.graphics_pipeline.bind(cmd);
+        let mut ctx = self.graphics_pipeline.bind(cmd)?;
 
         // the window size never gets anywhere near 2^23
         #[allow(clippy::cast_precision_loss)]
@@ -169,13 +169,13 @@ impl SceneManager {
             height: settings.extent.height as f32,
             min_depth: 0.0,
             max_depth: 1.0,
-        });
+        })?;
         ctx.command().rhi_mut().set_scissor(Rect {
             x: 0,
             y: 0,
             width: settings.extent.width,
             height: settings.extent.height,
-        });
+        })?;
 
         for proxy in &proxies {
             let Some(ref model) = proxy.model else {
@@ -183,8 +183,8 @@ impl SceneManager {
             };
 
             match models.render_model(model, &scene.sets[frame], &proxy.sets[frame], &mut ctx) {
-                Ok(()) | Err(dirk_assets::Error::NotFound(_)) => (),
-                Err(err) => return Err(err.into()),
+                Ok(()) | Err(crate::Error::AssetError(dirk_assets::Error::NotFound(_))) => (),
+                Err(err) => return Err(err),
             }
         }
 

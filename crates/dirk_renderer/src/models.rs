@@ -160,15 +160,15 @@ impl ModelRegistry {
         scene_set: &DescriptorSet<SceneSet>,
         proxy_set: &DescriptorSet<ObjectSet>,
         ctx: &mut GraphicsPipelineRenderingContext<'_, MainPipelineSpec>,
-    ) -> dirk_assets::Result<()> {
+    ) -> Result<()> {
         if handle.asset_type() != dirk_assets::AssetType::Model {
-            return Err(dirk_assets::Error::TypeMismatch(handle.to_string()));
+            return Err(dirk_assets::Error::TypeMismatch(handle.to_string()).into());
         }
 
         let model = self
             .models
             .get(handle)
-            .ok_or(dirk_assets::Error::NotFound(handle.to_string()))?;
+            .ok_or_else(|| dirk_assets::Error::NotFound(handle.to_string()))?;
 
         let primitives = model
             .meshes
@@ -180,16 +180,16 @@ impl ModelRegistry {
                 .material_handle
                 .map_or(&self.fallback_material.set, |mat| &self.materials[*mat].set);
 
-            ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set));
-            ctx.bind_vertex_buffer(&prim.vertex_buffer);
+            ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set))?;
+            ctx.bind_vertex_buffer(&prim.vertex_buffer)?;
             ctx.command().rhi_mut().bind_index_buffer(
                 prim.index_buffer.rhi(),
                 0,
                 IndexFormat::Uint32,
-            );
+            )?;
             ctx.command()
                 .rhi_mut()
-                .draw_indexed(prim.index_count, 1, 0, 0, 0);
+                .draw_indexed(prim.index_count, 1, 0, 0, 0)?;
         }
         Ok(())
     }
