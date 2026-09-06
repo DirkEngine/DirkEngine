@@ -24,7 +24,8 @@ use dirk_rhi::Error;
 fn vk_error(error: ash::vk::Result) -> Error {
     match error {
         ash::vk::Result::ERROR_DEVICE_LOST => Error::DeviceLost,
-        ash::vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
+        ash::vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SwapchainOutOfDate,
+        ash::vk::Result::ERROR_SURFACE_LOST_KHR => Error::SurfaceLost,
         error => Error::Backend(anyhow::anyhow!("Vulkan operation failed: {error:?}")),
     }
 }

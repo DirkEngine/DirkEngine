@@ -1,9 +1,10 @@
 use ash::vk;
 use dirk_rhi::{
-    AddressMode, BindingType, BlendFactor, BlendOp, BufferUsages, CompareOp, CullMode, FilterMode,
-    FrontFace, ImageAspects, ImageState, ImageUsages, ImageViewType, IndexFormat, MemoryDomain,
-    PipelineStages, PresentMode, PrimitiveTopology, QueueType, SampleCount, ShaderStages,
-    StencilOp, StoreOp, TextureFormat, VertexFormat, VertexStepMode,
+    AccessTypes, AddressMode, BindingType, BlendFactor, BlendOp, BufferUsages, ColorSpace,
+    ColorWrites, CompareOp, CullMode, FilterMode, FrontFace, ImageAspects, ImageState, ImageUsages,
+    ImageViewType, IndexFormat, MemoryDomain, PipelineStages, PresentMode, PrimitiveTopology,
+    QueueType, SampleCount, SampleCounts, ShaderStages, StencilOp, StoreOp, TextureFormat,
+    VertexFormat, VertexStepMode,
 };
 use gpu_allocator::MemoryLocation;
 
@@ -24,6 +25,7 @@ pub(crate) fn format(value: TextureFormat) -> vk::Format {
         TextureFormat::Depth24UnormStencil8 => vk::Format::D24_UNORM_S8_UINT,
         TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
         TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+        _ => vk::Format::UNDEFINED,
     }
 }
 
@@ -66,6 +68,21 @@ pub(crate) fn samples(value: SampleCount) -> vk::SampleCountFlags {
         SampleCount::Four => vk::SampleCountFlags::TYPE_4,
         SampleCount::Eight => vk::SampleCountFlags::TYPE_8,
     }
+}
+
+pub(crate) fn rhi_sample_counts(value: vk::SampleCountFlags) -> SampleCounts {
+    let mut counts = SampleCounts::default();
+    for (native, rhi) in [
+        (vk::SampleCountFlags::TYPE_1, SampleCounts::ONE),
+        (vk::SampleCountFlags::TYPE_2, SampleCounts::TWO),
+        (vk::SampleCountFlags::TYPE_4, SampleCounts::FOUR),
+        (vk::SampleCountFlags::TYPE_8, SampleCounts::EIGHT),
+    ] {
+        if value.contains(native) {
+            counts |= rhi;
+        }
+    }
+    counts
 }
 
 pub(crate) fn buffer_usage(value: BufferUsages) -> vk::BufferUsageFlags {
@@ -146,23 +163,40 @@ pub(crate) fn pipeline_stages(value: PipelineStages) -> vk::PipelineStageFlags2 
     }
     let mut flags = vk::PipelineStageFlags2::empty();
     for (rhi, vulkan) in [
+        (
+            PipelineStages::INDIRECT,
+            vk::PipelineStageFlags2::DRAW_INDIRECT,
+        ),
+        (
+            PipelineStages::VERTEX_INPUT,
+            vk::PipelineStageFlags2::VERTEX_INPUT,
+        ),
         (PipelineStages::COPY, vk::PipelineStageFlags2::COPY),
         (
-            PipelineStages::VERTEX,
+            PipelineStages::VERTEX_SHADER,
             vk::PipelineStageFlags2::VERTEX_SHADER,
         ),
         (
-            PipelineStages::FRAGMENT,
+            PipelineStages::EARLY_DEPTH_STENCIL,
+            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+        ),
+        (
+            PipelineStages::FRAGMENT_SHADER,
             vk::PipelineStageFlags2::FRAGMENT_SHADER,
+        ),
+        (
+            PipelineStages::LATE_DEPTH_STENCIL,
+            vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
         ),
         (
             PipelineStages::COLOR_OUTPUT,
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
         ),
         (
-            PipelineStages::COMPUTE,
+            PipelineStages::COMPUTE_SHADER,
             vk::PipelineStageFlags2::COMPUTE_SHADER,
         ),
+        (PipelineStages::HOST, vk::PipelineStageFlags2::HOST),
     ] {
         if value.contains(rhi) {
             flags |= vulkan;
@@ -236,8 +270,20 @@ pub(crate) fn memory(value: MemoryDomain) -> MemoryLocation {
 
 pub(crate) fn binding(value: BindingType) -> vk::DescriptorType {
     match value {
-        BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-        BindingType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+        BindingType::UniformBuffer { dynamic_offset } => {
+            if dynamic_offset {
+                vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+            } else {
+                vk::DescriptorType::UNIFORM_BUFFER
+            }
+        }
+        BindingType::StorageBuffer { dynamic_offset, .. } => {
+            if dynamic_offset {
+                vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+            } else {
+                vk::DescriptorType::STORAGE_BUFFER
+            }
+        }
         BindingType::SampledImage => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         BindingType::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
     }
@@ -248,6 +294,8 @@ pub(crate) fn view_type(value: ImageViewType) -> vk::ImageViewType {
         ImageViewType::TwoD => vk::ImageViewType::TYPE_2D,
         ImageViewType::TwoDArray => vk::ImageViewType::TYPE_2D_ARRAY,
         ImageViewType::Cube => vk::ImageViewType::CUBE,
+        ImageViewType::ThreeD => vk::ImageViewType::TYPE_3D,
+        ImageViewType::CubeArray => vk::ImageViewType::CUBE_ARRAY,
     }
 }
 
@@ -303,6 +351,8 @@ pub(crate) fn compare(value: CompareOp) -> vk::CompareOp {
         CompareOp::LessEqual => vk::CompareOp::LESS_OR_EQUAL,
         CompareOp::Equal => vk::CompareOp::EQUAL,
         CompareOp::Greater => vk::CompareOp::GREATER,
+        CompareOp::NotEqual => vk::CompareOp::NOT_EQUAL,
+        CompareOp::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
         CompareOp::Always => vk::CompareOp::ALWAYS,
     }
 }
@@ -315,6 +365,8 @@ pub(crate) fn stencil_op(value: StencilOp) -> vk::StencilOp {
         StencilOp::IncrementClamp => vk::StencilOp::INCREMENT_AND_CLAMP,
         StencilOp::DecrementClamp => vk::StencilOp::DECREMENT_AND_CLAMP,
         StencilOp::Invert => vk::StencilOp::INVERT,
+        StencilOp::IncrementWrap => vk::StencilOp::INCREMENT_AND_WRAP,
+        StencilOp::DecrementWrap => vk::StencilOp::DECREMENT_AND_WRAP,
     }
 }
 
@@ -322,11 +374,96 @@ pub(crate) fn blend_factor(value: BlendFactor) -> vk::BlendFactor {
     match value {
         BlendFactor::Zero => vk::BlendFactor::ZERO,
         BlendFactor::One => vk::BlendFactor::ONE,
+        BlendFactor::SourceColor => vk::BlendFactor::SRC_COLOR,
+        BlendFactor::OneMinusSourceColor => vk::BlendFactor::ONE_MINUS_SRC_COLOR,
         BlendFactor::SourceAlpha => vk::BlendFactor::SRC_ALPHA,
         BlendFactor::OneMinusSourceAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        BlendFactor::DestinationColor => vk::BlendFactor::DST_COLOR,
+        BlendFactor::OneMinusDestinationColor => vk::BlendFactor::ONE_MINUS_DST_COLOR,
         BlendFactor::DestinationAlpha => vk::BlendFactor::DST_ALPHA,
         BlendFactor::OneMinusDestinationAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+        BlendFactor::ConstantColor => vk::BlendFactor::CONSTANT_COLOR,
+        BlendFactor::OneMinusConstantColor => vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR,
+        BlendFactor::ConstantAlpha => vk::BlendFactor::CONSTANT_ALPHA,
+        BlendFactor::OneMinusConstantAlpha => vk::BlendFactor::ONE_MINUS_CONSTANT_ALPHA,
     }
+}
+
+pub(crate) fn color_write_mask(value: ColorWrites) -> vk::ColorComponentFlags {
+    let mut flags = vk::ColorComponentFlags::empty();
+    for (rhi, native) in [
+        (ColorWrites::RED, vk::ColorComponentFlags::R),
+        (ColorWrites::GREEN, vk::ColorComponentFlags::G),
+        (ColorWrites::BLUE, vk::ColorComponentFlags::B),
+        (ColorWrites::ALPHA, vk::ColorComponentFlags::A),
+    ] {
+        if value.contains(rhi) {
+            flags |= native;
+        }
+    }
+    flags
+}
+
+pub(crate) fn access(value: AccessTypes) -> vk::AccessFlags2 {
+    let mut flags = vk::AccessFlags2::empty();
+    for (rhi, native) in [
+        (
+            AccessTypes::INDIRECT_COMMAND_READ,
+            vk::AccessFlags2::INDIRECT_COMMAND_READ,
+        ),
+        (AccessTypes::INDEX_READ, vk::AccessFlags2::INDEX_READ),
+        (
+            AccessTypes::VERTEX_ATTRIBUTE_READ,
+            vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+        ),
+        (AccessTypes::UNIFORM_READ, vk::AccessFlags2::UNIFORM_READ),
+        (AccessTypes::SHADER_READ, vk::AccessFlags2::SHADER_READ),
+        (AccessTypes::SHADER_WRITE, vk::AccessFlags2::SHADER_WRITE),
+        (
+            AccessTypes::COLOR_ATTACHMENT_READ,
+            vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+        ),
+        (
+            AccessTypes::COLOR_ATTACHMENT_WRITE,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        ),
+        (
+            AccessTypes::DEPTH_STENCIL_READ,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+        ),
+        (
+            AccessTypes::DEPTH_STENCIL_WRITE,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        ),
+        (AccessTypes::COPY_READ, vk::AccessFlags2::TRANSFER_READ),
+        (AccessTypes::COPY_WRITE, vk::AccessFlags2::TRANSFER_WRITE),
+        (AccessTypes::HOST_READ, vk::AccessFlags2::HOST_READ),
+        (AccessTypes::HOST_WRITE, vk::AccessFlags2::HOST_WRITE),
+        (AccessTypes::MEMORY_READ, vk::AccessFlags2::MEMORY_READ),
+        (AccessTypes::MEMORY_WRITE, vk::AccessFlags2::MEMORY_WRITE),
+    ] {
+        if value.contains(rhi) {
+            flags |= native;
+        }
+    }
+    flags
+}
+
+pub(crate) fn color_space(value: ColorSpace) -> vk::ColorSpaceKHR {
+    match value {
+        ColorSpace::DisplayP3 => vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT,
+        ColorSpace::Hdr10 => vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+        _ => vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    }
+}
+
+pub(crate) fn rhi_color_space(value: vk::ColorSpaceKHR) -> Option<ColorSpace> {
+    Some(match value {
+        vk::ColorSpaceKHR::SRGB_NONLINEAR => ColorSpace::Srgb,
+        vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT => ColorSpace::DisplayP3,
+        vk::ColorSpaceKHR::HDR10_ST2084_EXT => ColorSpace::Hdr10,
+        _ => return None,
+    })
 }
 
 pub(crate) fn blend_op(value: BlendOp) -> vk::BlendOp {

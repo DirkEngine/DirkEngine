@@ -3,8 +3,8 @@ use std::{ffi::CString, fmt, sync::Arc};
 use ash::vk;
 use dirk_rhi::{
     BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Fence,
-    GraphicsPipelineDesc, ImageDesc, ImageViewDesc, InvalidResource as Ir, Result, SamplerDesc,
-    ShaderDesc, ShaderSource, ShaderStage, TimelineSemaphore,
+    GraphicsPipelineDesc, ImageDesc, ImageDimension, ImageViewDesc, InvalidResourceKind as Ir,
+    Result, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, TimelineSemaphore,
 };
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use parking_lot::Mutex;
@@ -144,6 +144,47 @@ impl Buffer for VulkanBuffer {
         }
         Ok(())
     }
+
+    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
+        let data_len = u64::try_from(data.len()).map_err(|_| Ir::OutOfRange)?;
+        if offset
+            .checked_add(data_len)
+            .is_none_or(|end| end > self.0.size)
+        {
+            return Err(Ir::OutOfRange.into());
+        }
+        let allocation = self.0.allocation.lock();
+        let allocation = allocation.as_ref().ok_or(Ir::BadState)?;
+        let mapped = allocation.mapped_ptr().ok_or(Ir::NotHostAccessible)?;
+        if !allocation
+            .memory_properties()
+            .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+        {
+            let atom_size = self.0.context.non_coherent_atom_size.max(1);
+            let absolute_offset = allocation.offset() + offset;
+            let invalidate_offset = absolute_offset / atom_size * atom_size;
+            let range = vk::MappedMemoryRange::default()
+                .memory(unsafe { allocation.memory() })
+                .offset(invalidate_offset)
+                .size(vk::WHOLE_SIZE);
+            unsafe {
+                self.0
+                    .context
+                    .device
+                    .invalidate_mapped_memory_ranges(std::slice::from_ref(&range))
+                    .map_err(vk_error)?;
+            }
+        }
+        let host_offset = usize::try_from(offset).map_err(|_| Ir::OutOfRange)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mapped.as_ptr().cast::<u8>().add(host_offset),
+                data.as_mut_ptr(),
+                data.len(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Drop for BufferInner {
@@ -189,15 +230,33 @@ struct ImageInner {
 
 impl VulkanImage {
     pub(crate) fn create(context: &Arc<Context>, desc: &ImageDesc<'_>) -> Result<Self> {
-        if desc.extent.width == 0 || desc.extent.height == 0 || desc.extent.depth == 0 {
+        if desc.extent.width == 0
+            || desc.extent.height == 0
+            || desc.extent.depth == 0
+            || desc.mip_levels == 0
+            || desc.array_layers == 0
+        {
             return Err(Ir::Empty.into());
         }
-        let image_type = if desc.extent.depth > 1 {
-            vk::ImageType::TYPE_3D
-        } else {
-            vk::ImageType::TYPE_2D
+        let (image_type, flags) = match desc.dimension {
+            ImageDimension::TwoD if desc.extent.depth == 1 => {
+                (vk::ImageType::TYPE_2D, vk::ImageCreateFlags::empty())
+            }
+            ImageDimension::ThreeD if desc.array_layers == 1 => {
+                (vk::ImageType::TYPE_3D, vk::ImageCreateFlags::empty())
+            }
+            ImageDimension::Cube
+                if desc.extent.depth == 1 && desc.array_layers.is_multiple_of(6) =>
+            {
+                (
+                    vk::ImageType::TYPE_2D,
+                    vk::ImageCreateFlags::CUBE_COMPATIBLE,
+                )
+            }
+            _ => return Err(Ir::Mismatch.into()),
         };
         let create_info = vk::ImageCreateInfo::default()
+            .flags(flags)
             .image_type(image_type)
             .format(convert::format(desc.format))
             .extent(vk::Extent3D {
@@ -705,7 +764,7 @@ impl VulkanBindGroup {
                         offset,
                         size,
                     },
-                    BindingType::UniformBuffer | BindingType::StorageBuffer,
+                    BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. },
                 ) if Arc::ptr_eq(context, buffer.context())
                     && *size > 0
                     && offset
@@ -914,7 +973,7 @@ impl VulkanGraphicsPipeline {
             .vertex_attribute_descriptions(&attributes);
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(convert::topology(desc.raster.topology))
-            .primitive_restart_enable(desc.primitive_restart);
+            .primitive_restart_enable(desc.primitive_restart.is_some());
         let viewport = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
@@ -933,26 +992,21 @@ impl VulkanGraphicsPipeline {
             .rasterization_samples(convert::samples(desc.samples))
             .alpha_to_coverage_enable(desc.alpha_to_coverage);
         let color_attachments = desc
-            .color_formats
+            .color_targets
             .iter()
-            .map(|_| match desc.blend {
-                Some(blend) => {
-                    let component = |component: dirk_rhi::BlendComponent| {
-                        vk::PipelineColorBlendAttachmentState::default()
-                            .blend_enable(true)
-                            .src_color_blend_factor(convert::blend_factor(component.source))
-                            .dst_color_blend_factor(convert::blend_factor(component.destination))
-                            .color_blend_op(convert::blend_op(component.operation))
-                            .src_alpha_blend_factor(convert::blend_factor(component.source))
-                            .dst_alpha_blend_factor(convert::blend_factor(component.destination))
-                            .alpha_blend_op(convert::blend_op(component.operation))
-                            .color_write_mask(vk::ColorComponentFlags::RGBA)
-                    };
-                    component(blend.color)
-                }
+            .map(|target| match target.blend {
+                Some(blend) => vk::PipelineColorBlendAttachmentState::default()
+                    .blend_enable(true)
+                    .src_color_blend_factor(convert::blend_factor(blend.color.source))
+                    .dst_color_blend_factor(convert::blend_factor(blend.color.destination))
+                    .color_blend_op(convert::blend_op(blend.color.operation))
+                    .src_alpha_blend_factor(convert::blend_factor(blend.alpha.source))
+                    .dst_alpha_blend_factor(convert::blend_factor(blend.alpha.destination))
+                    .alpha_blend_op(convert::blend_op(blend.alpha.operation))
+                    .color_write_mask(convert::color_write_mask(target.write_mask)),
                 None => vk::PipelineColorBlendAttachmentState::default()
                     .blend_enable(false)
-                    .color_write_mask(vk::ColorComponentFlags::RGBA),
+                    .color_write_mask(convert::color_write_mask(target.write_mask)),
             })
             .collect::<Vec<_>>();
         let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
@@ -992,10 +1046,9 @@ impl VulkanGraphicsPipeline {
         ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let color_formats = desc
-            .color_formats
+            .color_targets
             .iter()
-            .copied()
-            .map(convert::format)
+            .map(|target| convert::format(target.format))
             .collect::<Vec<_>>();
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)

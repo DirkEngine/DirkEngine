@@ -3,8 +3,8 @@ use std::sync::Arc;
 use ash::vk;
 use dirk_rhi::{
     BufferCopy, BufferImageCopy, Color, ColorAttachment, CommandBuffer, DependencyInfo,
-    DepthAttachment, FilterMode, ImageBlit, ImageCopy, IndexFormat, LoadOp, QueueType, Rect,
-    RenderingInfo, Result, Viewport,
+    DepthAttachment, FilterMode, ImageBlit, ImageCopy, IndexFormat, InvalidResourceKind, LoadOp,
+    QueueType, Rect, RenderingInfo, Result, Viewport,
 };
 
 use crate::{
@@ -103,15 +103,34 @@ impl VulkanCommandBuffer {
         &self.pool.context
     }
 
-    fn assert_context(&self, context: &Arc<Context>) {
-        assert!(
-            Arc::ptr_eq(&self.pool.context, context),
-            "Vulkan command resource belongs to a different RHI instance"
-        );
+    fn require_context(&self, context: &Arc<Context>) -> Result<()> {
+        if Arc::ptr_eq(&self.pool.context, context) {
+            Ok(())
+        } else {
+            Err(InvalidResourceKind::ForeignInstance
+                .with_detail("command resource belongs to another Vulkan device")
+                .into())
+        }
+    }
+
+    fn queue_families(&self, transfer: Option<dirk_rhi::QueueTransfer>) -> (u32, u32) {
+        transfer.map_or(
+            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
+            |transfer| {
+                (
+                    self.pool.context.queue_family(transfer.source),
+                    self.pool.context.queue_family(transfer.destination),
+                )
+            },
+        )
     }
 }
 
 impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
+    fn queue_type(&self) -> QueueType {
+        self.queue()
+    }
+
     fn begin(&mut self, _label: &str, one_time_submit: bool) -> Result<()> {
         self.retained.clear();
         unsafe {
@@ -148,13 +167,13 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
 
     fn begin_rendering(&mut self, info: &RenderingInfo<'_, VulkanBackend>) -> Result<()> {
         for attachment in info.color_attachments {
-            self.assert_context(attachment.view.context());
+            self.require_context(attachment.view.context())?;
             if let Some(resolve) = attachment.resolve {
-                self.assert_context(resolve.context());
+                self.require_context(resolve.context())?;
             }
         }
         if let Some(attachment) = &info.depth_attachment {
-            self.assert_context(attachment.view.context());
+            self.require_context(attachment.view.context())?;
         }
         self.retained.extend(
             info.color_attachments
@@ -218,7 +237,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         Ok(())
     }
 
-    fn set_viewport(&mut self, viewport: Viewport) {
+    fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
         let viewport = vk::Viewport {
             x: viewport.x,
             y: viewport.y,
@@ -233,9 +252,10 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 .device
                 .cmd_set_viewport(self.raw, 0, std::slice::from_ref(&viewport));
         }
+        Ok(())
     }
 
-    fn set_scissor(&mut self, scissor: Rect) {
+    fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
         let scissor = vk::Rect2D {
             offset: vk::Offset2D {
                 x: scissor.x,
@@ -252,18 +272,20 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 .device
                 .cmd_set_scissor(self.raw, 0, std::slice::from_ref(&scissor));
         }
+        Ok(())
     }
 
-    fn set_blend_constants(&mut self, color: Color) {
+    fn set_blend_constants(&mut self, color: Color) -> Result<()> {
         unsafe {
             self.pool
                 .context
                 .device
                 .cmd_set_blend_constants(self.raw, &[color.r, color.g, color.b, color.a]);
         }
+        Ok(())
     }
 
-    fn set_stencil_reference(&mut self, front: u32, back: u32) {
+    fn set_stencil_reference(&mut self, front: u32, back: u32) -> Result<()> {
         unsafe {
             self.pool.context.device.cmd_set_stencil_reference(
                 self.raw,
@@ -278,6 +300,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 );
             }
         }
+        Ok(())
     }
 
     fn draw(
@@ -286,7 +309,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         instance_count: u32,
         first_vertex: u32,
         first_instance: u32,
-    ) {
+    ) -> Result<()> {
         unsafe {
             self.pool.context.device.cmd_draw(
                 self.raw,
@@ -296,10 +319,11 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 first_instance,
             );
         }
+        Ok(())
     }
 
-    fn bind_graphics_pipeline(&mut self, pipeline: &VulkanGraphicsPipeline) {
-        self.assert_context(pipeline.context());
+    fn bind_graphics_pipeline(&mut self, pipeline: &VulkanGraphicsPipeline) -> Result<()> {
+        self.require_context(pipeline.context())?;
         self.retained.push(pipeline.retain());
         unsafe {
             self.pool.context.device.cmd_bind_pipeline(
@@ -308,6 +332,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 pipeline.raw(),
             );
         }
+        Ok(())
     }
 
     fn bind_groups(
@@ -315,15 +340,25 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         layout: &VulkanPipelineLayout,
         first_group: u32,
         groups: &[&VulkanBindGroup],
-    ) {
-        self.assert_context(layout.context());
+        dynamic_offsets: &[u64],
+    ) -> Result<()> {
+        self.require_context(layout.context())?;
         for group in groups {
-            self.assert_context(group.context());
+            self.require_context(group.context())?;
         }
         self.retained.push(layout.retain());
         self.retained
             .extend(groups.iter().map(|group| group.retain()));
         let groups = groups.iter().map(|group| group.raw()).collect::<Vec<_>>();
+        let dynamic_offsets = dynamic_offsets
+            .iter()
+            .map(|&offset| {
+                u32::try_from(offset).map_err(|_| {
+                    InvalidResourceKind::OutOfRange
+                        .with_detail("Vulkan dynamic buffer offsets are limited to u32")
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         unsafe {
             self.pool.context.device.cmd_bind_descriptor_sets(
                 self.raw,
@@ -331,13 +366,14 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 layout.raw(),
                 first_group,
                 &groups,
-                &[],
+                &dynamic_offsets,
             );
         }
+        Ok(())
     }
 
-    fn bind_vertex_buffer(&mut self, slot: u32, buffer: &VulkanBuffer, offset: u64) {
-        self.assert_context(buffer.context());
+    fn bind_vertex_buffer(&mut self, slot: u32, buffer: &VulkanBuffer, offset: u64) -> Result<()> {
+        self.require_context(buffer.context())?;
         self.retained.push(buffer.retain());
         unsafe {
             self.pool.context.device.cmd_bind_vertex_buffers(
@@ -347,10 +383,16 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 std::slice::from_ref(&offset),
             );
         }
+        Ok(())
     }
 
-    fn bind_index_buffer(&mut self, buffer: &VulkanBuffer, offset: u64, format: IndexFormat) {
-        self.assert_context(buffer.context());
+    fn bind_index_buffer(
+        &mut self,
+        buffer: &VulkanBuffer,
+        offset: u64,
+        format: IndexFormat,
+    ) -> Result<()> {
+        self.require_context(buffer.context())?;
         self.retained.push(buffer.retain());
         unsafe {
             self.pool.context.device.cmd_bind_index_buffer(
@@ -360,6 +402,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 convert::index(format),
             );
         }
+        Ok(())
     }
 
     fn draw_indexed(
@@ -369,7 +412,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         first_index: u32,
         vertex_offset: i32,
         first_instance: u32,
-    ) {
+    ) -> Result<()> {
         unsafe {
             self.pool.context.device.cmd_draw_indexed(
                 self.raw,
@@ -380,11 +423,17 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 first_instance,
             );
         }
+        Ok(())
     }
 
-    fn copy_buffer(&mut self, src: &VulkanBuffer, dst: &VulkanBuffer, regions: &[BufferCopy]) {
-        self.assert_context(src.context());
-        self.assert_context(dst.context());
+    fn copy_buffer(
+        &mut self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        regions: &[BufferCopy],
+    ) -> Result<()> {
+        self.require_context(src.context())?;
+        self.require_context(dst.context())?;
         self.retained.extend([src.retain(), dst.retain()]);
         let regions = regions
             .iter()
@@ -400,6 +449,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 .device
                 .cmd_copy_buffer(self.raw, src.raw(), dst.raw(), &regions);
         }
+        Ok(())
     }
 
     fn copy_buffer_to_image(
@@ -407,21 +457,26 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         src: &VulkanBuffer,
         dst: &VulkanImage,
         regions: &[BufferImageCopy],
-    ) {
-        self.assert_context(src.context());
-        self.assert_context(dst.context());
+    ) -> Result<()> {
+        self.require_context(src.context())?;
+        self.require_context(dst.context())?;
         self.retained.extend([src.retain(), dst.retain()]);
         let regions = regions
             .iter()
             .map(|region| {
                 vk::BufferImageCopy::default()
                     .buffer_offset(region.buffer_offset)
+                    .buffer_row_length(
+                        region.buffer_bytes_per_row.get() / dst.format().texel_size(),
+                    )
+                    .buffer_image_height(region.buffer_rows_per_image.get())
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: convert::aspects(region.aspects),
                         mip_level: region.mip_level,
                         base_array_layer: region.base_array_layer,
                         layer_count: region.array_layer_count,
                     })
+                    .image_offset(offset3d(region.image_origin))
                     .image_extent(vk::Extent3D {
                         width: region.extent.width,
                         height: region.extent.height,
@@ -438,11 +493,61 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 &regions,
             );
         }
+        Ok(())
     }
 
-    fn copy_image(&mut self, src: &VulkanImage, dst: &VulkanImage, regions: &[ImageCopy]) {
-        self.assert_context(src.context());
-        self.assert_context(dst.context());
+    fn copy_image_to_buffer(
+        &mut self,
+        src: &VulkanImage,
+        dst: &VulkanBuffer,
+        regions: &[BufferImageCopy],
+    ) -> Result<()> {
+        self.require_context(src.context())?;
+        self.require_context(dst.context())?;
+        self.retained.extend([src.retain(), dst.retain()]);
+        let regions = regions
+            .iter()
+            .map(|region| {
+                vk::BufferImageCopy::default()
+                    .buffer_offset(region.buffer_offset)
+                    .buffer_row_length(
+                        region.buffer_bytes_per_row.get() / src.format().texel_size(),
+                    )
+                    .buffer_image_height(region.buffer_rows_per_image.get())
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: convert::aspects(region.aspects),
+                        mip_level: region.mip_level,
+                        base_array_layer: region.base_array_layer,
+                        layer_count: region.array_layer_count,
+                    })
+                    .image_offset(offset3d(region.image_origin))
+                    .image_extent(vk::Extent3D {
+                        width: region.extent.width,
+                        height: region.extent.height,
+                        depth: region.extent.depth,
+                    })
+            })
+            .collect::<Vec<_>>();
+        unsafe {
+            self.pool.context.device.cmd_copy_image_to_buffer(
+                self.raw,
+                src.raw(),
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                dst.raw(),
+                &regions,
+            );
+        }
+        Ok(())
+    }
+
+    fn copy_image(
+        &mut self,
+        src: &VulkanImage,
+        dst: &VulkanImage,
+        regions: &[ImageCopy],
+    ) -> Result<()> {
+        self.require_context(src.context())?;
+        self.require_context(dst.context())?;
         self.retained.extend([src.retain(), dst.retain()]);
         let regions = regions
             .iter()
@@ -486,6 +591,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 &regions,
             );
         }
+        Ok(())
     }
 
     fn blit_image(
@@ -495,8 +601,8 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         regions: &[ImageBlit],
         filter: FilterMode,
     ) -> Result<()> {
-        self.assert_context(src.context());
-        self.assert_context(dst.context());
+        self.require_context(src.context())?;
+        self.require_context(dst.context())?;
         self.retained.extend([src.retain(), dst.retain()]);
         let regions = regions
             .iter()
@@ -537,12 +643,12 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
         Ok(())
     }
 
-    fn barrier(&mut self, dependency: &DependencyInfo<'_, VulkanBackend>) {
+    fn barrier(&mut self, dependency: &DependencyInfo<'_, VulkanBackend>) -> Result<()> {
         for barrier in dependency.buffer_barriers {
-            self.assert_context(barrier.buffer.context());
+            self.require_context(barrier.buffer.context())?;
         }
         for barrier in dependency.image_barriers {
-            self.assert_context(barrier.image.context());
+            self.require_context(barrier.image.context())?;
         }
         self.retained.extend(
             dependency
@@ -562,25 +668,33 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
             .map(|barrier| {
                 vk::MemoryBarrier2::default()
                     .src_stage_mask(convert::pipeline_stages(barrier.src_stages))
-                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .src_access_mask(convert::access(barrier.src_access))
                     .dst_stage_mask(convert::pipeline_stages(barrier.dst_stages))
-                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_access_mask(convert::access(barrier.dst_access))
             })
             .collect::<Vec<_>>();
         let buffer_barriers = dependency
             .buffer_barriers
             .iter()
             .map(|barrier| {
+                let (src_queue, dst_queue) = self.queue_families(barrier.queue_transfer);
                 vk::BufferMemoryBarrier2::default()
                     .src_stage_mask(convert::pipeline_stages(barrier.src_stages))
-                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .src_access_mask(convert::access(barrier.src_access))
                     .dst_stage_mask(convert::pipeline_stages(barrier.dst_stages))
-                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_access_mask(convert::access(barrier.dst_access))
+                    .src_queue_family_index(src_queue)
+                    .dst_queue_family_index(dst_queue)
                     .buffer(barrier.buffer.raw())
                     .offset(barrier.offset)
-                    .size(barrier.size)
+                    .size(
+                        if barrier.size == dirk_rhi::BufferBarrier::<VulkanBackend>::REMAINING_SIZE
+                        {
+                            vk::WHOLE_SIZE
+                        } else {
+                            barrier.size
+                        },
+                    )
             })
             .collect::<Vec<_>>();
         let image_barriers = dependency
@@ -589,6 +703,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
             .map(|barrier| {
                 let (src_stage, src_access, old_layout) = convert::image_state(barrier.old_state);
                 let (dst_stage, dst_access, new_layout) = convert::image_state(barrier.new_state);
+                let (src_queue, dst_queue) = self.queue_families(barrier.queue_transfer);
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(src_stage)
                     .src_access_mask(src_access)
@@ -596,8 +711,8 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                     .dst_access_mask(dst_access)
                     .old_layout(old_layout)
                     .new_layout(new_layout)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .src_queue_family_index(src_queue)
+                    .dst_queue_family_index(dst_queue)
                     .image(barrier.image.raw())
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: convert::aspects(barrier.aspects),
@@ -618,6 +733,7 @@ impl CommandBuffer<VulkanBackend> for VulkanCommandBuffer {
                 .device
                 .cmd_pipeline_barrier2(self.raw, &dependency);
         }
+        Ok(())
     }
 }
 

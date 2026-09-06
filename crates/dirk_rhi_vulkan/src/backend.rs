@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use ash::vk;
 use dirk_rhi::{
-    Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageViewDesc, InvalidResource as Ir, PipelineLayoutDesc, QueueType, Result,
-    RhiCreateInfo, SamplerDesc, ShaderDesc, Submission, SurfaceCreateInfo, SwapchainDesc,
-    TextureFormat,
+    Backend, BindGroupDesc, BindGroupLayoutDesc, BufferDesc, Capabilities, CommandBuffer,
+    FormatCapabilities, GraphicsPipelineDesc, ImageDesc, ImageUsages, ImageViewDesc,
+    InvalidResourceKind as Ir, PipelineLayoutDesc, QueueType, Result, RhiCreateInfo, SampleCounts,
+    SamplerDesc, ShaderDesc, Submission, SurfaceCreateInfo, SwapchainDesc, TextureFormat,
 };
 
 use crate::{
@@ -31,8 +31,59 @@ impl VulkanBackend {
         if Arc::ptr_eq(&self.context, context) {
             Ok(())
         } else {
-            Err(Ir::ForeignInstance.into())
+            Err(Ir::ForeignInstance
+                .with_detail("resource belongs to another Vulkan device")
+                .into())
         }
+    }
+
+    fn mark_surface_frames<'a>(
+        frames: &'a [&'a VulkanSurfaceFrame],
+    ) -> Result<Vec<&'a VulkanSurfaceFrame>> {
+        let mut marked = Vec::with_capacity(frames.len());
+        for frame in frames {
+            if let Err(error) = frame.mark_submitted() {
+                for frame in marked {
+                    VulkanSurfaceFrame::unmark_submitted(frame);
+                }
+                return Err(error);
+            }
+            marked.push(*frame);
+        }
+        Ok(marked)
+    }
+
+    fn validate_submission<'a>(
+        &self,
+        queue: QueueType,
+        submission: &'a Submission<'a, Self>,
+    ) -> Result<Vec<&'a VulkanSurfaceFrame>> {
+        if let Some(fence) = submission.fence {
+            self.require_context(fence.context())?;
+        }
+        for command in submission.command_buffers {
+            self.require_context(command.context())?;
+        }
+        for frame in submission.surface_frames {
+            self.require_context(frame.context())?;
+        }
+        for point in submission
+            .wait_timelines
+            .iter()
+            .chain(submission.signal_timelines)
+        {
+            self.require_context(point.semaphore.context())?;
+        }
+        if submission
+            .command_buffers
+            .iter()
+            .any(|command| command.queue_type() != queue)
+        {
+            return Err(Ir::Mismatch
+                .with_detail("command buffer was allocated for a different queue")
+                .into());
+        }
+        Self::mark_surface_frames(submission.surface_frames)
     }
 
     /// Returns the loaded Vulkan entry.
@@ -100,8 +151,50 @@ impl Backend for VulkanBackend {
         self.context.capabilities
     }
 
-    fn supported_depth_formats(&self) -> &'static [TextureFormat] {
+    fn supported_depth_formats(&self) -> &[TextureFormat] {
         self.context.supported_depth_formats
+    }
+
+    fn format_capabilities(&self, format: TextureFormat) -> FormatCapabilities {
+        let properties = unsafe {
+            self.context.instance.get_physical_device_format_properties(
+                self.context.physical_device,
+                convert::format(format),
+            )
+        };
+        let features = properties.optimal_tiling_features;
+        let mut usages = ImageUsages::COPY_SRC | ImageUsages::COPY_DST;
+        if features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE) {
+            usages |= ImageUsages::SAMPLED;
+        }
+        if features.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) {
+            usages |= ImageUsages::STORAGE;
+        }
+        if features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT) {
+            usages |= ImageUsages::COLOR_ATTACHMENT;
+        }
+        if features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
+            usages |= ImageUsages::DEPTH_STENCIL_ATTACHMENT;
+        }
+        FormatCapabilities { usages }
+    }
+
+    fn supported_sample_counts(&self, format: TextureFormat, usages: ImageUsages) -> SampleCounts {
+        unsafe {
+            self.context
+                .instance
+                .get_physical_device_image_format_properties(
+                    self.context.physical_device,
+                    convert::format(format),
+                    vk::ImageType::TYPE_2D,
+                    vk::ImageTiling::OPTIMAL,
+                    convert::image_usage(usages),
+                    vk::ImageCreateFlags::empty(),
+                )
+        }
+        .map_or(SampleCounts::default(), |properties| {
+            convert::rhi_sample_counts(properties.sample_counts)
+        })
     }
 
     fn wait_idle(&self) -> Result<()> {
@@ -125,7 +218,9 @@ impl Backend for VulkanBackend {
 
     fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<VulkanImageView> {
         if !Arc::ptr_eq(&self.context, desc.image.context()) {
-            return Err(Ir::ForeignInstance.into());
+            return Err(Ir::ForeignInstance
+                .with_detail("image belongs to another Vulkan device")
+                .into());
         }
         VulkanImageView::create(&self.context, desc)
     }
@@ -181,29 +276,7 @@ impl Backend for VulkanBackend {
     }
 
     fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
-        if let Some(fence) = submission.fence {
-            self.require_context(fence.context())?;
-        }
-        for command in submission.command_buffers {
-            self.require_context(command.context())?;
-        }
-        for frame in submission.surface_frames {
-            self.require_context(frame.context())?;
-        }
-        for point in submission
-            .wait_timelines
-            .iter()
-            .chain(submission.signal_timelines)
-        {
-            self.require_context(point.semaphore.context())?;
-        }
-        if submission
-            .command_buffers
-            .iter()
-            .any(|command| command.queue() != queue)
-        {
-            return Err(Ir::Mismatch.into());
-        }
+        let marked_frames = self.validate_submission(queue, submission)?;
         let fence = submission.fence;
         let mut waits =
             Vec::with_capacity(submission.surface_frames.len() + submission.wait_timelines.len());
@@ -240,7 +313,7 @@ impl Backend for VulkanBackend {
             .wait_semaphore_infos(&waits)
             .command_buffer_infos(&commands)
             .signal_semaphore_infos(&signals);
-        unsafe {
+        if let Err(error) = unsafe {
             self.context
                 .device
                 .queue_submit2(
@@ -248,7 +321,12 @@ impl Backend for VulkanBackend {
                     std::slice::from_ref(&submit),
                     fence.map_or_else(vk::Fence::null, super::resource::VulkanFence::raw),
                 )
-                .map_err(vk_error)?;
+                .map_err(vk_error)
+        } {
+            for frame in marked_frames {
+                frame.unmark_submitted();
+            }
+            return Err(error);
         }
         let retained = submission
             .command_buffers
@@ -279,7 +357,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_surface(&self, info: SurfaceCreateInfo) -> Result<VulkanSurface> {
-        VulkanSurface::create(&self.context, info)
+        VulkanSurface::create(&self.context, &info)
     }
 
     fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<VulkanSwapchain> {

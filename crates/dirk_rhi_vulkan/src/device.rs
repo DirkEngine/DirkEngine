@@ -13,8 +13,7 @@ use ash::{
     vk,
 };
 use dirk_rhi::{
-    Capabilities, Error, InvalidResource as Ir, QueueType, Result, RhiCreateInfo, SampleCount,
-    TextureFormat,
+    Capabilities, Error, InvalidResourceKind as Ir, QueueType, Result, RhiCreateInfo, TextureFormat,
 };
 use gpu_allocator::{
     AllocationSizes, AllocatorDebugSettings,
@@ -160,8 +159,11 @@ impl Context {
     )]
     pub(crate) fn new(info: &RhiCreateInfo<'_>) -> Result<Arc<Self>> {
         let entry = unsafe { ash::Entry::load() }.map_err(backend_error)?;
-        let application_name = CString::new(info.application_name).map_err(|_| Ir::Malformed)?;
-        let engine_name = CString::new(info.engine_name).map_err(|_| Ir::Malformed)?;
+        let application_name = CString::new(info.application_name).map_err(|_| {
+            Ir::Malformed.with_detail("application name contains an interior NUL byte")
+        })?;
+        let engine_name = CString::new(info.engine_name)
+            .map_err(|_| Ir::Malformed.with_detail("engine name contains an interior NUL byte"))?;
         let app_info = vk::ApplicationInfo::default()
             .application_name(&application_name)
             .application_version(version(info.application_version))
@@ -539,17 +541,6 @@ fn inspect_device(
         return None;
     }
 
-    let sample_flags = properties.limits.framebuffer_color_sample_counts
-        & properties.limits.framebuffer_depth_sample_counts;
-    let max_samples = if sample_flags.contains(vk::SampleCountFlags::TYPE_8) {
-        SampleCount::Eight
-    } else if sample_flags.contains(vk::SampleCountFlags::TYPE_4) {
-        SampleCount::Four
-    } else if sample_flags.contains(vk::SampleCountFlags::TYPE_2) {
-        SampleCount::Two
-    } else {
-        SampleCount::One
-    };
     let sampler_anisotropy =
         unsafe { instance.get_physical_device_features(raw) }.sampler_anisotropy == vk::TRUE;
     #[allow(
@@ -589,7 +580,6 @@ fn inspect_device(
             ),
             families,
             capabilities: Capabilities {
-                max_samples,
                 max_sampler_anisotropy,
                 min_uniform_buffer_offset_alignment: properties
                     .limits
@@ -597,6 +587,8 @@ fn inspect_device(
                 min_storage_buffer_offset_alignment: properties
                     .limits
                     .min_storage_buffer_offset_alignment,
+                buffer_copy_offset_alignment: 4,
+                buffer_copy_row_pitch_alignment: 1,
                 dedicated_compute_queue: families.compute != families.graphics,
                 dedicated_copy_queue: families.copy != families.graphics
                     && families.copy != families.compute,

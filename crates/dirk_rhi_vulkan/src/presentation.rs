@@ -1,9 +1,16 @@
-use std::{ffi::CStr, sync::Arc};
+use std::{
+    ffi::CStr,
+    num::NonZeroU32,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use ash::vk;
 use dirk_rhi::{
-    Error, Extent3d, ImageUsages, InvalidResource as Ir, PresentMode, Result, SurfaceCreateInfo,
-    SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc, TextureFormat,
+    Error, Extent3d, ImageUsages, InvalidResourceKind as Ir, PresentMode, Result,
+    SurfaceCreateInfo, SurfaceFormat, SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc,
 };
 
 use crate::{
@@ -19,12 +26,19 @@ pub struct VulkanSurface(Arc<SurfaceInner>);
 struct SurfaceInner {
     context: Arc<Context>,
     raw: vk::SurfaceKHR,
+    _target: Arc<dyn dirk_rhi::SurfaceTarget>,
 }
 
 impl VulkanSurface {
-    pub(crate) fn create(context: &Arc<Context>, info: SurfaceCreateInfo) -> Result<Self> {
+    pub(crate) fn create(context: &Arc<Context>, info: &SurfaceCreateInfo) -> Result<Self> {
+        let display = info.display_handle().map_err(|error| {
+            Error::Backend(anyhow::anyhow!("display handle is unavailable: {error:?}"))
+        })?;
+        let window = info.window_handle().map_err(|error| {
+            Error::Backend(anyhow::anyhow!("window handle is unavailable: {error:?}"))
+        })?;
         let required_extensions =
-            ash_window::enumerate_required_extensions(info.display.into()).map_err(vk_error)?;
+            ash_window::enumerate_required_extensions(display.as_raw()).map_err(vk_error)?;
         if required_extensions.iter().any(|&extension| {
             let extension = unsafe { CStr::from_ptr(extension) }.to_string_lossy();
             !context
@@ -39,8 +53,8 @@ impl VulkanSurface {
             ash_window::create_surface(
                 &context.entry,
                 &context.instance,
-                info.display.into(),
-                info.window.into(),
+                display.as_raw(),
+                window.as_raw(),
                 None,
             )
         }
@@ -62,6 +76,7 @@ impl VulkanSurface {
         Ok(Self(Arc::new(SurfaceInner {
             context: context.clone(),
             raw,
+            _target: info.target().clone(),
         })))
     }
 
@@ -85,7 +100,7 @@ pub(crate) struct SwapchainGeneration {
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
-    format: TextureFormat,
+    format: SurfaceFormat,
     extent: Extent3d,
 }
 
@@ -105,12 +120,15 @@ impl SwapchainGeneration {
         width: u32,
         height: u32,
         usage: ImageUsages,
-        preferred_formats: &[TextureFormat],
+        preferred_formats: &[SurfaceFormat],
+        desired_image_count: Option<NonZeroU32>,
         present_mode: PresentMode,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Arc<Self>> {
         if !Arc::ptr_eq(context, &surface.0.context) {
-            return Err(Ir::ForeignInstance.into());
+            return Err(Ir::ForeignInstance
+                .with_detail("surface belongs to another Vulkan device")
+                .into());
         }
         let capabilities = unsafe {
             context
@@ -141,12 +159,12 @@ impl SwapchainGeneration {
         let surface_format = preferred_formats
             .iter()
             .find_map(|preferred| {
-                let requested = convert::format(*preferred);
+                let requested = convert::format(preferred.texture);
                 formats
                     .iter()
                     .find(|format| {
                         format.format == requested
-                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                            && format.color_space == convert::color_space(preferred.color_space)
                     })
                     .copied()
             })
@@ -162,7 +180,10 @@ impl SwapchainGeneration {
             .or_else(|| {
                 formats
                     .iter()
-                    .find(|format| convert::rhi_format(format.format).is_some())
+                    .find(|format| {
+                        convert::rhi_format(format.format).is_some()
+                            && convert::rhi_color_space(format.color_space).is_some()
+                    })
                     .copied()
             })
             .ok_or_else(|| {
@@ -170,11 +191,21 @@ impl SwapchainGeneration {
                     "the surface exposes no color format representable by the RHI"
                 ))
             })?;
-        let format = convert::rhi_format(surface_format.format).ok_or_else(|| {
+        let texture = convert::rhi_format(surface_format.format).ok_or_else(|| {
             Error::Backend(anyhow::anyhow!(
                 "surface format is not represented by the RHI"
             ))
         })?;
+        let color_space =
+            convert::rhi_color_space(surface_format.color_space).ok_or_else(|| {
+                Error::Backend(anyhow::anyhow!(
+                    "surface color space is not represented by the RHI"
+                ))
+            })?;
+        let format = SurfaceFormat {
+            texture,
+            color_space,
+        };
         let present_modes = unsafe {
             context
                 .surface_loader
@@ -192,7 +223,11 @@ impl SwapchainGeneration {
                 "the surface does not support the requested swapchain image usage"
             )));
         }
-        let mut image_count = capabilities.min_image_count.saturating_add(1);
+        let mut image_count = desired_image_count.map_or_else(
+            || capabilities.min_image_count.saturating_add(1),
+            NonZeroU32::get,
+        );
+        image_count = image_count.max(capabilities.min_image_count);
         if capabilities.max_image_count > 0 {
             image_count = image_count.min(capabilities.max_image_count);
         }
@@ -323,7 +358,8 @@ impl Drop for SwapchainGeneration {
 pub struct VulkanSwapchain {
     generation: Arc<SwapchainGeneration>,
     usage: ImageUsages,
-    preferred_formats: Vec<TextureFormat>,
+    preferred_formats: Vec<SurfaceFormat>,
+    desired_image_count: Option<NonZeroU32>,
     present_mode: PresentMode,
     semaphore_index: usize,
 }
@@ -337,15 +373,17 @@ impl VulkanSwapchain {
             generation: SwapchainGeneration::create(
                 context,
                 desc.surface,
-                desc.width,
-                desc.height,
+                desc.width.get(),
+                desc.height.get(),
                 desc.usage,
                 desc.preferred_formats,
+                desc.desired_image_count,
                 desc.present_mode,
                 vk::SwapchainKHR::null(),
             )?,
             usage: desc.usage,
             preferred_formats: desc.preferred_formats.to_vec(),
+            desired_image_count: desc.desired_image_count,
             present_mode: desc.present_mode,
             semaphore_index: 0,
         })
@@ -359,7 +397,7 @@ impl VulkanSwapchain {
 }
 
 impl Swapchain<VulkanBackend> for VulkanSwapchain {
-    fn format(&self) -> TextureFormat {
+    fn format(&self) -> SurfaceFormat {
         self.generation.format
     }
 
@@ -367,14 +405,19 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
         self.generation.extent
     }
 
-    fn acquire(&mut self) -> Result<VulkanSurfaceFrame> {
+    fn image_count(&self) -> NonZeroU32 {
+        NonZeroU32::new(self.generation.images.len().try_into().unwrap_or(u32::MAX))
+            .expect("a Vulkan swapchain always has at least one image")
+    }
+
+    fn acquire(&mut self, timeout_ns: u64) -> Result<VulkanSurfaceFrame> {
         let semaphore_index = self.semaphore_index;
         self.semaphore_index = (self.semaphore_index + 1) % self.generation.semaphores.len();
         let image_available = self.generation.semaphores[semaphore_index].0;
         let (image_index, suboptimal) = unsafe {
             self.generation.context.swapchain_loader.acquire_next_image(
                 self.generation.raw,
-                u64::MAX,
+                timeout_ns,
                 image_available,
                 vk::Fence::null(),
             )
@@ -389,7 +432,7 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
         let image = VulkanImage::surface(
             generation.clone(),
             generation.images[index],
-            generation.format,
+            generation.format.texture,
             generation.extent,
         );
         let view = VulkanImageView::surface(generation.clone(), generation.views[index]);
@@ -404,17 +447,37 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             } else {
                 SurfaceStatus::Optimal
             },
+            submitted: AtomicBool::new(false),
         })
     }
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+    fn discard(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
+        if !Arc::ptr_eq(&self.generation, &frame.generation) {
+            return Err(Ir::ForeignInstance
+                .with_detail("frame belongs to another swapchain generation")
+                .into());
+        }
+        if frame.submitted.load(Ordering::Acquire) {
+            return Err(Ir::BadState
+                .with_detail("a submitted frame must be presented")
+                .into());
+        }
+        let extent = self.extent();
+        self.resize(
+            NonZeroU32::new(extent.width).expect("swapchain width is non-zero"),
+            NonZeroU32::new(extent.height).expect("swapchain height is non-zero"),
+        )
+    }
+
+    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
         let generation = SwapchainGeneration::create(
             &self.generation.context,
             &self.generation.surface,
-            width,
-            height,
+            width.get(),
+            height.get(),
             self.usage,
             &self.preferred_formats,
+            self.desired_image_count,
             self.present_mode,
             self.generation.raw,
         )?;
@@ -425,7 +488,14 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
 
     fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
         if !Arc::ptr_eq(&self.generation.context, frame.context()) {
-            return Err(Ir::ForeignInstance.into());
+            return Err(Ir::ForeignInstance
+                .with_detail("frame belongs to another Vulkan device")
+                .into());
+        }
+        if !frame.submitted.load(Ordering::Acquire) {
+            return Err(Ir::BadState
+                .with_detail("frame must be submitted exactly once before presentation")
+                .into());
         }
         let waits = [frame.render_finished()];
         let swapchains = [frame.generation.raw];
@@ -455,6 +525,7 @@ pub struct VulkanSurfaceFrame {
     pub(crate) image_index: u32,
     pub(crate) semaphore_index: usize,
     status: SurfaceStatus,
+    submitted: AtomicBool,
 }
 
 impl VulkanSurfaceFrame {
@@ -469,6 +540,21 @@ impl VulkanSurfaceFrame {
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.generation.context
     }
+
+    pub(crate) fn mark_submitted(&self) -> Result<()> {
+        self.submitted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| {
+                Ir::BadState
+                    .with_detail("surface frame was already submitted")
+                    .into()
+            })
+    }
+
+    pub(crate) fn unmark_submitted(&self) {
+        self.submitted.store(false, Ordering::Release);
+    }
 }
 
 impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
@@ -480,7 +566,7 @@ impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
         &self.view
     }
 
-    fn format(&self) -> TextureFormat {
+    fn format(&self) -> SurfaceFormat {
         self.generation.format
     }
 
