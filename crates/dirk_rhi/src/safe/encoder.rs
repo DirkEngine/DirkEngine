@@ -1045,22 +1045,16 @@ impl<B: Backend> Drop for RenderPass<'_, B> {
 }
 
 impl<B: Backend, Q: QueueKind> Queue<B, Q> {
-    /// Submits finished recordings once. Failure poisons the device if native submission may have started.
-    /// Initial image states are reconciled between recordings in submission order.
-    pub fn submit(
+    fn validate_submission(
         &self,
-        commands: Vec<RecordedCommands<B, Q>>,
+        commands: &[RecordedCommands<B, Q>],
         info: &SubmitInfo<'_, B>,
-    ) -> Result<Completion<B>> {
+        state: &mut super::device::DeviceState<B>,
+    ) -> Result<()> {
         if !info.surface_frames.is_empty() && Q::KIND != QueueType::Graphics {
             return Err(Ir::Mismatch.into());
         }
         let device = &self.device;
-        let _gate = lock(&device.0.gate)?;
-        let mut state = lock(&device.0.state)?;
-        if state.lost {
-            return Err(crate::Error::DeviceLost);
-        }
         let mut frame_ids = std::collections::HashSet::new();
         for frame in info.surface_frames {
             frame.require_device(&device.0.backend)?;
@@ -1087,7 +1081,7 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
             }
         }
         // Validate all acquisitions before native submission or changing shared state.
-        for command in &commands {
+        for command in commands {
             if !Arc::ptr_eq(&command.device.0, &device.0) {
                 return Err(Ir::ForeignInstance.into());
             }
@@ -1103,75 +1097,83 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
                 }
             }
         }
-        let mut resulting = state.images.clone();
-        let mut native = Vec::new();
-        let mut retained = Vec::new();
-        for command in commands {
-            let mut pool = unsafe { device.0.backend.create_command_pool(QueueType::Graphics)? };
-            let mut prologue = unsafe { device.0.backend.create_command_buffer(&mut pool)? };
-            unsafe {
-                prologue.begin("RHI submission dependencies", true)?;
-            }
-            let memory = [crate::MemoryBarrier {
-                src_stages: crate::PipelineStages::ALL,
-                dst_stages: crate::PipelineStages::ALL,
-                src_access: crate::AccessTypes::MEMORY_WRITE,
-                dst_access: crate::AccessTypes::MEMORY_READ | crate::AccessTypes::MEMORY_WRITE,
-            }];
-            let mut barriers = Vec::new();
-            for usage in command.images.values() {
-                state
-                    .image_lifetimes
-                    .insert(usage.image.id(), Arc::downgrade(&usage.image.0.busy));
-                let desc = usage.image.description();
-                let previous = resulting
-                    .entry(usage.image.id())
-                    .or_insert_with(|| vec![Access::Undefined; usage.first.len()]);
-                for (index, first) in usage.first.iter().enumerate() {
-                    if let Some(first) = first {
-                        let old = previous[index];
-                        if old != *first || old.writes() || first.writes() {
-                            barriers.push(crate::ImageBarrier::<B> {
-                                image: usage.image.raw(),
-                                old_state: old,
-                                new_state: *first,
-                                aspects: desc.format.aspects(),
-                                base_mip_level: (u32::try_from(index)
-                                    .map_err(|_| Ir::OutOfRange)?)
-                                    % desc.mip_levels,
-                                mip_level_count: 1,
-                                base_array_layer: (u32::try_from(index)
-                                    .map_err(|_| Ir::OutOfRange)?)
-                                    / desc.mip_levels,
-                                array_layer_count: 1,
-                                queue_transfer: None,
-                            });
-                        }
-                        previous[index] = usage.last[index].unwrap_or(*first);
+        Ok(())
+    }
+    fn prepare_recording(
+        &self,
+        command: RecordedCommands<B, Q>,
+        resulting: &mut HashMap<u64, Vec<Access>>,
+    ) -> Result<Payload<B>> {
+        let device = &self.device;
+        let mut pool = unsafe { device.0.backend.create_command_pool(QueueType::Graphics)? };
+        let mut prologue = unsafe { device.0.backend.create_command_buffer(&mut pool)? };
+        unsafe {
+            prologue.begin("RHI submission dependencies", true)?;
+        }
+        let memory = [crate::MemoryBarrier {
+            src_stages: crate::PipelineStages::ALL,
+            dst_stages: crate::PipelineStages::ALL,
+            src_access: crate::AccessTypes::MEMORY_WRITE,
+            dst_access: crate::AccessTypes::MEMORY_READ | crate::AccessTypes::MEMORY_WRITE,
+        }];
+        let mut barriers = Vec::new();
+        for usage in command.images.values() {
+            let desc = usage.image.description();
+            let previous = resulting
+                .entry(usage.image.id())
+                .or_insert_with(|| vec![Access::Undefined; usage.first.len()]);
+            for (index, first) in usage.first.iter().enumerate() {
+                if let Some(first) = first {
+                    let old = previous[index];
+                    if old != *first || old.writes() || first.writes() {
+                        barriers.push(crate::ImageBarrier::<B> {
+                            image: usage.image.raw(),
+                            old_state: old,
+                            new_state: *first,
+                            aspects: desc.format.aspects(),
+                            base_mip_level: (u32::try_from(index).map_err(|_| Ir::OutOfRange)?)
+                                % desc.mip_levels,
+                            mip_level_count: 1,
+                            base_array_layer: (u32::try_from(index).map_err(|_| Ir::OutOfRange)?)
+                                / desc.mip_levels,
+                            array_layer_count: 1,
+                            queue_transfer: None,
+                        });
                     }
+                    previous[index] = usage.last[index].unwrap_or(*first);
                 }
             }
-            unsafe {
-                prologue.barrier(&crate::DependencyInfo {
-                    memory_barriers: &memory,
-                    buffer_barriers: &[],
-                    image_barriers: &barriers,
-                })?;
-                prologue.end()?;
-            }
-            native.push((prologue, pool));
-            native.push((command.raw, command.pool));
-            retained.extend(command.retained.into_values());
         }
+        unsafe {
+            prologue.barrier(&crate::DependencyInfo {
+                memory_barriers: &memory,
+                buffer_barriers: &[],
+                image_barriers: &barriers,
+            })?;
+            prologue.end()?;
+        }
+        Ok(Payload {
+            commands: vec![(prologue, pool), (command.raw, command.pool)],
+            retained: command.retained.into_values().collect(),
+        })
+    }
+    fn prepare_present(
+        &self,
+        frames: &[&GpuSurfaceFrame<B>],
+        resulting: &mut HashMap<u64, Vec<Access>>,
+        native: &mut Vec<(B::CommandBuffer, B::CommandPool)>,
+        retained: &mut Vec<Retained>,
+    ) -> Result<()> {
+        let device = &self.device;
         // A final transition owns presentation even when the graph omitted an export.
-        if !info.surface_frames.is_empty() {
+        if !frames.is_empty() {
             let mut pool = unsafe { device.0.backend.create_command_pool(QueueType::Graphics)? };
             let mut epilogue = unsafe { device.0.backend.create_command_buffer(&mut pool)? };
             unsafe {
                 epilogue.begin("RHI presentation dependencies", true)?;
             }
             let mut barriers = Vec::new();
-            for frame in info.surface_frames {
+            for frame in frames {
                 let image = frame.image();
                 let previous = resulting
                     .entry(image.id())
@@ -1203,6 +1205,37 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
             }
             native.push((epilogue, pool));
         }
+        Ok(())
+    }
+
+    /// Submits finished recordings once. Failure poisons the device if native submission may have started.
+    /// Initial image states are reconciled between recordings in submission order.
+    pub fn submit(
+        &self,
+        commands: Vec<RecordedCommands<B, Q>>,
+        info: &SubmitInfo<'_, B>,
+    ) -> Result<Completion<B>> {
+        let device = &self.device;
+        let _gate = lock(&device.0.gate)?;
+        let mut state = lock(&device.0.state)?;
+        if state.lost {
+            return Err(crate::Error::DeviceLost);
+        }
+        self.validate_submission(&commands, info, &mut state)?;
+        let mut resulting = state.images.clone();
+        let mut native = Vec::new();
+        let mut retained = Vec::new();
+        for command in commands {
+            let payload = self.prepare_recording(command, &mut resulting)?;
+            native.extend(payload.commands);
+            retained.extend(payload.retained);
+        }
+        self.prepare_present(
+            info.surface_frames,
+            &mut resulting,
+            &mut native,
+            &mut retained,
+        )?;
         for point in info.wait_timelines.iter().chain(info.signal_timelines) {
             retained.push(Retained {
                 _object: point.semaphore.0.clone(),

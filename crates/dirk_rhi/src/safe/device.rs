@@ -318,87 +318,7 @@ impl<B: Backend> Rhi<B> {
             if matches.next().is_some() {
                 return Err(Ir::Mismatch.into());
             }
-            let (resource, retained) = match (&entry.resource, layout.ty) {
-                (
-                    BindingResource::Buffer {
-                        buffer,
-                        offset,
-                        size,
-                    },
-                    ty @ (BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. }),
-                ) => {
-                    buffer.require_device(&self.0.backend)?;
-                    let range = crate::BufferRange {
-                        offset: *offset,
-                        size: *size,
-                    }
-                    .resolve(buffer.size())?;
-                    let uniform = matches!(ty, BindingType::UniformBuffer { .. });
-                    let caps = self.capabilities();
-                    let alignment = if uniform {
-                        caps.min_uniform_buffer_offset_alignment
-                    } else {
-                        caps.min_storage_buffer_offset_alignment
-                    }
-                    .max(1);
-                    let usage = if uniform {
-                        crate::BufferUsages::UNIFORM
-                    } else {
-                        crate::BufferUsages::STORAGE
-                    };
-                    if !range.offset.is_multiple_of(alignment)
-                        || !buffer.info().usage.contains(usage)
-                    {
-                        return Err(Ir::Mismatch.into());
-                    }
-                    (
-                        BindingResource::Buffer {
-                            buffer: buffer.raw(),
-                            offset: range.offset,
-                            size: range.size,
-                        },
-                        OwnedBinding::Buffer((*buffer).clone(), range, ty),
-                    )
-                }
-                (BindingResource::SampledImage { view, sampler }, BindingType::SampledImage) => {
-                    view.require_device(&self.0.backend)?;
-                    sampler.require_device(&self.0.backend)?;
-                    view.info().image.require_live()?;
-                    let info = view.info().image.description();
-                    if !info.usage.contains(crate::ImageUsages::SAMPLED)
-                        || info.samples != crate::SampleCount::One
-                        || (sampler.info().linear
-                            && !self.format_capabilities(info.format).filterable)
-                    {
-                        return Err(Ir::Mismatch.into());
-                    }
-                    (
-                        BindingResource::SampledImage {
-                            view: view.raw(),
-                            sampler: sampler.raw(),
-                        },
-                        OwnedBinding::Sampled((*view).clone(), (*sampler).clone()),
-                    )
-                }
-                (BindingResource::StorageImage(view), BindingType::StorageImage) => {
-                    view.require_device(&self.0.backend)?;
-                    view.info().image.require_live()?;
-                    if !view
-                        .info()
-                        .image
-                        .description()
-                        .usage
-                        .contains(crate::ImageUsages::STORAGE)
-                    {
-                        return Err(Ir::Mismatch.into());
-                    }
-                    (
-                        BindingResource::StorageImage(view.raw()),
-                        OwnedBinding::Storage((*view).clone()),
-                    )
-                }
-                _ => return Err(Ir::Mismatch.into()),
-            };
+            let (resource, retained) = self.prepare_binding(entry, layout.ty)?;
             native.push(crate::BindGroupEntry {
                 binding: entry.binding,
                 resource,
@@ -419,6 +339,91 @@ impl<B: Backend> Rhi<B> {
                 entries: owned,
             },
         ))
+    }
+    fn prepare_binding<'a>(
+        &self,
+        entry: &'a crate::BindGroupEntry<'_, Self>,
+        ty: BindingType,
+    ) -> Result<(BindingResource<'a, B>, OwnedBinding<B>)> {
+        let prepared = match (&entry.resource, ty) {
+            (
+                BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                },
+                ty @ (BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. }),
+            ) => {
+                buffer.require_device(&self.0.backend)?;
+                let range = crate::BufferRange {
+                    offset: *offset,
+                    size: *size,
+                }
+                .resolve(buffer.size())?;
+                let uniform = matches!(ty, BindingType::UniformBuffer { .. });
+                let caps = self.capabilities();
+                let alignment = if uniform {
+                    caps.min_uniform_buffer_offset_alignment
+                } else {
+                    caps.min_storage_buffer_offset_alignment
+                }
+                .max(1);
+                let usage = if uniform {
+                    crate::BufferUsages::UNIFORM
+                } else {
+                    crate::BufferUsages::STORAGE
+                };
+                if !range.offset.is_multiple_of(alignment) || !buffer.info().usage.contains(usage) {
+                    return Err(Ir::Mismatch.into());
+                }
+                (
+                    BindingResource::Buffer {
+                        buffer: buffer.raw(),
+                        offset: range.offset,
+                        size: range.size,
+                    },
+                    OwnedBinding::Buffer((*buffer).clone(), range, ty),
+                )
+            }
+            (BindingResource::SampledImage { view, sampler }, BindingType::SampledImage) => {
+                view.require_device(&self.0.backend)?;
+                sampler.require_device(&self.0.backend)?;
+                view.info().image.require_live()?;
+                let info = view.info().image.description();
+                if !info.usage.contains(crate::ImageUsages::SAMPLED)
+                    || info.samples != crate::SampleCount::One
+                    || (sampler.info().linear && !self.format_capabilities(info.format).filterable)
+                {
+                    return Err(Ir::Mismatch.into());
+                }
+                (
+                    BindingResource::SampledImage {
+                        view: view.raw(),
+                        sampler: sampler.raw(),
+                    },
+                    OwnedBinding::Sampled((*view).clone(), (*sampler).clone()),
+                )
+            }
+            (BindingResource::StorageImage(view), BindingType::StorageImage) => {
+                view.require_device(&self.0.backend)?;
+                view.info().image.require_live()?;
+                if !view
+                    .info()
+                    .image
+                    .description()
+                    .usage
+                    .contains(crate::ImageUsages::STORAGE)
+                {
+                    return Err(Ir::Mismatch.into());
+                }
+                (
+                    BindingResource::StorageImage(view.raw()),
+                    OwnedBinding::Storage((*view).clone()),
+                )
+            }
+            _ => return Err(Ir::Mismatch.into()),
+        };
+        Ok(prepared)
     }
     /// Creates a pipeline layout retaining its group declarations.
     pub fn create_pipeline_layout(
