@@ -51,6 +51,17 @@ impl<B: Backend> Api for Rhi<B> {
     type SurfaceFrame = GpuSurfaceFrame<B>;
 }
 impl<B: Backend> Rhi<B> {
+    /// Borrows the backend for integration with an external native API.
+    ///
+    /// # Safety
+    /// The caller must externally synchronize native operations against all RHI
+    /// operations, retain their resources through completion, and preserve tracked
+    /// resource states. External work is not covered by RHI completion tokens.
+    #[must_use]
+    pub unsafe fn native(&self) -> &B {
+        &self.0.backend
+    }
+
     /// Creates the selected native backend and a safe ownership domain.
     pub fn new(info: &crate::RhiCreateInfo<'_>) -> Result<Self> {
         // SAFETY: creation only borrows valid platform providers and retains no borrowed handles.

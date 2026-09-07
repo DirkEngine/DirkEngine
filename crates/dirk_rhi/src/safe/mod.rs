@@ -58,6 +58,16 @@ impl<B: Backend, T, M> Object<B, T, M> {
     pub fn info(&self) -> &M {
         &self.0.metadata
     }
+    /// Borrows the native resource for integration with an external native API.
+    ///
+    /// # Safety
+    /// The caller must preserve this resource's tracked state and retain it until
+    /// all external GPU work completes. Native access must not race shared RHI use.
+    #[must_use]
+    pub unsafe fn native(&self) -> &T {
+        &self.0.raw
+    }
+
     pub(super) fn raw(&self) -> &T {
         &self.0.raw
     }

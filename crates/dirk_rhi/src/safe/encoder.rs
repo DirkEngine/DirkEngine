@@ -712,6 +712,17 @@ impl<B: Backend> CommandEncoder<B, Graphics> {
     }
 }
 impl<B: Backend> RenderPass<'_, B> {
+    /// Borrows the active native rendering command stream.
+    ///
+    /// # Safety
+    /// External commands must obey the active pass, preserve tracked resource
+    /// states, and retain their resources through submission completion. Restore
+    /// any changed bindings/dynamic state before subsequent portable draws. Do
+    /// not begin/end the pass or command buffer through this reference.
+    pub unsafe fn native(&mut self) -> &mut B::CommandBuffer {
+        &mut self.encoder.raw
+    }
+
     /// Binds a pipeline compatible with this pass's attachments.
     pub fn bind_graphics_pipeline(&mut self, pipeline: &GpuGraphicsPipeline<B>) -> Result<()> {
         if pipeline

@@ -62,6 +62,12 @@ of the mapping, so shader translation and merged pipeline layouts agree even
 when the other stage has different or sparse bindings. See
 [the shader refactor notes](rhi-shaders.md) for the remaining shader work.
 
+Native interoperability is available through explicitly unsafe `native` borrows.
+The caller owns external synchronization, state agreement, and lifetime retention
+for that work; portable completion and validation do not cover external commands.
+This supports existing native integrations during migration without presenting
+unchecked native operations as safe RHI operations.
+
 ## Presentation
 
 Frames own acquisition tokens. Recording or submitting images from an ended
