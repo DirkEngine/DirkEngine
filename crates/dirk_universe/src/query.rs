@@ -3,6 +3,9 @@
 //!
 //! [`World`]: crate::World
 
+pub mod experimental;
+pub mod filter;
+
 use std::any::TypeId;
 
 use crate::{Entity, Universe, WorldId, components::Component};
