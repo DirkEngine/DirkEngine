@@ -127,8 +127,11 @@ pub struct SamplerDesc<'a> {
 /// This surface is expected to be overhauled alongside the planned shader
 /// handling rework: a unified translation pipeline will normalize source
 /// languages, add specialization, and derive bind-group layouts from
-/// reflection rather than hand-maintained descriptors. Until then, backends
-/// accept only the representations they consume natively and reject others
+/// reflection rather than hand-maintained descriptors. The refactor must also
+/// establish one authoritative shader/backend binding map and explicit
+/// coordinate conventions; see `docs/rhi-shaders.md` in the repository.
+/// Until then, backends accept only the representations they consume natively
+/// and reject others
 /// with [`crate::Error::Unsupported`] and the received
 /// [`ShaderLanguage`], so callers can fall back or fail loudly.
 #[derive(Clone, Copy, Debug)]
