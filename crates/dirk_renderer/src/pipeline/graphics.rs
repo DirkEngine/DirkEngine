@@ -1,10 +1,9 @@
 use std::marker::PhantomData;
 
 use dirk_rhi::{
-    Backend as _, BindGroupLayoutDesc, BindGroupLayoutEntry, BlendState, ColorTargetState,
-    ColorWrites, CommandBuffer as _, CompareOp, CullMode, DepthBiasState, DepthState, FrontFace,
-    GraphicsPipelineDesc, IndexFormat, PipelineLayoutDesc, PrimitiveTopology, RasterState,
-    SampleCount,
+    BindGroupLayoutDesc, BindGroupLayoutEntry, BlendState, ColorTargetState, ColorWrites,
+    CompareOp, CullMode, DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, IndexFormat,
+    PipelineLayoutDesc, PrimitiveTopology, RasterState, SampleCount,
 };
 use tracing::debug;
 

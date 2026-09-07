@@ -14,7 +14,10 @@ pub struct CommandPool<Q: QueueKind> {
 }
 impl<Q: QueueKind> CommandPool<Q> {
     pub fn build(rhi: &Arc<ActiveRhi>) -> Self {
-        Self { rhi: rhi.clone(), kind: PhantomData }
+        Self {
+            rhi: rhi.clone(),
+            kind: PhantomData,
+        }
     }
     pub fn begin(&self, label: &str) -> Result<CommandEncoder<ActiveBackend, Q>> {
         Ok(self.rhi.create_encoder(label)?)

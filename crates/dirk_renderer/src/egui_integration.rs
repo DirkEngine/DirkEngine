@@ -1,13 +1,12 @@
-use std::{collections::HashMap, mem::size_of, num::NonZeroU32, time::Instant};
+use std::{collections::HashMap, mem::size_of, time::Instant};
 
 use dirk_input::{ButtonState, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
 use dirk_rhi::{
-    AddressMode, Backend as _, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor,
-    BlendOp, BlendState, BufferImageCopy, BufferUsages, CommandBuffer as _, CullMode,
-    DependencyInfo, Extent3d, FilterMode, FrontFace, ImageAspects, ImageBarrier, ImageState,
-    ImageUsages, IndexFormat, InvalidResourceKind as Ir, MemoryDomain, Origin3d, PrimitiveTopology,
-    RasterState, Rect, SampleCount, SamplerDesc, ShaderStages, Viewport,
+    AddressMode, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor, BlendOp,
+    BlendState, BufferUsages, CullMode, Extent3d, FilterMode, FrontFace, ImageState, ImageUsages,
+    IndexFormat, InvalidResourceKind as Ir, MemoryDomain, Origin3d, PrimitiveTopology, RasterState,
+    Rect, SampleCount, SamplerDesc, ShaderStages, Viewport,
 };
 use dirk_shaders::types::EguiUbo;
 use egui::{
@@ -21,12 +20,13 @@ use crate::{
     MAX_FRAMES_IN_FLIGHT, Result,
     pipeline::graphics::{GraphicsPipeline, GraphicsPipelineSpec},
     resources::{
-        ActiveImageView,
+        ActiveImageView, ActiveRenderPass,
         buffer::{CustomBuffer, UniformBuffer},
         command_pool::CommandBuffer,
         descriptors::{DescriptorAllocator, DescriptorSet, layouts::SetLayout},
         device::RenderDevice,
         image::{Image, ImageCreateInfo},
+        upload::ImageUpload,
     },
     shaders::{EguiFS, EguiVS},
 };
@@ -207,7 +207,7 @@ impl EguiState {
     #[allow(clippy::cast_precision_loss)]
     pub fn render(
         &mut self,
-        cmd: &mut CommandBuffer,
+        cmd: &mut ActiveRenderPass<'_>,
         extent: Extent3d,
         frame: usize,
     ) -> Result<()> {
@@ -223,7 +223,7 @@ impl EguiState {
             return Ok(());
         };
         let mut rendering = self.pipeline.bind(cmd)?;
-        rendering.command().rhi_mut().set_viewport(Viewport {
+        rendering.command().set_viewport(Viewport {
             x: 0.0,
             y: 0.0,
             width: extent.width as f32,
@@ -233,11 +233,9 @@ impl EguiState {
         })?;
         rendering
             .command()
-            .rhi_mut()
             .bind_vertex_buffer(0, vertices.rhi(), 0)?;
         rendering
             .command()
-            .rhi_mut()
             .bind_index_buffer(indices.rhi(), 0, IndexFormat::Uint32)?;
 
         for draw in &resources.draws {
@@ -250,8 +248,8 @@ impl EguiState {
                 .get(&draw.texture)
                 .ok_or(invalid_resource(Ir::BadState))?;
             rendering.bind_descriptor_sets(&(&resources.set, texture.binding()))?;
-            rendering.command().rhi_mut().set_scissor(scissor)?;
-            rendering.command().rhi_mut().draw_indexed(
+            rendering.command().set_scissor(scissor)?;
+            rendering.command().draw_indexed(
                 draw.index_count,
                 1,
                 draw.first_index,
@@ -269,112 +267,85 @@ impl EguiState {
         id: TextureId,
         delta: &egui::epaint::ImageDelta,
     ) -> Result<()> {
-        let (staging, width, height) = stage_texture(device, &delta.image)?;
-
-        if let Some([x, y]) = delta.pos {
-            let origin = Origin3d {
+        let [width, height] = delta.image.size();
+        let extent = Extent3d::new_2d(
+            u32::try_from(width).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+            u32::try_from(height).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+        );
+        let origin = if let Some([x, y]) = delta.pos {
+            Origin3d {
                 x: u32::try_from(x).map_err(|_| invalid_resource(Ir::OutOfRange))?,
                 y: u32::try_from(y).map_err(|_| invalid_resource(Ir::OutOfRange))?,
                 z: 0,
-            };
-            let texture = self
-                .textures
-                .get_mut(&id)
-                .ok_or(invalid_resource(Ir::BadState))?;
-            let EguiTexture::Managed {
-                image,
-                binding,
-                options,
-                extent,
-            } = texture
-            else {
-                return Err(invalid_resource(Ir::BadState).into());
-            };
-            if origin
-                .x
-                .checked_add(width)
-                .is_none_or(|right| right > extent.width)
-                || origin
-                    .y
-                    .checked_add(height)
-                    .is_none_or(|bottom| bottom > extent.height)
-            {
-                return Err(invalid_resource(Ir::OutOfRange).into());
             }
-            record_texture_upload(
-                cmd,
-                &staging,
-                image,
-                origin,
-                Extent3d::new_2d(width, height),
-                ImageState::ShaderRead,
+        } else {
+            let image = Image::create_image(
+                device,
+                &ImageCreateInfo {
+                    extent,
+                    format: dirk_rhi::TextureFormat::Rgba8Srgb,
+                    usage: ImageUsages::COPY_DST | ImageUsages::SAMPLED,
+                    mip_levels: 1,
+                    samples: SampleCount::One,
+                },
             )?;
-            if *options != delta.options {
-                let sampler = create_sampler(device, delta.options)?;
-                *binding = self
-                    .texture_allocator
-                    .sampled_image(0, image.rhi_view(), &sampler)?;
-                *options = delta.options;
-            }
-            return Ok(());
-        }
-
-        let extent = Extent3d::new_2d(width, height);
-        let image = Image::create_image(
-            device,
-            &ImageCreateInfo {
-                extent,
-                format: dirk_rhi::TextureFormat::Rgba8Srgb,
-                usage: ImageUsages::COPY_DST | ImageUsages::SAMPLED,
-                mip_levels: 1,
-                samples: SampleCount::One,
-                aspects: ImageAspects::COLOR,
-            },
-        )?;
-        record_texture_upload(
+            let sampler = create_sampler(device, delta.options)?;
+            let binding = self
+                .texture_allocator
+                .sampled_image(0, image.rhi_view(), &sampler)?;
+            self.textures.insert(
+                id,
+                EguiTexture::Managed {
+                    image,
+                    binding,
+                    options: delta.options,
+                },
+            );
+            Origin3d::default()
+        };
+        let texture = self
+            .textures
+            .get_mut(&id)
+            .ok_or(invalid_resource(Ir::BadState))?;
+        let EguiTexture::Managed {
+            image,
+            binding,
+            options,
+        } = texture
+        else {
+            return Err(invalid_resource(Ir::BadState).into());
+        };
+        let pixels = match &delta.image {
+            ImageData::Color(image) => image
+                .pixels
+                .iter()
+                .flat_map(egui::Color32::to_array)
+                .collect::<Vec<_>>(),
+        };
+        device.upload_image(
             cmd,
-            &staging,
-            &image,
-            Origin3d::default(),
-            extent,
-            ImageState::Undefined,
-        )?;
-        let sampler = create_sampler(device, delta.options)?;
-        let binding = self
-            .texture_allocator
-            .sampled_image(0, image.rhi_view(), &sampler)?;
-        self.textures.insert(
-            id,
-            EguiTexture::Managed {
-                image,
-                binding,
-                options: delta.options,
+            &ImageUpload {
+                image: image.rhi_image(),
+                mip: 0,
+                origin,
                 extent,
+                pixels: &pixels,
             },
-        );
+        )?;
+        cmd.transition(
+            image.rhi_image(),
+            ImageState::ShaderRead(ShaderStages::FRAGMENT),
+            dirk_rhi::ImageSubresourceRange::WHOLE,
+        )?;
+        if *options != delta.options {
+            let sampler = create_sampler(device, delta.options)?;
+            *binding = self
+                .texture_allocator
+                .sampled_image(0, image.rhi_view(), &sampler)?;
+            *options = delta.options;
+        }
         Ok(())
     }
-}
-
-fn stage_texture(device: &RenderDevice, image: &ImageData) -> Result<(CustomBuffer, u32, u32)> {
-    let [width, height] = image.size();
-    let width = u32::try_from(width).map_err(|_| invalid_resource(Ir::OutOfRange))?;
-    let height = u32::try_from(height).map_err(|_| invalid_resource(Ir::OutOfRange))?;
-    let pixels = match image {
-        ImageData::Color(image) => image
-            .pixels
-            .iter()
-            .flat_map(egui::Color32::to_array)
-            .collect::<Vec<_>>(),
-    };
-    let staging = CustomBuffer::create_custom(
-        device,
-        u64::try_from(pixels.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?,
-        BufferUsages::COPY_SRC,
-        MemoryDomain::Upload,
-    )?;
-    staging.write_slice(&pixels)?;
-    Ok((staging, width, height))
 }
 
 struct EguiPaintData {
@@ -446,7 +417,6 @@ enum EguiTexture {
         image: Image,
         binding: DescriptorSet<EguiTextureSet>,
         options: TextureOptions,
-        extent: Extent3d,
     },
     User {
         binding: DescriptorSet<EguiTextureSet>,
@@ -626,68 +596,6 @@ fn ensure_buffer(
         MemoryDomain::Upload,
     )?);
     *capacity = new_capacity;
-    Ok(())
-}
-
-fn record_texture_upload(
-    cmd: &mut CommandBuffer,
-    staging: &CustomBuffer,
-    image: &Image,
-    origin: Origin3d,
-    extent: Extent3d,
-    old_state: ImageState,
-) -> Result<()> {
-    cmd.rhi_mut().barrier(&DependencyInfo {
-        memory_barriers: &[],
-        buffer_barriers: &[],
-        image_barriers: &[ImageBarrier {
-            image: image.rhi_image(),
-            old_state,
-            new_state: ImageState::CopyDestination,
-            aspects: ImageAspects::COLOR,
-            base_mip_level: 0,
-            mip_level_count: 1,
-            base_array_layer: 0,
-            array_layer_count: 1,
-            queue_transfer: None,
-        }],
-    })?;
-    let bytes_per_row = extent
-        .width
-        .checked_mul(4)
-        .and_then(NonZeroU32::new)
-        .ok_or(dirk_rhi::Error::from(Ir::OutOfRange))?;
-    cmd.rhi_mut().copy_buffer_to_image(
-        staging.rhi(),
-        image.rhi_image(),
-        &[BufferImageCopy {
-            buffer_offset: 0,
-            buffer_bytes_per_row: bytes_per_row,
-            buffer_rows_per_image: NonZeroU32::new(extent.height)
-                .ok_or(dirk_rhi::Error::from(Ir::OutOfRange))?,
-            mip_level: 0,
-            base_array_layer: 0,
-            array_layer_count: 1,
-            image_origin: origin,
-            extent,
-            aspects: ImageAspects::COLOR,
-        }],
-    )?;
-    cmd.rhi_mut().barrier(&DependencyInfo {
-        memory_barriers: &[],
-        buffer_barriers: &[],
-        image_barriers: &[ImageBarrier {
-            image: image.rhi_image(),
-            old_state: ImageState::CopyDestination,
-            new_state: ImageState::ShaderRead,
-            aspects: ImageAspects::COLOR,
-            base_mip_level: 0,
-            mip_level_count: 1,
-            base_array_layer: 0,
-            array_layer_count: 1,
-            queue_transfer: None,
-        }],
-    })?;
     Ok(())
 }
 

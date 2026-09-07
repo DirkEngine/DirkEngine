@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    RendererProperties, Result,
+    RendererProperties,
     resources::{
         ActiveRhi,
         command_pool::{CommandPool, Graphics, Transfer},
@@ -46,17 +46,17 @@ impl RenderDevice {
         rhi: Arc<ActiveRhi>,
         properties: RendererProperties,
         frame_counters: FrameCounters,
-    ) -> Result<Self> {
+    ) -> Self {
         let transfer_pool = CommandPool::build(&rhi);
         let graphics_pool = CommandPool::build(&rhi);
 
-        Ok(Self(Arc::new(RenderDeviceInner {
+        Self(Arc::new(RenderDeviceInner {
             transfer_pool,
             graphics_pool,
             properties,
             current_frame: frame_counters.current_frame,
             rhi,
-        })))
+        }))
     }
 
     pub fn current_frame(&self) -> usize {

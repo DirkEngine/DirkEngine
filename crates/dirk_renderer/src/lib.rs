@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::Context;
-use dirk_rhi::Extent3d;
+use dirk_rhi::{Extent3d, SampleCount};
 #[cfg(not(feature = "editor"))]
 use dirk_rhi::{ImageAspects, ImageCopy};
 
@@ -270,14 +270,12 @@ impl Renderer {
         .unwrap_or(SampleCount::One)
     }
 
-    fn build_frames(render_device: &RenderDevice) -> Result<[Frame; MAX_FRAMES_IN_FLIGHT]> {
-        let build_frame = || -> Result<Frame> {
-            Ok(Frame {
-                command_pool: CommandPool::build(&render_device.rhi),
-                completion: None,
-            })
+    fn build_frames(render_device: &RenderDevice) -> [Frame; MAX_FRAMES_IN_FLIGHT] {
+        let build_frame = || Frame {
+            command_pool: CommandPool::build(&render_device.rhi),
+            completion: None,
         };
-        Ok([build_frame()?, build_frame()?])
+        [build_frame(), build_frame()]
     }
 
     /// Renderer initialization. Creates the active backend and renderer objects.
@@ -336,9 +334,9 @@ impl Renderer {
             FrameCounters {
                 current_frame: current_frame.clone(),
             },
-        )?;
+        );
 
-        let frames = Self::build_frames(&render_device)?;
+        let frames = Self::build_frames(&render_device);
 
         let models = models::ModelRegistry::new(&render_device, event_manager)?;
         let scene_manager = SceneManager::init(&render_device)?;
@@ -927,7 +925,9 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        self.render_device.rhi.wait_idle().ok();
+        if let Err(error) = self.render_device.rhi.wait_idle() {
+            tracing::error!(%error, "waiting for GPU work during renderer shutdown failed");
+        }
         info!("cleaning up renderer");
     }
 }
