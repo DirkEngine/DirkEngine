@@ -47,6 +47,12 @@ pub enum Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 #[non_exhaustive]
 pub enum UnsupportedOperation {
+    /// Requested format is outside device support.
+    #[error("unsupported texture format {0:?}")]
+    TextureFormat(crate::TextureFormat),
+    /// Optional capability is unavailable.
+    #[error("unsupported capability: {0}")]
+    Capability(&'static str),
     /// Filtered scaling between images is unavailable.
     #[error("image blits are not supported by this backend")]
     ImageBlit,
@@ -131,5 +137,11 @@ impl InvalidResourceKind {
     #[must_use]
     pub fn with_detail(self, detail: impl Into<String>) -> InvalidResource {
         InvalidResource::new(self, detail)
+    }
+}
+
+impl From<InvalidResourceKind> for Error {
+    fn from(kind: InvalidResourceKind) -> Self {
+        kind.with_detail("invalid portable RHI operation").into()
     }
 }

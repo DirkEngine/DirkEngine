@@ -40,6 +40,10 @@ pub struct RhiCreateInfo<'a> {
 /// Selected device capabilities relevant to the renderer.
 #[derive(Clone, Copy, Debug)]
 pub struct Capabilities {
+    /// Resource and pipeline limits; requests exceeding these are rejected.
+    pub limits: crate::Limits,
+    /// Whether nonzero depth bias clamp is supported.
+    pub depth_bias_clamp: bool,
     /// Maximum supported texture anisotropy.
     pub max_sampler_anisotropy: u16,
     /// Minimum alignment for a uniform-buffer binding offset, in bytes.
@@ -59,6 +63,12 @@ pub struct Capabilities {
 /// Capabilities of one texture format on the selected device.
 #[derive(Clone, Copy, Debug)]
 pub struct FormatCapabilities {
+    /// Whether linear texture filtering is supported.
+    pub filterable: bool,
+    /// Whether attachment blending is supported.
+    pub blendable: bool,
+    /// Exact region blit support, queried before command recording.
+    pub blit: crate::BlitSupport,
     /// Image uses supported by the format.
     pub usages: ImageUsages,
 }
@@ -72,7 +82,11 @@ impl FormatCapabilities {
 }
 
 /// CPU-waitable submission completion primitive.
-pub trait Fence: Send + Sync + 'static {
+///
+/// # Safety
+/// Implementations must preserve native object lifetimes and obey the shared
+/// [`crate::Backend`] contract. Native operations are called with validated inputs.
+pub unsafe trait Fence: Send + Sync + 'static {
     /// Waits until this fence signals or `timeout_ns` nanoseconds elapse.
     ///
     /// Returns `Ok(())` once the fence is signaled, including for a fence
@@ -84,7 +98,11 @@ pub trait Fence: Send + Sync + 'static {
     ///
     /// Implementations must serialize native host access so concurrent safe
     /// calls cannot violate backend external-synchronization rules.
-    fn wait(&self, timeout_ns: u64) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn wait(&self, timeout_ns: u64) -> Result<()>;
     /// Resets this signaled fence for reuse.
     ///
     /// # Synchronization
@@ -93,11 +111,19 @@ pub trait Fence: Send + Sync + 'static {
     /// [`InvalidResourceKind::BadState`](crate::InvalidResourceKind::BadState)
     /// if a signaling submission has not completed, and must serialize reset
     /// against concurrent safe host operations.
-    fn reset(&self) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn reset(&self) -> Result<()>;
 }
 
 /// Monotonically increasing GPU synchronization primitive.
-pub trait TimelineSemaphore: Clone + Send + Sync + 'static {
+///
+/// # Safety
+/// Implementations must preserve native object lifetimes and obey the shared
+/// [`crate::Backend`] contract. Native operations are called with validated inputs.
+pub unsafe trait TimelineSemaphore: Clone + Send + Sync + 'static {
     /// Waits until this semaphore reaches `value` or `timeout_ns`
     /// nanoseconds elapse.
     ///
@@ -111,9 +137,17 @@ pub trait TimelineSemaphore: Clone + Send + Sync + 'static {
     /// Implementations must serialize host operations where required by the
     /// native backend. Cloned handles alias the same synchronization state and
     /// therefore share that serialization.
-    fn wait(&self, value: u64, timeout_ns: u64) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()>;
     /// Returns this semaphore's current value.
-    fn value(&self) -> Result<u64>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn value(&self) -> Result<u64>;
 }
 
 /// One queue submission, including presentation and timeline dependencies.
@@ -132,7 +166,7 @@ pub trait TimelineSemaphore: Clone + Send + Sync + 'static {
 /// view, lists it in `surface_frames`, submits, and finally presents it.
 /// Each frame must be submitted exactly once between acquisition and
 /// presentation; see [`Swapchain`] for the full lifecycle and pacing rules.
-pub struct Submission<'a, B: Backend> {
+pub struct Submission<'a, B: Api> {
     /// Recorded command buffers.
     pub command_buffers: &'a [&'a B::CommandBuffer],
     /// Acquired frames whose presentation dependencies are handled by this
@@ -150,10 +184,10 @@ pub struct Submission<'a, B: Backend> {
     pub fence: Option<&'a B::Fence>,
 }
 
-/// Backend implementation contract for the RHI.
-pub trait Backend: Sized + Send + Sync + 'static {
+/// Resource family used by borrowed portable descriptors.
+pub trait Api: Sized + Send + Sync + 'static {
     /// Buffer resource.
-    type Buffer: Buffer + Debug;
+    type Buffer: Clone + Debug + Send + Sync + 'static;
     /// Image resource, including externally-owned surface images.
     type Image: Clone + Debug + Send + Sync + 'static;
     /// Image view resource.
@@ -173,22 +207,44 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Command allocation pool.
     type CommandPool: Send + 'static;
     /// Recorded command buffer.
-    type CommandBuffer: CommandBuffer<Self>;
+    type CommandBuffer: Send + 'static;
     /// Submission completion fence.
-    type Fence: Fence;
+    type Fence: Send + Sync + 'static;
     /// Timeline synchronization primitive.
-    type TimelineSemaphore: TimelineSemaphore;
+    type TimelineSemaphore: Clone + Send + Sync + 'static;
     /// Presentation surface.
     /// Implementations must retain the [`crate::SurfaceTarget`] supplied at
     /// creation until the last surface handle is dropped.
     type Surface: Clone + Send + Sync + 'static;
     /// Presentation swapchain.
-    type Swapchain: Swapchain<Self>;
+    type Swapchain: Send + 'static;
     /// Acquired presentation frame.
-    type SurfaceFrame: SurfaceFrame<Self>;
+    type SurfaceFrame: Send + Sync + 'static;
+}
 
+/// Native operations underlying the safe [`crate::Rhi`].
+///
+/// # Safety
+/// Implementations must preserve descriptor semantics and native resource ownership.
+/// Native operations require valid descriptors, resources from this device, correct
+/// recording state, dependencies, and external host synchronization. The safe RHI
+/// establishes these obligations; native handles must not escape into safe callers.
+pub unsafe trait Backend:
+    Api<
+        Buffer: Buffer,
+        CommandBuffer: CommandBuffer<Self>,
+        Fence: Fence,
+        TimelineSemaphore: TimelineSemaphore,
+        Swapchain: Swapchain<Self>,
+        SurfaceFrame: SurfaceFrame<Self>,
+    >
+{
     /// Creates a backend and selects its physical device.
-    fn new(info: &RhiCreateInfo<'_>) -> Result<Self>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn new(info: &RhiCreateInfo<'_>) -> Result<Self>;
     /// Returns selected device capabilities.
     fn capabilities(&self) -> Capabilities;
     /// Returns the depth attachment formats supported by the selected
@@ -199,56 +255,134 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Returns sample counts supported by `format` for all requested `usages`.
     fn supported_sample_counts(&self, format: TextureFormat, usages: ImageUsages) -> SampleCounts;
     /// Waits until all submitted device work completes.
-    fn wait_idle(&self) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn wait_idle(&self) -> Result<()>;
     /// Reclaims resources whose GPU use has completed.
-    fn collect_garbage(&self) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn collect_garbage(&self) -> Result<()>;
 
     /// Creates a buffer.
-    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<Self::Buffer>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<Self::Buffer>;
     /// Creates an image.
-    fn create_image(&self, desc: &ImageDesc<'_>) -> Result<Self::Image>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_image(&self, desc: &ImageDesc<'_>) -> Result<Self::Image>;
     /// Creates a view of an image.
-    fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<Self::ImageView>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<Self::ImageView>;
     /// Creates a sampler.
-    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<Self::Sampler>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<Self::Sampler>;
     /// Creates a shader module.
-    fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<Self::Shader>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<Self::Shader>;
     /// Creates a bind-group layout.
-    fn create_bind_group_layout(
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<Self::BindGroupLayout>;
     /// Creates a bound resource group.
-    fn create_bind_group(&self, desc: &BindGroupDesc<'_, Self>) -> Result<Self::BindGroup>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_bind_group(&self, desc: &BindGroupDesc<'_, Self>) -> Result<Self::BindGroup>;
     /// Creates a pipeline layout.
-    fn create_pipeline_layout(
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_pipeline_layout(
         &self,
         desc: &PipelineLayoutDesc<'_, Self>,
     ) -> Result<Self::PipelineLayout>;
     /// Creates a graphics pipeline.
-    fn create_graphics_pipeline(
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_graphics_pipeline(
         &self,
         desc: &GraphicsPipelineDesc<'_, Self>,
     ) -> Result<Self::GraphicsPipeline>;
 
     /// Creates a command pool for a semantic queue.
-    fn create_command_pool(&self, queue: QueueType) -> Result<Self::CommandPool>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_command_pool(&self, queue: QueueType) -> Result<Self::CommandPool>;
     /// Allocates a command buffer from a pool.
-    fn create_command_buffer(&self, pool: &mut Self::CommandPool) -> Result<Self::CommandBuffer>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_command_buffer(
+        &self,
+        pool: &mut Self::CommandPool,
+    ) -> Result<Self::CommandBuffer>;
     /// Creates a fence.
-    fn create_fence(&self, signaled: bool) -> Result<Self::Fence>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_fence(&self, signaled: bool) -> Result<Self::Fence>;
     /// Creates a timeline semaphore.
-    fn create_timeline_semaphore(&self, initial_value: u64) -> Result<Self::TimelineSemaphore>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_timeline_semaphore(
+        &self,
+        initial_value: u64,
+    ) -> Result<Self::TimelineSemaphore>;
     /// Submits command buffers and synchronization to a queue.
     ///
     /// Implementations must serialize access to an aliased native queue,
     /// reject command buffers recorded for a different queue, reject duplicate
     /// or stale surface frames, and keep submitted native objects alive until
     /// execution completes.
-    fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()>;
 
     /// Creates a presentation surface.
-    fn create_surface(&self, info: SurfaceCreateInfo) -> Result<Self::Surface>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_surface(&self, info: SurfaceCreateInfo) -> Result<Self::Surface>;
     /// Creates a presentation swapchain.
-    fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<Self::Swapchain>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<Self::Swapchain>;
 }

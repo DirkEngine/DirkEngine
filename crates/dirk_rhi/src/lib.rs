@@ -1,11 +1,18 @@
-//! Backend-neutral access to graphics devices.
+//! Safe backend-neutral access to graphics devices.
+#![allow(
+    unsafe_code,
+    reason = "the shared safe layer enforces the native backend contract"
+)]
 //!
-//! The RHI sits below the renderer's render graph. It describes resources,
-//! commands and submissions in terms shared by explicit graphics APIs while
-//! leaving allocation, synchronization and presentation to each backend.
+//! [`Rhi`] owns portable validation, recording scopes, submission lifetimes, and
+//! host access exclusion. [`Backend`] is the unsafe native implementation contract;
+//! [`Api`] supplies the resource family used by borrowed descriptors.
 //!
-//! This crate defines and tests the portable contract. Concrete backend and
-//! renderer integration crates are intentionally layered on top of it.
+//! The render graph plans semantic resource dependencies. The RHI reconciles image
+//! states at submission and keeps native objects alive through actual completion.
+//! This first safe scheduler uses one native graphics queue for all semantic queue
+//! capabilities; independently executing queues and compute dispatch remain future work.
+//! Shader binaries are imported through an explicit unsafe trust boundary.
 
 mod backend;
 mod command;
@@ -16,7 +23,8 @@ mod resource;
 mod types;
 
 pub use backend::{
-    Backend, Capabilities, Fence, FormatCapabilities, RhiCreateInfo, Submission, TimelineSemaphore,
+    Api, Backend, Capabilities, Fence, FormatCapabilities, RhiCreateInfo, Submission,
+    TimelineSemaphore,
 };
 pub use command::{
     BufferBarrier, BufferCopy, BufferImageCopy, ColorAttachment, CommandBuffer, DependencyInfo,
@@ -46,3 +54,8 @@ pub use types::{
 
 #[cfg(test)]
 mod tests;
+
+mod access;
+pub use access::*;
+mod safe;
+pub use safe::*;

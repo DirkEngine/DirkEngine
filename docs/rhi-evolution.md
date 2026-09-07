@@ -2,7 +2,9 @@
 
 These notes preserve the architecture discussion of PR #77, informed by the
 Vulkan (#78), renderer integration (#79), Metal (#80), and egui (#82) PRs.
-They describe future work, not guarantees already implemented by the RHI.
+The implementation is now authorized. See [the runtime contract](rhi-runtime-contract.md)
+for the shared layer's implemented guarantees and explicit initial limitations.
+The remaining notes retain the design rationale and deferred scope.
 
 ## Proposed: ownership and safety architecture (review point 2)
 
@@ -10,8 +12,8 @@ Recording and render-pass scopes are agreed directions. The preferred direction
 is a shared safe RHI layer over unsafe native backend operations, combined with
 focused types for command lifecycles and queue capabilities. See
 [the proposed safety architecture](rhi-safety-architecture.md) for responsibilities,
-ownership, tradeoffs, and open decisions. Do not treat these design notes as
-authorization to implement a new layer, crate move, or extensive typestate system.
+ownership, tradeoffs, and open decisions. The user subsequently authorized implementation across the PR stack; broader
+features explicitly marked deferred remain outside this change.
 
 The design must assign responsibility for resource retention, GPU completion,
 host/GPU access exclusion, command-buffer reuse, and native external

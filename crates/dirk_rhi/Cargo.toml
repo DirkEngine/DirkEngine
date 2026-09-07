@@ -15,5 +15,10 @@ anyhow.workspace = true
 raw-window-handle.workspace = true
 thiserror.workspace = true
 
-[lints]
-workspace = true
+# This crate contains the audited boundary between safe wrappers and native operations.
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"

@@ -57,12 +57,12 @@ impl Default for TestBuffer {
     }
 }
 
-impl Buffer for TestBuffer {
+unsafe impl Buffer for TestBuffer {
     fn size(&self) -> u64 {
         u64::try_from(self.data.lock().map_or(0, |data| data.len())).unwrap_or(u64::MAX)
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    unsafe fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let range = self.checked_range(offset, data.len())?;
         self.data
             .lock()
@@ -71,7 +71,7 @@ impl Buffer for TestBuffer {
         Ok(())
     }
 
-    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
+    unsafe fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
         let range = self.checked_range(offset, data.len())?;
         data.copy_from_slice(
             &self
@@ -87,8 +87,8 @@ impl Buffer for TestBuffer {
 #[derive(Default)]
 struct TestFence(AtomicBool);
 
-impl Fence for TestFence {
-    fn wait(&self, _timeout_ns: u64) -> Result<()> {
+unsafe impl Fence for TestFence {
+    unsafe fn wait(&self, _timeout_ns: u64) -> Result<()> {
         if self.0.load(Ordering::Acquire) {
             Ok(())
         } else {
@@ -96,7 +96,7 @@ impl Fence for TestFence {
         }
     }
 
-    fn reset(&self) -> Result<()> {
+    unsafe fn reset(&self) -> Result<()> {
         self.0.store(false, Ordering::Release);
         Ok(())
     }
@@ -105,8 +105,8 @@ impl Fence for TestFence {
 #[derive(Clone, Default)]
 struct TestTimeline(Arc<AtomicU64>);
 
-impl TimelineSemaphore for TestTimeline {
-    fn wait(&self, value: u64, _timeout_ns: u64) -> Result<()> {
+unsafe impl TimelineSemaphore for TestTimeline {
+    unsafe fn wait(&self, value: u64, _timeout_ns: u64) -> Result<()> {
         if self.0.load(Ordering::Acquire) >= value {
             Ok(())
         } else {
@@ -114,7 +114,7 @@ impl TimelineSemaphore for TestTimeline {
         }
     }
 
-    fn value(&self) -> Result<u64> {
+    unsafe fn value(&self) -> Result<u64> {
         Ok(self.0.load(Ordering::Acquire))
     }
 }
@@ -173,48 +173,48 @@ impl HasWindowHandle for TestSurfaceTarget {
     }
 }
 
-impl CommandBuffer<TestBackend> for TestCommandBuffer {
+unsafe impl CommandBuffer<TestBackend> for TestCommandBuffer {
     fn queue_type(&self) -> QueueType {
         self.0
     }
 
-    fn begin(&mut self, _label: &str, _one_time_submit: bool) -> Result<()> {
+    unsafe fn begin(&mut self, _label: &str, _one_time_submit: bool) -> Result<()> {
         Ok(())
     }
 
-    fn end(&mut self) -> Result<()> {
+    unsafe fn end(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn begin_rendering(&mut self, _info: &RenderingInfo<'_, TestBackend>) -> Result<()> {
+    unsafe fn begin_rendering(&mut self, _info: &RenderingInfo<'_, TestBackend>) -> Result<()> {
         self.require_graphics("begin_rendering")
     }
 
-    fn end_rendering(&mut self) -> Result<()> {
+    unsafe fn end_rendering(&mut self) -> Result<()> {
         self.require_graphics("end_rendering")
     }
 
-    fn set_viewport(&mut self, _viewport: Viewport) -> Result<()> {
+    unsafe fn set_viewport(&mut self, _viewport: Viewport) -> Result<()> {
         self.require_graphics("set_viewport")
     }
 
-    fn set_scissor(&mut self, _scissor: Rect) -> Result<()> {
+    unsafe fn set_scissor(&mut self, _scissor: Rect) -> Result<()> {
         self.require_graphics("set_scissor")
     }
 
-    fn set_blend_constants(&mut self, _color: Color) -> Result<()> {
+    unsafe fn set_blend_constants(&mut self, _color: Color) -> Result<()> {
         self.require_graphics("set_blend_constants")
     }
 
-    fn set_stencil_reference(&mut self, _front: u32, _back: u32) -> Result<()> {
+    unsafe fn set_stencil_reference(&mut self, _front: u32, _back: u32) -> Result<()> {
         self.require_graphics("set_stencil_reference")
     }
 
-    fn bind_graphics_pipeline(&mut self, _pipeline: &TestResource) -> Result<()> {
+    unsafe fn bind_graphics_pipeline(&mut self, _pipeline: &TestResource) -> Result<()> {
         self.require_graphics("bind_graphics_pipeline")
     }
 
-    fn bind_groups(
+    unsafe fn bind_groups(
         &mut self,
         _layout: &TestResource,
         _first_group: u32,
@@ -224,11 +224,16 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         self.require_graphics("bind_groups")
     }
 
-    fn bind_vertex_buffer(&mut self, _slot: u32, _buffer: &TestBuffer, _offset: u64) -> Result<()> {
+    unsafe fn bind_vertex_buffer(
+        &mut self,
+        _slot: u32,
+        _buffer: &TestBuffer,
+        _offset: u64,
+    ) -> Result<()> {
         self.require_graphics("bind_vertex_buffer")
     }
 
-    fn bind_index_buffer(
+    unsafe fn bind_index_buffer(
         &mut self,
         _buffer: &TestBuffer,
         _offset: u64,
@@ -237,7 +242,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         self.require_graphics("bind_index_buffer")
     }
 
-    fn draw(
+    unsafe fn draw(
         &mut self,
         _vertex_count: u32,
         _instance_count: u32,
@@ -247,7 +252,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         self.require_graphics("draw")
     }
 
-    fn draw_indexed(
+    unsafe fn draw_indexed(
         &mut self,
         _index_count: u32,
         _instance_count: u32,
@@ -258,7 +263,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         self.require_graphics("draw_indexed")
     }
 
-    fn copy_buffer(
+    unsafe fn copy_buffer(
         &mut self,
         _src: &TestBuffer,
         _dst: &TestBuffer,
@@ -267,7 +272,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         Ok(())
     }
 
-    fn copy_buffer_to_image(
+    unsafe fn copy_buffer_to_image(
         &mut self,
         _src: &TestBuffer,
         _dst: &TestResource,
@@ -276,7 +281,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         Ok(())
     }
 
-    fn copy_image_to_buffer(
+    unsafe fn copy_image_to_buffer(
         &mut self,
         _src: &TestResource,
         _dst: &TestBuffer,
@@ -285,7 +290,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         Ok(())
     }
 
-    fn copy_image(
+    unsafe fn copy_image(
         &mut self,
         _src: &TestResource,
         _dst: &TestResource,
@@ -294,7 +299,7 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         Ok(())
     }
 
-    fn blit_image(
+    unsafe fn blit_image(
         &mut self,
         _src: &TestResource,
         _dst: &TestResource,
@@ -304,12 +309,12 @@ impl CommandBuffer<TestBackend> for TestCommandBuffer {
         Ok(())
     }
 
-    fn barrier(&mut self, _dependency: &DependencyInfo<'_, TestBackend>) -> Result<()> {
+    unsafe fn barrier(&mut self, _dependency: &DependencyInfo<'_, TestBackend>) -> Result<()> {
         Ok(())
     }
 }
 
-impl SurfaceFrame<TestBackend> for TestSurfaceFrame {
+unsafe impl SurfaceFrame<TestBackend> for TestSurfaceFrame {
     fn image(&self) -> &TestResource {
         &self.image
     }
@@ -331,7 +336,7 @@ impl SurfaceFrame<TestBackend> for TestSurfaceFrame {
     }
 }
 
-impl Swapchain<TestBackend> for TestSwapchain {
+unsafe impl Swapchain<TestBackend> for TestSwapchain {
     fn format(&self) -> SurfaceFormat {
         TEST_SURFACE_FORMAT
     }
@@ -344,7 +349,7 @@ impl Swapchain<TestBackend> for TestSwapchain {
         std::num::NonZeroU32::new(2).expect("test swapchain image count is nonzero")
     }
 
-    fn acquire(&mut self, timeout_ns: u64) -> Result<TestSurfaceFrame> {
+    unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<TestSurfaceFrame> {
         if timeout_ns == 0 {
             Err(Error::Timeout)
         } else {
@@ -352,7 +357,7 @@ impl Swapchain<TestBackend> for TestSwapchain {
         }
     }
 
-    fn discard(&mut self, frame: TestSurfaceFrame) -> Result<()> {
+    unsafe fn discard(&mut self, frame: TestSurfaceFrame) -> Result<()> {
         if frame.submitted.load(Ordering::Acquire) {
             Err(InvalidResourceKind::BadState
                 .with_detail("submitted surface frame cannot be discarded")
@@ -362,7 +367,7 @@ impl Swapchain<TestBackend> for TestSwapchain {
         }
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         _width: std::num::NonZeroU32,
         _height: std::num::NonZeroU32,
@@ -370,7 +375,7 @@ impl Swapchain<TestBackend> for TestSwapchain {
         Ok(())
     }
 
-    fn present(&mut self, frame: TestSurfaceFrame) -> Result<SurfaceStatus> {
+    unsafe fn present(&mut self, frame: TestSurfaceFrame) -> Result<SurfaceStatus> {
         if frame.submitted.load(Ordering::Acquire) {
             Ok(frame.status())
         } else {
@@ -381,7 +386,7 @@ impl Swapchain<TestBackend> for TestSwapchain {
     }
 }
 
-impl Backend for TestBackend {
+impl crate::Api for TestBackend {
     type Buffer = TestBuffer;
     type Image = TestResource;
     type ImageView = TestResource;
@@ -398,13 +403,17 @@ impl Backend for TestBackend {
     type Surface = TestResource;
     type Swapchain = TestSwapchain;
     type SurfaceFrame = TestSurfaceFrame;
+}
 
-    fn new(_info: &RhiCreateInfo<'_>) -> Result<Self> {
+unsafe impl Backend for TestBackend {
+    unsafe fn new(_info: &RhiCreateInfo<'_>) -> Result<Self> {
         Ok(Self)
     }
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            limits: crate::Limits::default(),
+            depth_bias_clamp: false,
             max_sampler_anisotropy: 1,
             min_uniform_buffer_offset_alignment: 256,
             min_storage_buffer_offset_alignment: 16,
@@ -421,6 +430,9 @@ impl Backend for TestBackend {
 
     fn format_capabilities(&self, _format: TextureFormat) -> FormatCapabilities {
         FormatCapabilities {
+            filterable: true,
+            blendable: true,
+            blit: crate::BlitSupport::Linear,
             usages: ImageUsages::ALL,
         }
     }
@@ -433,15 +445,15 @@ impl Backend for TestBackend {
         SampleCounts::ALL
     }
 
-    fn wait_idle(&self) -> Result<()> {
+    unsafe fn wait_idle(&self) -> Result<()> {
         Ok(())
     }
 
-    fn collect_garbage(&self) -> Result<()> {
+    unsafe fn collect_garbage(&self) -> Result<()> {
         Ok(())
     }
 
-    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<TestBuffer> {
+    unsafe fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<TestBuffer> {
         if desc.size == 0 {
             return Err(InvalidResourceKind::Empty
                 .with_detail("buffer size must be nonzero")
@@ -450,58 +462,67 @@ impl Backend for TestBackend {
         Ok(TestBuffer::new(desc.size))
     }
 
-    fn create_image(&self, _desc: &ImageDesc<'_>) -> Result<TestResource> {
+    unsafe fn create_image(&self, _desc: &ImageDesc<'_>) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_image_view(&self, _desc: &ImageViewDesc<'_, Self>) -> Result<TestResource> {
+    unsafe fn create_image_view(&self, _desc: &ImageViewDesc<'_, Self>) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_sampler(&self, _desc: &SamplerDesc<'_>) -> Result<TestResource> {
+    unsafe fn create_sampler(&self, _desc: &SamplerDesc<'_>) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_shader(&self, _desc: &ShaderDesc<'_>) -> Result<TestResource> {
+    unsafe fn create_shader(&self, _desc: &ShaderDesc<'_>) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_bind_group_layout(&self, _desc: &BindGroupLayoutDesc<'_>) -> Result<TestResource> {
+    unsafe fn create_bind_group_layout(
+        &self,
+        _desc: &BindGroupLayoutDesc<'_>,
+    ) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_bind_group(&self, _desc: &BindGroupDesc<'_, Self>) -> Result<TestResource> {
+    unsafe fn create_bind_group(&self, _desc: &BindGroupDesc<'_, Self>) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_pipeline_layout(&self, _desc: &PipelineLayoutDesc<'_, Self>) -> Result<TestResource> {
+    unsafe fn create_pipeline_layout(
+        &self,
+        _desc: &PipelineLayoutDesc<'_, Self>,
+    ) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_graphics_pipeline(
+    unsafe fn create_graphics_pipeline(
         &self,
         _desc: &GraphicsPipelineDesc<'_, Self>,
     ) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_command_pool(&self, queue: QueueType) -> Result<TestCommandPool> {
+    unsafe fn create_command_pool(&self, queue: QueueType) -> Result<TestCommandPool> {
         Ok(TestCommandPool(queue))
     }
 
-    fn create_command_buffer(&self, pool: &mut TestCommandPool) -> Result<TestCommandBuffer> {
+    unsafe fn create_command_buffer(
+        &self,
+        pool: &mut TestCommandPool,
+    ) -> Result<TestCommandBuffer> {
         Ok(TestCommandBuffer(pool.0))
     }
 
-    fn create_fence(&self, signaled: bool) -> Result<TestFence> {
+    unsafe fn create_fence(&self, signaled: bool) -> Result<TestFence> {
         Ok(TestFence(AtomicBool::new(signaled)))
     }
 
-    fn create_timeline_semaphore(&self, initial_value: u64) -> Result<TestTimeline> {
+    unsafe fn create_timeline_semaphore(&self, initial_value: u64) -> Result<TestTimeline> {
         Ok(TestTimeline(Arc::new(AtomicU64::new(initial_value))))
     }
 
-    fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
+    unsafe fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
         if submission
             .command_buffers
             .iter()
@@ -520,14 +541,20 @@ impl Backend for TestBackend {
                         .with_detail("surface frame was submitted more than once")
                 })?;
         }
+        if let Some(fence) = submission.fence {
+            fence.0.store(true, Ordering::Release);
+        }
+        for point in submission.signal_timelines {
+            point.semaphore.0.store(point.value, Ordering::Release);
+        }
         Ok(())
     }
 
-    fn create_surface(&self, _info: SurfaceCreateInfo) -> Result<TestResource> {
+    unsafe fn create_surface(&self, _info: SurfaceCreateInfo) -> Result<TestResource> {
         Ok(TestResource)
     }
 
-    fn create_swapchain(&self, _desc: &SwapchainDesc<'_, Self>) -> Result<TestSwapchain> {
+    unsafe fn create_swapchain(&self, _desc: &SwapchainDesc<'_, Self>) -> Result<TestSwapchain> {
         Ok(TestSwapchain)
     }
 }
@@ -631,34 +658,37 @@ fn semantic_helpers_build_expected_values() {
 
 #[test]
 fn resources_own_their_stateful_operations() -> Result<()> {
-    let buffer = TestBuffer::new(12);
-    assert_eq!(buffer.size(), 12);
-    buffer.write(8, &[1, 2, 3, 4])?;
-    assert!(matches!(
-        buffer.write(9, &[1, 2, 3, 4]),
-        Err(Error::InvalidResource(error))
-            if error.kind() == InvalidResourceKind::OutOfRange
-    ));
-    let mut bytes = [0; 4];
-    buffer.read(8, &mut bytes)?;
-    assert_eq!(bytes, [1, 2, 3, 4]);
+    // SAFETY: these tests use the in-memory native mock with owned test inputs.
+    unsafe {
+        let buffer = TestBuffer::new(12);
+        assert_eq!(buffer.size(), 12);
+        buffer.write(8, &[1, 2, 3, 4])?;
+        assert!(matches!(
+            buffer.write(9, &[1, 2, 3, 4]),
+            Err(Error::InvalidResource(error))
+                if error.kind() == InvalidResourceKind::OutOfRange
+        ));
+        let mut bytes = [0; 4];
+        buffer.read(8, &mut bytes)?;
+        assert_eq!(bytes, [1, 2, 3, 4]);
 
-    let fence = TestFence::default();
-    assert!(matches!(fence.wait(0), Err(Error::Timeout)));
-    fence.0.store(true, Ordering::Release);
-    fence.wait(u64::MAX)?;
-    assert!(fence.0.load(Ordering::Acquire));
-    fence.reset()?;
-    assert!(!fence.0.load(Ordering::Acquire));
-    assert!(matches!(fence.wait(u64::MAX), Err(Error::Timeout)));
+        let fence = TestFence::default();
+        assert!(matches!(fence.wait(0), Err(Error::Timeout)));
+        fence.0.store(true, Ordering::Release);
+        fence.wait(u64::MAX)?;
+        assert!(fence.0.load(Ordering::Acquire));
+        fence.reset()?;
+        assert!(!fence.0.load(Ordering::Acquire));
+        assert!(matches!(fence.wait(u64::MAX), Err(Error::Timeout)));
 
-    let timeline = TestTimeline::default();
-    assert!(matches!(timeline.wait(42, 0), Err(Error::Timeout)));
-    timeline.0.store(42, Ordering::Release);
-    timeline.wait(42, u64::MAX)?;
-    assert_eq!(timeline.value()?, 42);
-    assert!(matches!(timeline.wait(43, u64::MAX), Err(Error::Timeout)));
-    Ok(())
+        let timeline = TestTimeline::default();
+        assert!(matches!(timeline.wait(42, 0), Err(Error::Timeout)));
+        timeline.0.store(42, Ordering::Release);
+        timeline.wait(42, u64::MAX)?;
+        assert_eq!(timeline.value()?, 42);
+        assert!(matches!(timeline.wait(43, u64::MAX), Err(Error::Timeout)));
+        Ok(())
+    }
 }
 
 #[test]
@@ -723,95 +753,302 @@ fn stencil_state_defaults_to_keep_operations() {
 
 #[test]
 fn backend_contract_accepts_borrowed_descriptors_and_submission() -> Result<()> {
-    let backend = TestBackend::new(&RhiCreateInfo {
+    // SAFETY: these tests use the in-memory native mock with owned test inputs.
+    unsafe {
+        let backend = TestBackend::new(&RhiCreateInfo {
+            engine_name: "test",
+            engine_version: (0, 1, 0),
+            application_name: "test",
+            application_version: (0, 1, 0),
+            validation: false,
+            compatible_surface: None,
+        })?;
+        let mut pool = backend.create_command_pool(QueueType::Graphics)?;
+        let command_buffer = backend.create_command_buffer(&mut pool)?;
+        let command_buffers = [&command_buffer];
+        let surface_frames: &[&TestSurfaceFrame] = &[];
+        let wait_timelines: &[TimelinePoint<'_, TestBackend>] = &[];
+        let signal_timelines: &[TimelinePoint<'_, TestBackend>] = &[];
+        let submission = Submission {
+            command_buffers: &command_buffers,
+            surface_frames,
+            wait_timelines,
+            signal_timelines,
+            fence: None,
+        };
+
+        backend.submit(QueueType::Graphics, &submission)
+    }
+}
+
+#[test]
+fn command_buffers_report_incompatible_queue_commands() -> Result<()> {
+    // SAFETY: the in-memory mock deliberately supports validation of invalid calls.
+    unsafe {
+        let backend = TestBackend;
+        let mut pool = backend.create_command_pool(QueueType::Copy)?;
+        let mut command = backend.create_command_buffer(&mut pool)?;
+
+        let error = command
+            .draw(3, 1, 0, 0)
+            .expect_err("draws require a graphics command buffer");
+        assert!(matches!(
+            error,
+            Error::InvalidResource(error) if error.kind() == InvalidResourceKind::Mismatch
+        ));
+
+        let src = TestBuffer::new(1);
+        let dst = TestBuffer::new(1);
+        command.copy_buffer(
+            &src,
+            &dst,
+            &[BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: 1,
+            }],
+        )?;
+        Ok(())
+    }
+}
+
+#[test]
+fn surface_frames_reject_invalid_lifecycle_transitions() -> Result<()> {
+    // SAFETY: the in-memory mock deliberately supports validation of invalid calls.
+    unsafe {
+        let backend = TestBackend;
+        let mut swapchain = TestSwapchain;
+
+        let unsubmitted = swapchain.acquire(u64::MAX)?;
+        assert!(matches!(
+            swapchain.present(unsubmitted),
+            Err(Error::InvalidResource(error))
+                if error.kind() == InvalidResourceKind::BadState
+        ));
+
+        let submitted = swapchain.acquire(u64::MAX)?;
+        {
+            let frames = [&submitted];
+            let submission = Submission {
+                command_buffers: &[],
+                surface_frames: &frames,
+                wait_timelines: &[],
+                signal_timelines: &[],
+                fence: None,
+            };
+            backend.submit(QueueType::Graphics, &submission)?;
+            assert!(matches!(
+                backend.submit(QueueType::Graphics, &submission),
+                Err(Error::InvalidResource(error))
+                    if error.kind() == InvalidResourceKind::BadState
+            ));
+        }
+        assert!(matches!(
+            swapchain.discard(submitted),
+            Err(Error::InvalidResource(error))
+                if error.kind() == InvalidResourceKind::BadState
+        ));
+
+        assert!(matches!(swapchain.acquire(0), Err(Error::Timeout)));
+        assert_eq!(swapchain.image_count().get(), 2);
+        Ok(())
+    }
+}
+
+fn safe_device() -> Result<crate::Rhi<TestBackend>> {
+    crate::Rhi::new(&RhiCreateInfo {
         engine_name: "test",
         engine_version: (0, 1, 0),
         application_name: "test",
         application_version: (0, 1, 0),
         validation: false,
         compatible_surface: None,
-    })?;
-    let mut pool = backend.create_command_pool(QueueType::Graphics)?;
-    let command_buffer = backend.create_command_buffer(&mut pool)?;
-    let command_buffers = [&command_buffer];
-    let surface_frames: &[&TestSurfaceFrame] = &[];
-    let wait_timelines: &[TimelinePoint<'_, TestBackend>] = &[];
-    let signal_timelines: &[TimelinePoint<'_, TestBackend>] = &[];
-    let submission = Submission {
-        command_buffers: &command_buffers,
-        surface_frames,
-        wait_timelines,
-        signal_timelines,
-        fence: None,
-    };
-
-    backend.submit(QueueType::Graphics, &submission)
+    })
 }
 
 #[test]
-fn command_buffers_report_incompatible_queue_commands() -> Result<()> {
-    let backend = TestBackend;
-    let mut pool = backend.create_command_pool(QueueType::Copy)?;
-    let mut command = backend.create_command_buffer(&mut pool)?;
-
-    let error = command
-        .draw(3, 1, 0, 0)
-        .expect_err("draws require a graphics command buffer");
-    assert!(matches!(
-        error,
-        Error::InvalidResource(error) if error.kind() == InvalidResourceKind::Mismatch
-    ));
-
-    let src = TestBuffer::new(1);
-    let dst = TestBuffer::new(1);
-    command.copy_buffer(
+fn submitted_buffers_reject_host_access_until_completion() -> Result<()> {
+    let device = safe_device()?;
+    let src = device.create_buffer(&BufferDesc {
+        label: "upload",
+        size: 16,
+        usage: BufferUsages::COPY_SRC,
+        memory: crate::MemoryDomain::Upload,
+    })?;
+    let dst = device.create_buffer(&BufferDesc {
+        label: "destination",
+        size: 16,
+        usage: BufferUsages::COPY_DST,
+        memory: crate::MemoryDomain::Device,
+    })?;
+    src.write(0, &[1; 16])?;
+    let alias = src.clone();
+    let mut encoder = device.create_encoder::<crate::CopyQueue>("copy")?;
+    encoder.copy_buffer(
         &src,
         &dst,
         &[BufferCopy {
             src_offset: 0,
             dst_offset: 0,
-            size: 1,
+            size: 16,
         }],
     )?;
+    let completion = device
+        .queue::<crate::CopyQueue>()
+        .submit(vec![encoder.finish()?], &crate::SubmitInfo::default())?;
+    assert!(
+        matches!(alias.write(0,&[2;16]),Err(Error::InvalidResource(error)) if error.kind()==InvalidResourceKind::BadState)
+    );
+    drop(src);
+    drop(dst);
+    completion.wait(u64::MAX)?;
+    alias.write(0, &[3; 16])?;
     Ok(())
 }
 
 #[test]
-fn surface_frames_reject_invalid_lifecycle_transitions() -> Result<()> {
-    let backend = TestBackend;
-    let mut swapchain = TestSwapchain;
+fn dropping_completion_keeps_submission_owned_by_device() -> Result<()> {
+    let device = safe_device()?;
+    let src = device.create_buffer(&BufferDesc {
+        label: "upload",
+        size: 16,
+        usage: BufferUsages::COPY_SRC,
+        memory: crate::MemoryDomain::Upload,
+    })?;
+    let dst = device.create_buffer(&BufferDesc {
+        label: "destination",
+        size: 16,
+        usage: BufferUsages::COPY_DST,
+        memory: crate::MemoryDomain::Device,
+    })?;
+    let mut encoder = device.create_encoder::<crate::Graphics>("copy")?;
+    encoder.copy_buffer(
+        &src,
+        &dst,
+        &[BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: 16,
+        }],
+    )?;
+    drop(
+        device
+            .queue::<crate::Graphics>()
+            .submit(vec![encoder.finish()?], &crate::SubmitInfo::default())?,
+    );
+    assert!(src.write(0, &[0; 16]).is_err());
+    device.collect_garbage()?;
+    src.write(0, &[0; 16])?;
+    Ok(())
+}
 
-    let unsubmitted = swapchain.acquire(u64::MAX)?;
-    assert!(matches!(
-        swapchain.present(unsubmitted),
-        Err(Error::InvalidResource(error))
-            if error.kind() == InvalidResourceKind::BadState
-    ));
+#[test]
+fn safe_recording_rejects_foreign_resources_and_invalid_ranges() -> Result<()> {
+    let a = safe_device()?;
+    let b = safe_device()?;
+    let src = a.create_buffer(&BufferDesc {
+        label: "source",
+        size: 16,
+        usage: BufferUsages::COPY_SRC,
+        memory: crate::MemoryDomain::Upload,
+    })?;
+    let dst = b.create_buffer(&BufferDesc {
+        label: "foreign",
+        size: 16,
+        usage: BufferUsages::COPY_DST,
+        memory: crate::MemoryDomain::Device,
+    })?;
+    let mut encoder = a.create_encoder::<crate::CopyQueue>("copy")?;
+    assert!(
+        matches!(encoder.copy_buffer(&src,&dst,&[BufferCopy{src_offset:0,dst_offset:0,size:16}]),Err(Error::InvalidResource(error)) if error.kind()==InvalidResourceKind::ForeignInstance)
+    );
+    assert!(src.write(15, &[1; 2]).is_err());
+    Ok(())
+}
 
-    let submitted = swapchain.acquire(u64::MAX)?;
-    {
-        let frames = [&submitted];
-        let submission = Submission {
-            command_buffers: &[],
-            surface_frames: &frames,
-            wait_timelines: &[],
-            signal_timelines: &[],
-            fence: None,
-        };
-        backend.submit(QueueType::Graphics, &submission)?;
-        assert!(matches!(
-            backend.submit(QueueType::Graphics, &submission),
-            Err(Error::InvalidResource(error))
-                if error.kind() == InvalidResourceKind::BadState
-        ));
-    }
-    assert!(matches!(
-        swapchain.discard(submitted),
-        Err(Error::InvalidResource(error))
-            if error.kind() == InvalidResourceKind::BadState
-    ));
+#[test]
+fn forgotten_render_pass_cannot_be_finished_or_submitted() -> Result<()> {
+    let device = safe_device()?;
+    let image = device.create_image(&ImageDesc {
+        label: "target",
+        dimension: crate::ImageDimension::TwoD,
+        extent: Extent3d::new_2d(4, 4),
+        format: TextureFormat::Rgba8Unorm,
+        usage: ImageUsages::COLOR_ATTACHMENT,
+        mip_levels: 1,
+        array_layers: 1,
+        samples: SampleCount::One,
+    })?;
+    let view = device.view(&image)?;
+    let mut encoder = device.create_encoder::<crate::Graphics>("pass")?;
+    let attachments = [crate::ColorAttachment {
+        view: &view,
+        resolve: None,
+        load: crate::LoadOp::Clear(Color::BLACK),
+        store: crate::StoreOp::Store,
+    }];
+    let pass = encoder.begin_render_pass(&RenderingInfo {
+        label: "pass",
+        width: 4,
+        height: 4,
+        layer_count: 1,
+        color_attachments: &attachments,
+        depth_attachment: None,
+    })?;
+    std::mem::forget(pass);
+    assert!(encoder.finish().is_err());
+    Ok(())
+}
 
-    assert!(matches!(swapchain.acquire(0), Err(Error::Timeout)));
-    assert_eq!(swapchain.image_count().get(), 2);
+#[test]
+fn padded_upload_rows_preserve_pixels_and_zero_padding() -> Result<()> {
+    let caps = safe_device()?.capabilities();
+    let layout = crate::UploadLayout::new(3, 2, TextureFormat::Rgba8Unorm, caps)?;
+    let pixels: Vec<u8> = (0..24).collect();
+    let padded = layout.pack(&pixels)?;
+    assert_eq!(padded.len(), 512);
+    assert_eq!(&padded[..12], &pixels[..12]);
+    assert_eq!(&padded[256..268], &pixels[12..]);
+    assert!(
+        padded[12..256]
+            .iter()
+            .chain(padded[268..].iter())
+            .all(|byte| *byte == 0)
+    );
+    assert!(layout.pack(&pixels[..23]).is_err());
+    Ok(())
+}
+
+#[test]
+fn shader_binding_maps_agree_for_sparse_stage_specific_layouts() -> Result<()> {
+    use crate::{BindGroupLayoutEntry as E, BindingType as T, ShaderStage, ShaderStages as S};
+    let vertex_only = E {
+        binding: 7,
+        ty: T::UniformBuffer {
+            dynamic_offset: false,
+        },
+        visibility: S::VERTEX,
+    };
+    let fragment_only = E {
+        binding: 13,
+        ty: T::SampledImage,
+        visibility: S::FRAGMENT,
+    };
+    let shared = E {
+        binding: 42,
+        ty: T::StorageBuffer {
+            read_only: true,
+            dynamic_offset: false,
+        },
+        visibility: S::VERTEX | S::FRAGMENT,
+    };
+    let merged = [vertex_only, fragment_only, shared];
+    let fragment = [fragment_only, shared];
+    let pipeline = crate::BindingMap::new(&[&[], &merged], ShaderStage::Fragment)?;
+    let shader = crate::BindingMap::new(&[&[], &fragment], ShaderStage::Fragment)?;
+    assert_eq!(pipeline.get(1, 13), shader.get(1, 13));
+    assert_eq!(pipeline.get(1, 42), shader.get(1, 42));
+    assert_eq!(pipeline.get(1, 7), None);
+    assert_eq!(pipeline.get(1, 42).and_then(|s| s.buffer), Some(0));
     Ok(())
 }

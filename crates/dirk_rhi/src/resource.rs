@@ -1,12 +1,16 @@
 use crate::{
-    AddressMode, Backend, BindingType, BlendFactor, BlendOp, BufferUsages, ColorWrites, CompareOp,
+    AddressMode, Api, BindingType, BlendFactor, BlendOp, BufferUsages, ColorWrites, CompareOp,
     CullMode, Extent3d, FilterMode, FrontFace, ImageAspects, ImageDimension, ImageUsages,
     ImageViewType, MemoryDomain, PrimitiveTopology, Result, SampleCount, ShaderStage, ShaderStages,
     StencilOp, TextureFormat, VertexBufferLayout, error::ShaderLanguage,
 };
 
-/// Backend buffer with host access when its memory domain permits it.
-pub trait Buffer: Clone + Send + Sync + 'static {
+/// Api buffer with host access when its memory domain permits it.
+///
+/// # Safety
+/// Implementations must preserve native object lifetimes and obey the shared
+/// [`crate::Backend`] contract. Native operations are called with validated inputs.
+pub unsafe trait Buffer: Clone + Send + Sync + 'static {
     /// Returns this buffer's allocation size in bytes.
     fn size(&self) -> u64;
 
@@ -27,7 +31,11 @@ pub trait Buffer: Clone + Send + Sync + 'static {
     /// Implementations present host-visible memory as coherent from the
     /// caller's perspective; any cache flush or invalidation required by the
     /// native memory type is handled inside the backend.
-    fn write(&self, offset: u64, data: &[u8]) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn write(&self, offset: u64, data: &[u8]) -> Result<()>;
 
     /// Reads bytes from this buffer's host-visible memory.
     ///
@@ -39,7 +47,11 @@ pub trait Buffer: Clone + Send + Sync + 'static {
     ///
     /// Returns an error when the buffer is not host-readable, the range is out
     /// of bounds, or GPU work still owns the range.
-    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn read(&self, offset: u64, data: &mut [u8]) -> Result<()>;
 }
 
 /// Buffer allocation description.
@@ -78,7 +90,7 @@ pub struct ImageDesc<'a> {
 }
 
 /// Image-view description.
-pub struct ImageViewDesc<'a, B: Backend> {
+pub struct ImageViewDesc<'a, B: Api> {
     /// Debug label.
     pub label: &'a str,
     /// Image being viewed.
@@ -188,7 +200,7 @@ pub struct BindGroupLayoutDesc<'a> {
 }
 
 /// Resource written into a bind group.
-pub enum BindingResource<'a, B: Backend> {
+pub enum BindingResource<'a, B: Api> {
     /// Byte range of a buffer.
     ///
     /// The offset is a static base offset. Layout entries with dynamic offsets
@@ -213,7 +225,7 @@ pub enum BindingResource<'a, B: Backend> {
 }
 
 /// One bind-group resource entry.
-pub struct BindGroupEntry<'a, B: Backend> {
+pub struct BindGroupEntry<'a, B: Api> {
     /// Binding index from the layout.
     pub binding: u32,
     /// Bound resource.
@@ -221,7 +233,7 @@ pub struct BindGroupEntry<'a, B: Backend> {
 }
 
 /// Bind-group creation description.
-pub struct BindGroupDesc<'a, B: Backend> {
+pub struct BindGroupDesc<'a, B: Api> {
     /// Debug label.
     pub label: &'a str,
     /// Layout implemented by the bind group.
@@ -231,7 +243,7 @@ pub struct BindGroupDesc<'a, B: Backend> {
 }
 
 /// Pipeline-layout description.
-pub struct PipelineLayoutDesc<'a, B: Backend> {
+pub struct PipelineLayoutDesc<'a, B: Api> {
     /// Debug label.
     pub label: &'a str,
     /// Bind-group layouts ordered by set/group index.
@@ -340,7 +352,7 @@ pub struct ColorTargetState {
 }
 
 /// Graphics pipeline description.
-pub struct GraphicsPipelineDesc<'a, B: Backend> {
+pub struct GraphicsPipelineDesc<'a, B: Api> {
     /// Debug label.
     pub label: &'a str,
     /// Pipeline resource layout.

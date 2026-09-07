@@ -1,8 +1,8 @@
 # Proposed RHI safety architecture
 
-Status: preferred direction from the architecture discussion, saved for further
-design work. This document does not describe the current implementation or
-authorize a refactor. See [the RHI evolution notes](rhi-evolution.md) for the
+Status: implementation authorized across the PR stack. This document preserves
+the design discussion; [the runtime contract](rhi-runtime-contract.md) describes
+the shared layer and its initial limitations. See [the RHI evolution notes](rhi-evolution.md) for the
 related agreed work.
 
 ## Direction

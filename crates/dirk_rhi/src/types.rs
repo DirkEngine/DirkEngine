@@ -560,30 +560,8 @@ pub enum AddressMode {
     MirrorRepeat,
 }
 
-/// Current semantic use of an image.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum ImageState {
-    /// Contents are unavailable.
-    #[default]
-    Undefined,
-    /// Copy source.
-    CopySource,
-    /// Copy destination.
-    CopyDestination,
-    /// Shader-readable image.
-    ShaderRead,
-    /// Shader-readable and writable image.
-    ShaderWrite,
-    /// Color attachment.
-    ColorAttachment,
-    /// Depth/stencil attachment.
-    DepthStencilAttachment,
-    /// Depth/stencil attachment with depth writes and stencil updates
-    /// disabled, permitting simultaneous sampling.
-    DepthStencilAttachmentReadOnly,
-    /// Ready for presentation.
-    Present,
-}
+/// Semantic image access; shared with buffer dependency descriptions.
+pub type ImageState = crate::ResourceAccess;
 
 /// Rectangle in framebuffer coordinates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

@@ -4,7 +4,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
-use crate::{Backend, Extent3d, ImageUsages, PresentMode, Result, SurfaceFormat, SurfaceStatus};
+use crate::{Api, Extent3d, ImageUsages, PresentMode, Result, SurfaceFormat, SurfaceStatus};
 
 /// Owned provider of the native handles needed by a presentation surface.
 ///
@@ -65,7 +65,7 @@ impl fmt::Debug for SurfaceCreateInfo {
 }
 
 /// Presentation swapchain description.
-pub struct SwapchainDesc<'a, B: Backend> {
+pub struct SwapchainDesc<'a, B: Api> {
     /// Debug label.
     pub label: &'a str,
     /// Presentation surface.
@@ -98,7 +98,11 @@ pub struct SwapchainDesc<'a, B: Backend> {
 /// [`Self::discard`](Swapchain::discard) safely abandons it. Implementations
 /// must reject duplicate submission and presentation without an intervening
 /// submission.
-pub trait Swapchain<B: Backend> {
+///
+/// # Safety
+/// Implementations must preserve native object lifetimes and obey the shared
+/// [`crate::Backend`] contract. Native operations are called with validated inputs.
+pub unsafe trait Swapchain<B: Api> {
     /// Format selected for images in the current swapchain generation.
     fn format(&self) -> SurfaceFormat;
     /// Dimensions selected for images in the current swapchain generation.
@@ -121,7 +125,11 @@ pub trait Swapchain<B: Backend> {
     /// Returns an error when the surface is unavailable or must be recreated.
     /// Returns [`crate::Error::Timeout`] when `timeout_ns` expires before an
     /// image becomes available. `u64::MAX` requests an indefinite wait.
-    fn acquire(&mut self, timeout_ns: u64) -> Result<B::SurfaceFrame>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<B::SurfaceFrame>;
     /// Releases a frame acquired from this swapchain without presenting it.
     ///
     /// A backend without native acquired-image release may recreate or
@@ -132,7 +140,11 @@ pub trait Swapchain<B: Backend> {
     ///
     /// Returns an error when the frame is foreign, already submitted, or
     /// cannot be safely abandoned.
-    fn discard(&mut self, frame: B::SurfaceFrame) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn discard(&mut self, frame: B::SurfaceFrame) -> Result<()>;
     /// Reconfigures this swapchain for a new extent.
     ///
     /// All frames previously acquired from this swapchain must have been
@@ -142,7 +154,11 @@ pub trait Swapchain<B: Backend> {
     /// # Errors
     ///
     /// Returns an error when recreation fails.
-    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()>;
     /// Presents a frame previously acquired from this swapchain.
     ///
     /// The frame's rendering submission must have listed the frame in
@@ -155,7 +171,11 @@ pub trait Swapchain<B: Backend> {
     ///
     /// Returns [`crate::InvalidResourceKind::BadState`] when the frame was not
     /// submitted exactly once, or another error when presentation fails.
-    fn present(&mut self, frame: B::SurfaceFrame) -> Result<SurfaceStatus>;
+    ///
+    /// # Safety
+    /// The caller must uphold the native [`crate::Backend`] contract for this
+    /// operation, including resource lifetime, valid state, and host synchronization.
+    unsafe fn present(&mut self, frame: B::SurfaceFrame) -> Result<SurfaceStatus>;
 }
 
 /// A presentation image acquired from a backend swapchain.
@@ -166,7 +186,11 @@ pub trait Swapchain<B: Backend> {
 /// recording or submitting them after the frame lifecycle ends must return
 /// [`crate::InvalidResourceKind::BadState`].
 #[must_use = "an acquired surface frame must be submitted and presented or explicitly discarded"]
-pub trait SurfaceFrame<B: Backend> {
+///
+/// # Safety
+/// Implementations must preserve native object lifetimes and obey the shared
+/// [`crate::Backend`] contract. Native operations are called with validated inputs.
+pub unsafe trait SurfaceFrame<B: Api> {
     /// Image backing this frame.
     fn image(&self) -> &B::Image;
     /// Default view of [`Self::image`].
