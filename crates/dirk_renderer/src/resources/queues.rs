@@ -9,14 +9,12 @@ use crate::{physical_device::QueueFamilyIndices, resources::sync::Fence};
 pub enum QueueType {
     Graphics,
     Transfer,
-    Compute,
 }
 
 pub struct Queues {
     device: Device,
     swapchain_loader: swapchain::Device,
     graphics: vk::Queue,
-    compute: vk::Queue,
     transfer: vk::Queue,
     present: vk::Queue,
 }
@@ -28,7 +26,6 @@ impl Queues {
             swapchain_loader: swapchain::Device::new(instance, device),
             graphics: unsafe { device.get_device_queue(indices.graphics, 0) },
             present: unsafe { device.get_device_queue(indices.present, 0) },
-            compute: unsafe { device.get_device_queue(indices.compute, 0) },
             transfer: unsafe { device.get_device_queue(indices.transfer, 0) },
         }
     }
@@ -40,7 +37,6 @@ impl Queues {
         fence: Option<&Fence>,
     ) -> VkResult<()> {
         let queue = match queue_type {
-            QueueType::Compute => self.compute,
             QueueType::Graphics => self.graphics,
             QueueType::Transfer => self.transfer,
         };
@@ -53,7 +49,6 @@ impl Queues {
     #[cfg_attr(not(feature = "editor"), allow(unused))]
     pub fn raw(&self, queue_type: QueueType) -> vk::Queue {
         match queue_type {
-            QueueType::Compute => self.compute,
             QueueType::Graphics => self.graphics,
             QueueType::Transfer => self.transfer,
         }
