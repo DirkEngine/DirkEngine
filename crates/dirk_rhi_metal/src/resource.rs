@@ -583,6 +583,15 @@ impl MetalGraphicsPipeline {
         context: &Arc<Context>,
         desc: &GraphicsPipelineDesc<'_, crate::MetalBackend>,
     ) -> Result<Self> {
+        // Metal always enables restart for indexed triangle strips.
+        if desc.raster.topology == dirk_rhi::PrimitiveTopology::TriangleStrip
+            && desc.primitive_restart.is_none()
+        {
+            return Err(dirk_rhi::UnsupportedOperation::Capability(
+                "disabling primitive restart for Metal triangle strips",
+            )
+            .into());
+        }
         for object in [&desc.layout.context, &desc.vertex.context] {
             require_context(context, object)?;
         }
