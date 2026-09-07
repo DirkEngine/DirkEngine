@@ -1052,3 +1052,42 @@ fn shader_binding_maps_agree_for_sparse_stage_specific_layouts() -> Result<()> {
     assert_eq!(pipeline.get(1, 42).and_then(|s| s.buffer), Some(0));
     Ok(())
 }
+
+#[test]
+fn primitive_restart_requires_strip_topology() -> Result<()> {
+    let device = safe_device()?;
+    let layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+        label: "empty",
+        bind_group_layouts: &[],
+    })?;
+    // The test backend does not execute shader code.
+    let vertex = unsafe {
+        device.create_shader(&ShaderDesc {
+            label: "vertex",
+            stage: crate::ShaderStage::Vertex,
+            entry: "main",
+            source: crate::ShaderSource::SpirV(&[]),
+        })?
+    };
+    let mut desc = GraphicsPipelineDesc {
+        label: "restart",
+        layout: &layout,
+        vertex: &vertex,
+        fragment: None,
+        vertex_buffers: &[],
+        raster: crate::RasterState::default(),
+        color_targets: &[],
+        depth: None,
+        depth_bias: crate::DepthBiasState::default(),
+        primitive_restart: Some(crate::IndexFormat::Uint16),
+        alpha_to_coverage: false,
+        samples: SampleCount::One,
+    };
+    assert!(device.create_graphics_pipeline(&desc).is_err());
+    desc.raster.topology = crate::PrimitiveTopology::LineList;
+    assert!(device.create_graphics_pipeline(&desc).is_err());
+    desc.raster.topology = crate::PrimitiveTopology::TriangleStrip;
+    let pipeline = device.create_graphics_pipeline(&desc)?;
+    assert_eq!(pipeline.info().primitive_restart, desc.primitive_restart);
+    Ok(())
+}

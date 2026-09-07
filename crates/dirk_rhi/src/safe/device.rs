@@ -492,6 +492,11 @@ impl<B: Backend> Rhi<B> {
                 return Err(Ir::Mismatch.into());
             }
         }
+        if desc.primitive_restart.is_some()
+            && desc.raster.topology != crate::PrimitiveTopology::TriangleStrip
+        {
+            return Err(Ir::Mismatch.into());
+        }
         let caps = self.capabilities();
         if desc.color_targets.len() > caps.limits.max_color_attachments as usize
             || desc.vertex_buffers.len() > caps.limits.max_vertex_buffers as usize
@@ -540,6 +545,7 @@ impl<B: Backend> Rhi<B> {
                 layout: desc.layout.clone(),
                 vertex: desc.vertex.clone(),
                 fragment: desc.fragment.cloned(),
+                primitive_restart: desc.primitive_restart,
                 colors: desc.color_targets.to_vec(),
                 depth: desc.depth,
                 samples: desc.samples,

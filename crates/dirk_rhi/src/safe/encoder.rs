@@ -1020,6 +1020,16 @@ impl<B: Backend> RenderPass<'_, B> {
     ) -> Result<()> {
         self.ready()?;
         let (buffer, offset, format) = self.index.as_ref().ok_or(Ir::BadState)?;
+        if self
+            .pipeline
+            .as_ref()
+            .ok_or(Ir::BadState)?
+            .info()
+            .primitive_restart
+            .is_some_and(|required| required != *format)
+        {
+            return Err(Ir::Mismatch.into());
+        }
         let bytes = if *format == crate::IndexFormat::Uint16 {
             2
         } else {

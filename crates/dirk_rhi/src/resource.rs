@@ -371,8 +371,10 @@ pub struct GraphicsPipelineDesc<'a, B: Api> {
     pub depth: Option<DepthState>,
     /// Depth bias applied to rasterized primitives.
     pub depth_bias: DepthBiasState,
-    /// Index format whose maximum value restarts triangle or line strips.
-    /// `None` disables primitive restart.
+    /// Index format whose maximum value restarts triangle strips.
+    /// Only valid with `TriangleStrip`; indexed draws must use this format.
+    /// `None` disables primitive restart. Backends that cannot disable strip
+    /// restart reject that pipeline configuration.
     pub primitive_restart: Option<crate::IndexFormat>,
     /// Whether fragment alpha is used as the multisample coverage mask.
     pub alpha_to_coverage: bool,

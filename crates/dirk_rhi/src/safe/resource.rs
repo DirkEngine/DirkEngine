@@ -104,6 +104,8 @@ pub struct PipelineMetadata<B: Backend> {
     pub vertex: GpuShader<B>,
     /// Optional fragment module.
     pub fragment: Option<GpuShader<B>>,
+    /// Required index format when strip restart is enabled.
+    pub primitive_restart: Option<crate::IndexFormat>,
     /// Color targets.
     pub colors: Vec<crate::ColorTargetState>,
     /// Depth/stencil state.
