@@ -9,6 +9,9 @@ pub mod swapchain;
 pub mod sync;
 pub mod upload;
 
+#[cfg(target_vendor = "apple")]
+pub(crate) type ActiveBackend = dirk_rhi_metal::MetalBackend;
+#[cfg(not(target_vendor = "apple"))]
 pub(crate) type ActiveBackend = dirk_rhi_vulkan::VulkanBackend;
 pub(crate) type ActiveRhi = dirk_rhi::Rhi<ActiveBackend>;
 

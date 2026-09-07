@@ -1,0 +1,32 @@
+[package]
+name = "dirk_rhi_metal"
+description = "Metal backend for DirkEngine's render hardware interface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+dirk_rhi.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+anyhow.workspace = true
+core-graphics-types = { version = "0.2", default-features = false }
+metal = "0.33"
+raw-window-handle.workspace = true
+raw-window-metal = "1.1"
+
+# Metal's Objective-C calls are contained in this backend and exposed through
+# safe RHI resource and command types.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"

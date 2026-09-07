@@ -12,6 +12,11 @@ use rspirv_reflect::rspirv::{
     dr::{Instruction, Loader, Module as SpirvModule, Operand},
     spirv::{Decoration, ExecutionModel, Op, StorageClass},
 };
+use spirv_cross2::{
+    Compiler, Module,
+    compile::msl::{BindTarget, CompilerOptions, ResourceBinding},
+    targets::Msl,
+};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -22,10 +27,18 @@ fn main() -> anyhow::Result<()> {
     dirk_build::configure_platform();
 
     println!("cargo:rustc-check-cfg=cfg(validation)");
+    println!("cargo:rustc-check-cfg=cfg(renderer_editor)");
 
     let profile = std::env::var("PROFILE").unwrap_or_default();
     if profile != "release" {
         println!("cargo:rustc-cfg=validation");
+    }
+    // The current editor adapter consumes Vulkan-native handles. Keep Apple
+    // builds on the normal presentation path even when CI enables all features.
+    if std::env::var_os("CARGO_FEATURE_EDITOR").is_some()
+        && std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
+    {
+        println!("cargo:rustc-cfg=renderer_editor");
     }
 
     build_shaders()?;
@@ -55,7 +68,12 @@ fn build_shaders() -> anyhow::Result<()> {
     for (entrypoint, source_path) in modules {
         let output_path = out_dir.join(format!("{entrypoint}.spv"));
         fs::copy(&source_path, &output_path)?;
-        shaders.push(reflect_shader(&entrypoint, &source_path)?);
+        let shader = reflect_shader(&entrypoint, &source_path)?;
+        fs::write(
+            out_dir.join(format!("{entrypoint}.metal")),
+            shader.compile_msl(&source_path)?,
+        )?;
+        shaders.push(shader);
     }
     shaders.sort_by(|left, right| left.entrypoint.cmp(&right.entrypoint));
     fs::write(
@@ -75,12 +93,131 @@ struct ReflectedShader {
     vertex_inputs: Vec<VertexInput>,
 }
 
+impl ReflectedShader {
+    /// Translates this shader and applies the same compact slot allocation as
+    /// the Metal pipeline layout.
+    fn compile_msl(&self, spv_path: &Path) -> anyhow::Result<String> {
+        let bytes = fs::read(spv_path).with_context(|| {
+            format!(
+                "failed to read SPIR-V for MSL translation of `{}`",
+                self.entrypoint
+            )
+        })?;
+        if !bytes.len().is_multiple_of(4) {
+            bail!(
+                "SPIR-V for shader `{}` is not a whole number of words",
+                self.entrypoint
+            );
+        }
+        let words = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect::<Vec<_>>();
+        let mut compiler = Compiler::<Msl>::new(Module::from_words(&words)).with_context(|| {
+            format!(
+                "failed to initialize MSL translation for shader `{}`",
+                self.entrypoint
+            )
+        })?;
+        let stage = match self.stage {
+            ShaderStage::Vertex => spirv_cross2::spirv::ExecutionModel::Vertex,
+            ShaderStage::Fragment => spirv_cross2::spirv::ExecutionModel::Fragment,
+            ShaderStage::Compute => spirv_cross2::spirv::ExecutionModel::GLCompute,
+        };
+
+        let rhi_stage = match self.stage {
+            ShaderStage::Vertex => dirk_rhi::ShaderStage::Vertex,
+            ShaderStage::Fragment => dirk_rhi::ShaderStage::Fragment,
+            ShaderStage::Compute => dirk_rhi::ShaderStage::Compute,
+        };
+        let groups = self
+            .set_layouts
+            .iter()
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(DescriptorBinding::rhi_entry)
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let groups = groups.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let map = dirk_rhi::BindingMap::new(&groups, rhi_stage)?;
+        map.validate(dirk_rhi::Limits::default())?;
+        for (set, bindings) in self.set_layouts.iter().enumerate() {
+            let set = u32::try_from(set).context("shader descriptor set index exceeds u32")?;
+            for binding in bindings {
+                let slots = map
+                    .get(set, binding.binding)
+                    .ok_or_else(|| anyhow!("shader binding is absent from its stage map"))?;
+                let target = BindTarget {
+                    buffer: slots.buffer.unwrap_or(0),
+                    texture: slots.texture.unwrap_or(0),
+                    sampler: slots.sampler.unwrap_or(0),
+                    count: None,
+                };
+                compiler
+                    .add_resource_binding(
+                        stage,
+                        ResourceBinding::from_qualified(set, binding.binding),
+                        &target,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to remap shader `{}` set {set}, binding {} for Metal",
+                            self.entrypoint, binding.binding
+                        )
+                    })?;
+            }
+        }
+
+        let mut options = CompilerOptions::default();
+        options.common.flip_vertex_y = true;
+        compiler
+            .compile(&options)
+            .map(|source| source.to_string())
+            .with_context(|| format!("failed to translate shader `{}` to MSL", self.entrypoint))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DescriptorBinding {
     binding: u32,
     descriptor_type: &'static str,
     descriptor_count: u32,
     stage_flags: &'static str,
+}
+
+impl DescriptorBinding {
+    fn rhi_entry(&self) -> anyhow::Result<dirk_rhi::BindGroupLayoutEntry> {
+        if self.descriptor_count != 1 {
+            bail!("descriptor arrays are not supported by the RHI");
+        }
+        let ty = match self.descriptor_type {
+            "UNIFORM_BUFFER" => dirk_rhi::BindingType::UniformBuffer {
+                dynamic_offset: false,
+            },
+            "STORAGE_BUFFER" => dirk_rhi::BindingType::StorageBuffer {
+                read_only: false,
+                dynamic_offset: false,
+            },
+            "COMBINED_IMAGE_SAMPLER" => dirk_rhi::BindingType::SampledImage,
+            "STORAGE_IMAGE" => dirk_rhi::BindingType::StorageImage,
+            other => bail!("unsupported RHI binding type {other}"),
+        };
+        let visibility = match self.stage_flags {
+            "VERTEX" => dirk_rhi::ShaderStages::VERTEX,
+            "FRAGMENT" => dirk_rhi::ShaderStages::FRAGMENT,
+            "COMPUTE" => dirk_rhi::ShaderStages::COMPUTE,
+            other => bail!("unsupported shader visibility {other}"),
+        };
+        Ok(dirk_rhi::BindGroupLayoutEntry {
+            binding: self.binding,
+            ty,
+            visibility,
+        })
+    }
 }
 
 #[derive(Debug)]

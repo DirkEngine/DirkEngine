@@ -58,7 +58,7 @@ impl Viewport {
         &self.settings
     }
 
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     pub fn output_rhi_view(&self) -> &crate::resources::ActiveImageView {
         self.output.rhi_view()
     }
@@ -100,7 +100,7 @@ impl Viewport {
         }
     }
 
-    #[cfg(not(feature = "editor"))]
+    #[cfg(not(renderer_editor))]
     pub fn import_after_render(&self) -> ImportedTexture {
         let mut import = self.import();
         import.initial_state = Self::shader_read_state().state;

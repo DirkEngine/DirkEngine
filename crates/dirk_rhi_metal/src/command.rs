@@ -1,0 +1,589 @@
+use std::sync::Arc;
+
+use dirk_rhi::{
+    BufferCopy, BufferImageCopy, Color, CommandBuffer as RhiCommandBuffer, DependencyInfo,
+    FilterMode, ImageBlit, ImageCopy, IndexFormat, InvalidResourceKind as Ir, Origin3d, QueueType,
+    Rect, RenderingInfo, Result, Viewport,
+};
+use metal::{
+    MTLBlitOption, MTLClearColor, MTLOrigin, MTLScissorRect, MTLSize, MTLViewport,
+    RenderPassDescriptor,
+};
+use parking_lot::Mutex;
+
+use crate::{
+    MetalBackend,
+    backend::Context,
+    convert,
+    resource::{
+        MetalBindGroup, MetalBuffer, MetalGraphicsPipeline, MetalImage, MetalPipelineLayout,
+        OwnedBinding, VERTEX_BUFFER_BASE, require_context,
+    },
+};
+
+/// Lightweight Metal command allocator for one semantic queue.
+pub struct MetalCommandPool {
+    pub(crate) context: Arc<Context>,
+    pub(crate) queue: QueueType,
+}
+
+struct IndexBinding {
+    buffer: MetalBuffer,
+    offset: u64,
+    format: IndexFormat,
+}
+
+struct CommandState {
+    command: Option<metal::CommandBuffer>,
+    render: Option<metal::RenderCommandEncoder>,
+    pipeline: Option<MetalGraphicsPipeline>,
+    index: Option<IndexBinding>,
+    ended: bool,
+    submitted: bool,
+}
+
+/// Metal command buffer implementing the backend-neutral recording contract.
+pub struct MetalCommandBuffer {
+    pub(crate) context: Arc<Context>,
+    pub(crate) queue: QueueType,
+    state: Mutex<CommandState>,
+}
+
+impl MetalCommandBuffer {
+    pub(crate) fn create(pool: &MetalCommandPool) -> Self {
+        Self {
+            context: pool.context.clone(),
+            queue: pool.queue,
+            state: Mutex::new(CommandState {
+                command: None,
+                render: None,
+                pipeline: None,
+                index: None,
+                ended: false,
+                submitted: false,
+            }),
+        }
+    }
+
+    pub(crate) fn command_for_submit(&self) -> Result<metal::CommandBuffer> {
+        let mut state = self.state.lock();
+        if !state.ended || state.submitted {
+            return Err(Ir::BadState.into());
+        }
+        state.submitted = true;
+        state
+            .command
+            .clone()
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))
+    }
+
+    fn with_blit(&mut self, encode: impl FnOnce(&metal::BlitCommandEncoderRef)) -> Result<()> {
+        let state = self.state.get_mut();
+        if state.render.is_some() {
+            return Err(Ir::BadState.into());
+        }
+        let command = state.command.as_ref().ok_or(Ir::BadState)?;
+        let encoder = command.new_blit_command_encoder();
+        encode(encoder);
+        encoder.end_encoding();
+        Ok(())
+    }
+}
+
+unsafe impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
+    fn queue_type(&self) -> QueueType {
+        self.queue
+    }
+
+    unsafe fn begin(&mut self, label: &str, _one_time_submit: bool) -> Result<()> {
+        let state = self.state.get_mut();
+        if state.command.is_some() && !state.submitted {
+            return Err(Ir::BadState.into());
+        }
+        let command = self
+            .context
+            .queue(self.queue)
+            .new_command_buffer()
+            .to_owned();
+        command.set_label(label);
+        *state = CommandState {
+            command: Some(command),
+            render: None,
+            pipeline: None,
+            index: None,
+            ended: false,
+            submitted: false,
+        };
+        Ok(())
+    }
+
+    unsafe fn end(&mut self) -> Result<()> {
+        let state = self.state.get_mut();
+        if state.render.is_some() {
+            return Err(dirk_rhi::Error::from(Ir::BadState));
+        }
+        if state.command.is_none() || state.ended {
+            return Err(Ir::BadState.into());
+        }
+        state.ended = true;
+        Ok(())
+    }
+
+    unsafe fn begin_rendering(&mut self, info: &RenderingInfo<'_, MetalBackend>) -> Result<()> {
+        let state = self.state.get_mut();
+        if state.render.is_some() {
+            return Err(Ir::BadState.into());
+        }
+        let command = state
+            .command
+            .as_ref()
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
+        let descriptor = RenderPassDescriptor::new();
+        for (index, attachment) in info.color_attachments.iter().enumerate() {
+            require_context(&self.context, &attachment.view.context)?;
+            let metal_attachment = descriptor
+                .color_attachments()
+                .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
+                .ok_or_else(|| dirk_rhi::Error::from(Ir::OutOfRange))?;
+            metal_attachment.set_texture(Some(&attachment.view.raw));
+            metal_attachment.set_load_action(convert::load(&attachment.load));
+            if let dirk_rhi::LoadOp::Clear(color) = attachment.load {
+                metal_attachment.set_clear_color(MTLClearColor::new(
+                    f64::from(color.r),
+                    f64::from(color.g),
+                    f64::from(color.b),
+                    f64::from(color.a),
+                ));
+            }
+            if let Some(resolve) = attachment.resolve {
+                require_context(&self.context, &resolve.context)?;
+                metal_attachment.set_resolve_texture(Some(&resolve.raw));
+            }
+            metal_attachment.set_store_action(convert::store(
+                attachment.store,
+                attachment.resolve.is_some(),
+            ));
+        }
+        if let Some(attachment) = &info.depth_attachment {
+            require_context(&self.context, &attachment.view.context)?;
+            if attachment
+                .view
+                .aspects
+                .contains(dirk_rhi::ImageAspects::DEPTH)
+            {
+                let depth = descriptor
+                    .depth_attachment()
+                    .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
+                depth.set_texture(Some(&attachment.view.raw));
+                depth.set_load_action(convert::load(&attachment.depth_load));
+                depth.set_store_action(convert::store(attachment.depth_store, false));
+                if let dirk_rhi::LoadOp::Clear(value) = attachment.depth_load {
+                    depth.set_clear_depth(f64::from(value));
+                }
+            }
+            if attachment
+                .view
+                .aspects
+                .contains(dirk_rhi::ImageAspects::STENCIL)
+            {
+                let stencil = descriptor
+                    .stencil_attachment()
+                    .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
+                stencil.set_texture(Some(&attachment.view.raw));
+                stencil.set_load_action(convert::load(&attachment.stencil_load));
+                stencil.set_store_action(convert::store(attachment.stencil_store, false));
+                if let dirk_rhi::LoadOp::Clear(value) = attachment.stencil_load {
+                    stencil.set_clear_stencil(value);
+                }
+            }
+        }
+        let encoder = command.new_render_command_encoder(descriptor).to_owned();
+        encoder.set_label(info.label);
+        state.render = Some(encoder);
+        Ok(())
+    }
+
+    unsafe fn end_rendering(&mut self) -> Result<()> {
+        let encoder = self
+            .state
+            .get_mut()
+            .render
+            .take()
+            .ok_or_else(|| dirk_rhi::Error::from(Ir::BadState))?;
+        encoder.end_encoding();
+        Ok(())
+    }
+
+    unsafe fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_viewport(MTLViewport {
+            originX: f64::from(viewport.x),
+            originY: f64::from(viewport.y),
+            width: f64::from(viewport.width),
+            height: f64::from(viewport.height),
+            znear: f64::from(viewport.min_depth),
+            zfar: f64::from(viewport.max_depth),
+        });
+        Ok(())
+    }
+
+    unsafe fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_scissor_rect(MTLScissorRect {
+            x: u64::try_from(scissor.x.max(0)).unwrap_or(0),
+            y: u64::try_from(scissor.y.max(0)).unwrap_or(0),
+            width: u64::from(scissor.width),
+            height: u64::from(scissor.height),
+        });
+        Ok(())
+    }
+
+    unsafe fn set_blend_constants(&mut self, color: Color) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_blend_color(color.r, color.g, color.b, color.a);
+        Ok(())
+    }
+
+    unsafe fn set_stencil_reference(&mut self, front: u32, back: u32) -> Result<()> {
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_stencil_front_back_reference_value(front, back);
+        Ok(())
+    }
+
+    unsafe fn draw(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) -> Result<()> {
+        let state = self.state.get_mut();
+        let (Some(encoder), Some(pipeline)) = (&state.render, &state.pipeline) else {
+            return Err(Ir::BadState.into());
+        };
+        encoder.draw_primitives_instanced_base_instance(
+            pipeline.topology,
+            u64::from(first_vertex),
+            u64::from(vertex_count),
+            u64::from(instance_count),
+            u64::from(first_instance),
+        );
+        Ok(())
+    }
+
+    unsafe fn bind_graphics_pipeline(&mut self, pipeline: &MetalGraphicsPipeline) -> Result<()> {
+        require_context(&self.context, &pipeline.context)?;
+        let state = self.state.get_mut();
+        let encoder = state.render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_render_pipeline_state(&pipeline.raw);
+        encoder.set_front_facing_winding(pipeline.winding);
+        encoder.set_cull_mode(pipeline.cull);
+        if let Some(depth) = &pipeline.depth {
+            encoder.set_depth_stencil_state(depth);
+        }
+        encoder.set_depth_bias(
+            pipeline.depth_bias.constant_factor,
+            pipeline.depth_bias.slope_factor,
+            pipeline.depth_bias.clamp,
+        );
+        state.pipeline = Some(pipeline.clone());
+        Ok(())
+    }
+
+    unsafe fn bind_groups(
+        &mut self,
+        layout: &MetalPipelineLayout,
+        first_group: u32,
+        groups: &[&MetalBindGroup],
+        dynamic_offsets: &[u64],
+    ) -> Result<()> {
+        require_context(&self.context, &layout.context)?;
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        let mut dynamic_offsets = dynamic_offsets.iter();
+        for (relative, group) in groups.iter().enumerate() {
+            let relative = u32::try_from(relative).map_err(|_| Ir::OutOfRange)?;
+            let group_index = first_group.checked_add(relative).ok_or(Ir::OutOfRange)?;
+            let expected_layout = layout
+                .layouts
+                .get(group_index as usize)
+                .ok_or(Ir::Mismatch)?;
+            if !Arc::ptr_eq(&group.layout.context, &expected_layout.context)
+                || group.layout.entries.as_ref() != expected_layout.entries.as_ref()
+            {
+                return Err(Ir::Mismatch.into());
+            }
+            for (binding, resource) in group.entries.iter() {
+                let vertex = layout.vertex.get(group_index, *binding);
+                let fragment = layout.fragment.get(group_index, *binding);
+                match resource {
+                    OwnedBinding::Buffer { buffer, offset } => {
+                        let dynamic = expected_layout
+                            .entries
+                            .iter()
+                            .find(|entry| entry.binding == *binding)
+                            .is_some_and(|entry| match entry.ty {
+                                dirk_rhi::BindingType::UniformBuffer { dynamic_offset }
+                                | dirk_rhi::BindingType::StorageBuffer { dynamic_offset, .. } => {
+                                    dynamic_offset
+                                }
+                                _ => false,
+                            });
+                        let offset = if dynamic {
+                            offset
+                                .checked_add(*dynamic_offsets.next().ok_or(Ir::Mismatch)?)
+                                .ok_or(Ir::OutOfRange)?
+                        } else {
+                            *offset
+                        };
+                        if let Some(index) = vertex.and_then(|slots| slots.buffer) {
+                            encoder.set_vertex_buffer(u64::from(index), Some(&buffer.raw), offset);
+                        }
+                        if let Some(index) = fragment.and_then(|slots| slots.buffer) {
+                            encoder.set_fragment_buffer(
+                                u64::from(index),
+                                Some(&buffer.raw),
+                                offset,
+                            );
+                        }
+                    }
+                    OwnedBinding::SampledImage { view, sampler } => {
+                        Self::bind_texture(encoder, vertex, fragment, &view.raw);
+                        if let Some(index) = vertex.and_then(|slots| slots.sampler) {
+                            encoder.set_vertex_sampler_state(u64::from(index), Some(&sampler.raw));
+                        }
+                        if let Some(index) = fragment.and_then(|slots| slots.sampler) {
+                            encoder
+                                .set_fragment_sampler_state(u64::from(index), Some(&sampler.raw));
+                        }
+                    }
+                    OwnedBinding::StorageImage(view) => {
+                        Self::bind_texture(encoder, vertex, fragment, &view.raw);
+                    }
+                }
+            }
+        }
+        if dynamic_offsets.next().is_some() {
+            return Err(Ir::Mismatch.into());
+        }
+        Ok(())
+    }
+
+    unsafe fn bind_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer: &MetalBuffer,
+        offset: u64,
+    ) -> Result<()> {
+        require_context(&self.context, &buffer.context)?;
+        let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
+        encoder.set_vertex_buffer(
+            VERTEX_BUFFER_BASE + u64::from(slot),
+            Some(&buffer.raw),
+            offset,
+        );
+        Ok(())
+    }
+
+    unsafe fn bind_index_buffer(
+        &mut self,
+        buffer: &MetalBuffer,
+        offset: u64,
+        format: IndexFormat,
+    ) -> Result<()> {
+        require_context(&self.context, &buffer.context)?;
+        self.state.get_mut().index = Some(IndexBinding {
+            buffer: buffer.clone(),
+            offset,
+            format,
+        });
+        Ok(())
+    }
+
+    unsafe fn draw_indexed(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) -> Result<()> {
+        let state = self.state.get_mut();
+        let (Some(encoder), Some(pipeline), Some(index)) =
+            (&state.render, &state.pipeline, &state.index)
+        else {
+            return Err(Ir::BadState.into());
+        };
+        let index_size = match index.format {
+            IndexFormat::Uint16 => 2,
+            IndexFormat::Uint32 => 4,
+        };
+        encoder.draw_indexed_primitives_instanced_base_instance(
+            pipeline.topology,
+            u64::from(index_count),
+            convert::index(index.format),
+            &index.buffer.raw,
+            index.offset + u64::from(first_index) * index_size,
+            u64::from(instance_count),
+            i64::from(vertex_offset),
+            u64::from(first_instance),
+        );
+        Ok(())
+    }
+
+    unsafe fn copy_buffer(
+        &mut self,
+        src: &MetalBuffer,
+        dst: &MetalBuffer,
+        regions: &[BufferCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
+        self.with_blit(|encoder| {
+            for region in regions {
+                encoder.copy_from_buffer(
+                    &src.raw,
+                    region.src_offset,
+                    &dst.raw,
+                    region.dst_offset,
+                    region.size,
+                );
+            }
+        })
+    }
+
+    unsafe fn copy_buffer_to_image(
+        &mut self,
+        src: &MetalBuffer,
+        dst: &MetalImage,
+        regions: &[BufferImageCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
+        self.with_blit(|encoder| {
+            for region in regions {
+                let bytes_per_row = u64::from(region.buffer_bytes_per_row.get());
+                let bytes_per_image = bytes_per_row * u64::from(region.buffer_rows_per_image.get());
+                for layer in 0..region.array_layer_count {
+                    encoder.copy_from_buffer_to_texture(
+                        &src.raw,
+                        region.buffer_offset + bytes_per_image * u64::from(layer),
+                        bytes_per_row,
+                        bytes_per_image,
+                        size(region.extent),
+                        &dst.raw,
+                        u64::from(region.base_array_layer + layer),
+                        u64::from(region.mip_level),
+                        origin(region.image_origin),
+                        MTLBlitOption::empty(),
+                    );
+                }
+            }
+        })
+    }
+
+    unsafe fn copy_image_to_buffer(
+        &mut self,
+        src: &MetalImage,
+        dst: &MetalBuffer,
+        regions: &[BufferImageCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
+        self.with_blit(|encoder| {
+            for region in regions {
+                let bytes_per_row = u64::from(region.buffer_bytes_per_row.get());
+                let bytes_per_image = bytes_per_row * u64::from(region.buffer_rows_per_image.get());
+                for layer in 0..region.array_layer_count {
+                    encoder.copy_from_texture_to_buffer(
+                        &src.raw,
+                        u64::from(region.base_array_layer + layer),
+                        u64::from(region.mip_level),
+                        origin(region.image_origin),
+                        size(region.extent),
+                        &dst.raw,
+                        region.buffer_offset + bytes_per_image * u64::from(layer),
+                        bytes_per_row,
+                        bytes_per_image,
+                        MTLBlitOption::empty(),
+                    );
+                }
+            }
+        })
+    }
+
+    unsafe fn copy_image(
+        &mut self,
+        src: &MetalImage,
+        dst: &MetalImage,
+        regions: &[ImageCopy],
+    ) -> Result<()> {
+        require_context(&self.context, &src.context)?;
+        require_context(&self.context, &dst.context)?;
+        self.with_blit(|encoder| {
+            for region in regions {
+                for layer in 0..region.array_layer_count {
+                    encoder.copy_from_texture(
+                        &src.raw,
+                        u64::from(region.src_base_array_layer + layer),
+                        u64::from(region.src_mip_level),
+                        origin(region.src_origin),
+                        size(region.extent),
+                        &dst.raw,
+                        u64::from(region.dst_base_array_layer + layer),
+                        u64::from(region.dst_mip_level),
+                        origin(region.dst_origin),
+                    );
+                }
+            }
+        })
+    }
+
+    unsafe fn blit_image(
+        &mut self,
+        _src: &MetalImage,
+        _dst: &MetalImage,
+        _regions: &[ImageBlit],
+        _filter: FilterMode,
+    ) -> Result<()> {
+        // Whole-chain generate_mipmaps does not implement an exact-region blit.
+        Err(dirk_rhi::UnsupportedOperation::ImageBlit.into())
+    }
+
+    unsafe fn barrier(&mut self, _dependency: &DependencyInfo<'_, MetalBackend>) -> Result<()> {
+        // Resources use Metal's tracked hazard mode, so encoder boundaries are
+        // sufficient for render-graph transitions and visibility.
+        Ok(())
+    }
+}
+
+impl MetalCommandBuffer {
+    fn bind_texture(
+        encoder: &metal::RenderCommandEncoderRef,
+        vertex: Option<dirk_rhi::BindingSlots>,
+        fragment: Option<dirk_rhi::BindingSlots>,
+        texture: &metal::TextureRef,
+    ) {
+        if let Some(index) = vertex.and_then(|slots| slots.texture) {
+            encoder.set_vertex_texture(u64::from(index), Some(texture));
+        }
+        if let Some(index) = fragment.and_then(|slots| slots.texture) {
+            encoder.set_fragment_texture(u64::from(index), Some(texture));
+        }
+    }
+}
+
+fn origin(value: Origin3d) -> MTLOrigin {
+    MTLOrigin {
+        x: u64::from(value.x),
+        y: u64::from(value.y),
+        z: u64::from(value.z),
+    }
+}
+
+fn size(value: dirk_rhi::Extent3d) -> MTLSize {
+    MTLSize {
+        width: u64::from(value.width),
+        height: u64::from(value.height),
+        depth: u64::from(value.depth),
+    }
+}

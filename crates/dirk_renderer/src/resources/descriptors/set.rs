@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-#[cfg(feature = "editor")]
+#[cfg(renderer_editor)]
 use ash::vk;
 
 use crate::resources::{ActiveBindGroup, descriptors::layouts::SetLayout};
@@ -26,7 +26,7 @@ impl<L: SetLayout> DescriptorSet<L> {
     }
 
     /// Returns the Vulkan descriptor set used by the temporary editor adapter.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     pub fn raw(&self) -> vk::DescriptorSet {
         // SAFETY: legacy egui descriptors are retained by the viewport until frame completion.
         unsafe { self.inner.native() }.raw()

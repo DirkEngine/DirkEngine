@@ -12,12 +12,12 @@ pub struct CommandPool<Q: QueueKind> {
     rhi: Arc<ActiveRhi>,
     kind: PhantomData<Q>,
     // Temporary compatibility allocator for egui-ash's synchronous uploads.
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     legacy: dirk_rhi_vulkan::VulkanCommandPool,
 }
 impl<Q: QueueKind> CommandPool<Q> {
     #[cfg_attr(
-        not(feature = "editor"),
+        not(renderer_editor),
         allow(
             clippy::unnecessary_wraps,
             reason = "the editor compatibility allocator is fallible; keep one feature-independent signature"
@@ -26,7 +26,7 @@ impl<Q: QueueKind> CommandPool<Q> {
     pub fn build(rhi: &Arc<ActiveRhi>) -> Result<Self> {
         Ok(Self {
             rhi: rhi.clone(), kind: PhantomData,
-            #[cfg(feature = "editor")]
+            #[cfg(renderer_editor)]
             // SAFETY: renderer initialization is exclusive; egui waits for its uploads.
             legacy: unsafe { dirk_rhi::Backend::create_command_pool(rhi.native(), dirk_rhi::QueueType::Graphics)? },
         })
@@ -44,7 +44,7 @@ impl<Q: QueueKind> CommandPool<Q> {
             .wait(u64::MAX)?;
         Ok(())
     }
-    #[cfg(feature = "editor")]
+    #[cfg(renderer_editor)]
     pub fn raw(&self) -> ash::vk::CommandPool {
         self.legacy.raw()
     }
