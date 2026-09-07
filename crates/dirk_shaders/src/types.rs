@@ -17,3 +17,15 @@ pub struct ProxyUbo {
     /// The model matrix of the proxy
     pub model: glam::Mat4,
 }
+
+/// Per-frame parameters used to place egui vertices in clip space.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EguiUbo {
+    /// Logical editor dimensions in points.
+    pub screen_size: glam::Vec2,
+    /// One when the render target performs sRGB encoding, zero otherwise.
+    pub output_is_srgb: f32,
+    /// Uniform alignment padding.
+    pub padding: f32,
+}

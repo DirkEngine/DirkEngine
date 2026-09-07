@@ -64,6 +64,13 @@ impl<Type: BuffType> Buffer<Type> {
         &self.inner
     }
 
+    pub fn write_slice<T: Copy>(&self, data: &[T]) -> Result<()> {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
+        self.inner.write(0, bytes)?;
+        Ok(())
+    }
+
     pub fn upload_slice<T: Copy>(device: &RenderDevice, data: &[T]) -> Result<Self> {
         let size = u64::try_from(size_of_val(data))
             .map_err(|_| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange))?;
@@ -73,9 +80,7 @@ impl<Type: BuffType> Buffer<Type> {
             BufferUsages::COPY_SRC,
             MemoryDomain::Upload,
         )?;
-        let bytes =
-            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), size_of_val(data)) };
-        staging.rhi().write(0, bytes)?;
+        staging.write_slice(data)?;
 
         let output = Self::create_custom(
             device,

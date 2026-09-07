@@ -1,15 +1,12 @@
 # `DirkEngine`
 
-A Vulkan Game Engine in Rust
+A portable game engine in Rust
 
-On macOS, the Vulkan renderer uses `MoltenVK` through the Vulkan loader. The
-engine does not install or bundle a Vulkan SDK or `MoltenVK`; provide the
-Vulkan loader and configure it to discover the `MoltenVK` ICD at runtime. Native
-Metal support is available through `dirk_rhi_metal`; the engine renderer remains
-on the Vulkan backend while its typed pipeline and egui compatibility seams are
-migrated.
+The renderer uses native Metal on Apple platforms and Vulkan elsewhere through
+the shared `dirk_rhi` contract. Scene rendering, presentation, and the egui
+editor painter follow the same backend-neutral path.
 
-Debug builds also enable `VK_LAYER_KHRONOS_validation`; make its Vulkan layer
+Vulkan debug builds enable `VK_LAYER_KHRONOS_validation`; make its layer
 manifest discoverable with `VK_ADD_LAYER_PATH` (or a standard Vulkan layer
 search path).
 

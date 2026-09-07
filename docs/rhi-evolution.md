@@ -106,5 +106,34 @@ completion tokens. Graph imports derive allocation metadata from their images;
 semantic dependencies carry shader visibility and the RHI's subresource range.
 Asset uploads share aligned staging code with the UI path further up the stack.
 Backends without exact linear blits use CPU sRGB mip generation for assets.
-The legacy Vulkan egui adapter remains an explicitly unsafe native integration
-until its replacement in the egui PR.
+The egui PR replaces the legacy Vulkan adapter with scoped portable drawing
+and uses the same upload helper for complete and partial texture updates.
+
+## Relationship to the existing renderer plans
+
+The plans in `.agents/plans/` remain future work, with these updated boundaries:
+
+- Buffer tracking (02) adds graph declarations and scheduling. The shared RHI
+  already validates byte ranges, host/GPU exclusion, and conservative hazards;
+  uploads before graph execution no longer bypass synchronization safety.
+- Multi-queue scheduling (04) requires a shared-RHI scheduler extension, including
+  ownership handoffs and completion across independent queues. Typed queues and
+  timeline values alone are insufficient; the initial safe scheduler aliases
+  all queue kinds to graphics and reports no independent queues.
+- Transient allocation (03) needs backend allocation/placement interfaces and
+  completion-aware aliasing. Current image factories own their allocations.
+- A resource registry (05) should own renderer identity, history, and content
+  validity. Shared-RHI submission tracking already reconciles image states
+  across recordings; a registry must not create a competing native-state owner.
+- Compute (01), indirect draws, binding arrays, and GPU-dependent CI remain
+  deferred complete features, as agreed in the scope discussion.
+
+## Validation of this migration
+
+On the development Mac, strict workspace Clippy and nextest pass with default,
+no-default, and all features. The shared RHI also has compile-fail scope tests.
+A temporary offscreen Metal probe verified upload/readback pixels, render-pass
+clear pixels, completion, and timeline ordering. The editor ran 1,342 frames on
+Metal and shut down cleanly. These checks do not establish Vulkan runtime
+correctness or cross-backend visual equivalence; the native conformance suite
+and GPU CI remain deferred.

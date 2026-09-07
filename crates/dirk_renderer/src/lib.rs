@@ -10,19 +10,17 @@ use std::{
 };
 
 use anyhow::Context;
-#[cfg(renderer_editor)]
-use ash::vk;
-use dirk_rhi::Extent3d;
-#[cfg(not(renderer_editor))]
+use dirk_rhi::{Extent3d, SampleCount};
+#[cfg(not(feature = "editor"))]
 use dirk_rhi::{ImageAspects, ImageCopy};
 
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
 use dirk_platform::{PlatformEvent, WindowEvent, WindowId};
 use dirk_player::PlayerId;
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 use dirk_player::PlayerInputSender;
-#[cfg(not(renderer_editor))]
+#[cfg(not(feature = "editor"))]
 use dirk_player::PlayerPresentationAssignments;
 
 use dirk_universe::{Entity, Universe, UniverseBuilder, WorldId};
@@ -36,13 +34,13 @@ mod utils;
 use utils::{Frame, RendererProperties};
 
 mod errors;
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 pub use egui;
 pub use errors::{Error, Result};
 
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 mod egui_integration;
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 use egui_integration::{EguiFrameInput, EguiState};
 
 mod window;
@@ -74,9 +72,9 @@ mod shaders;
 mod viewport;
 use viewport::{Viewport, ViewportSettings};
 
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 mod viewport_editor;
-#[cfg(renderer_editor)]
+#[cfg(feature = "editor")]
 use viewport_editor::ViewportEditor;
 
 mod frame_graph;
@@ -97,11 +95,11 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
 
         builder.add_subsystem(|ctx| {
             let platform_windows = ctx.resource::<dirk_platform::PlatformWindows>()?;
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             let editor = ctx.resource::<dirk_engine::editor::EditorServices>()?;
-            #[cfg(not(renderer_editor))]
+            #[cfg(not(feature = "editor"))]
             let presentation_assignments = ctx.resource::<PlayerPresentationAssignments>()?;
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             let player_input_sender = ctx.resource::<PlayerInputSender>()?;
 
             let create_info = RendererCreateInfo::from_engine_metadata(ctx.handle().metadata())?;
@@ -112,11 +110,11 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
                 &main_window,
                 ctx.events(),
                 platform_windows.clone(),
-                #[cfg(not(renderer_editor))]
+                #[cfg(not(feature = "editor"))]
                 presentation_assignments,
-                #[cfg(renderer_editor)]
+                #[cfg(feature = "editor")]
                 player_input_sender,
-                #[cfg(renderer_editor)]
+                #[cfg(feature = "editor")]
                 editor,
             )?;
 
@@ -166,23 +164,23 @@ struct Renderer {
     windows: HashMap<WindowId, Window>,
     window_order: Vec<WindowId>,
     platform_windows: PlatformWindows,
-    #[cfg(not(renderer_editor))]
+    #[cfg(not(feature = "editor"))]
     presentation_assignments: PlayerPresentationAssignments,
     /// All of the internal [`world::World`] representations.
     scene_manager: SceneManager,
     /// The management for all the models.
     models: models::ModelRegistry,
     /// Immediate-mode UI rendering state.
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     egui: EguiState,
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     egui_window: Option<WindowId>,
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     egui_input_consumer: dirk_events::Consumer<WindowInputEvent>,
     /// Editor window registry rendered through egui.
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     editor: dirk_engine::editor::EditorServices,
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     viewport_editor: ViewportEditor,
     /// Player-owned internal scene render outputs.
     viewports: HashMap<PlayerId, Viewport>,
@@ -231,7 +229,7 @@ impl dirk_engine::Subsystem for Renderer {
         universe: &Universe,
     ) -> anyhow::Result<()> {
         self.tick(delta_time)?;
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         {
             let ctx = self.begin_frame();
             let frame = dirk_engine::editor::EditorRenderContext::new(delta_time, handle);
@@ -240,7 +238,7 @@ impl dirk_engine::Subsystem for Renderer {
             self.editor.render_ui(&ctx, &frame, universe)?;
         }
 
-        #[cfg(not(renderer_editor))]
+        #[cfg(not(feature = "editor"))]
         {
             let _ = (handle, universe);
         }
@@ -252,14 +250,32 @@ impl dirk_engine::Subsystem for Renderer {
 }
 
 impl Renderer {
-    fn build_frames(render_device: &RenderDevice) -> Result<[Frame; MAX_FRAMES_IN_FLIGHT]> {
-        let build_frame = || -> Result<Frame> {
-            Ok(Frame {
-                command_pool: CommandPool::build(&render_device.rhi)?,
-                completion: None,
-            })
+    fn best_sample_count(
+        rhi: &ActiveRhi,
+        color: dirk_rhi::TextureFormat,
+        depth: dirk_rhi::TextureFormat,
+    ) -> SampleCount {
+        let color_counts =
+            rhi.supported_sample_counts(color, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
+        let depth_counts =
+            rhi.supported_sample_counts(depth, dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT);
+        [
+            SampleCount::Eight,
+            SampleCount::Four,
+            SampleCount::Two,
+            SampleCount::One,
+        ]
+        .into_iter()
+        .find(|&count| color_counts.supports(count) && depth_counts.supports(count))
+        .unwrap_or(SampleCount::One)
+    }
+
+    fn build_frames(render_device: &RenderDevice) -> [Frame; MAX_FRAMES_IN_FLIGHT] {
+        let build_frame = || Frame {
+            command_pool: CommandPool::build(&render_device.rhi),
+            completion: None,
         };
-        Ok([build_frame()?, build_frame()?])
+        [build_frame(), build_frame()]
     }
 
     /// Renderer initialization. Creates the active backend and renderer objects.
@@ -272,9 +288,9 @@ impl Renderer {
         window: &dirk_platform::Window,
         event_manager: &dirk_events::EventManager,
         platform_windows: PlatformWindows,
-        #[cfg(not(renderer_editor))] presentation_assignments: PlayerPresentationAssignments,
-        #[cfg(renderer_editor)] player_input_sender: PlayerInputSender,
-        #[cfg(renderer_editor)] editor: dirk_engine::editor::EditorServices,
+        #[cfg(not(feature = "editor"))] presentation_assignments: PlayerPresentationAssignments,
+        #[cfg(feature = "editor")] player_input_sender: PlayerInputSender,
+        #[cfg(feature = "editor")] editor: dirk_engine::editor::EditorServices,
     ) -> Result<Self> {
         #[cfg(target_vendor = "apple")]
         info!("initializing renderer RHI with Metal");
@@ -302,23 +318,8 @@ impl Renderer {
                 .ok_or(crate::errors::Error::Rhi(dirk_rhi::Error::from(
                     dirk_rhi::InvalidResourceKind::Empty,
                 )))?;
-        let color_samples =
-            rhi.supported_sample_counts(surface_format, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
-        let depth_samples = rhi.supported_sample_counts(
-            depth_format,
-            dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT,
-        );
-        let msaa_samples = [
-            dirk_rhi::SampleCount::Eight,
-            dirk_rhi::SampleCount::Four,
-            dirk_rhi::SampleCount::Two,
-            dirk_rhi::SampleCount::One,
-        ]
-        .into_iter()
-        .find(|&count| color_samples.supports(count) && depth_samples.supports(count))
-        .unwrap_or(dirk_rhi::SampleCount::One);
         let properties = RendererProperties {
-            msaa_samples,
+            msaa_samples: Self::best_sample_count(&rhi, surface_format, depth_format),
             anisotropy: capabilities.max_sampler_anisotropy > 1,
             surface_format,
             depth_format,
@@ -333,16 +334,16 @@ impl Renderer {
             FrameCounters {
                 current_frame: current_frame.clone(),
             },
-        )?;
+        );
 
-        let frames = Self::build_frames(&render_device)?;
+        let frames = Self::build_frames(&render_device);
 
         let models = models::ModelRegistry::new(&render_device, event_manager)?;
         let scene_manager = SceneManager::init(&render_device)?;
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         let egui = EguiState::new(&render_device)?;
-        #[cfg(renderer_editor)]
-        let viewport_editor = ViewportEditor::new(&render_device, player_input_sender)?;
+        #[cfg(feature = "editor")]
+        let viewport_editor = ViewportEditor::new(&render_device, player_input_sender);
 
         let windows = {
             let mut windows = HashMap::new();
@@ -358,20 +359,20 @@ impl Renderer {
             windows,
             window_order,
             platform_windows,
-            #[cfg(not(renderer_editor))]
+            #[cfg(not(feature = "editor"))]
             presentation_assignments,
             scene_manager,
             viewports: HashMap::new(),
             models,
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             egui,
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             egui_window: None,
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             editor,
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             viewport_editor,
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             egui_input_consumer: event_manager.subscribe(),
 
             frames,
@@ -389,36 +390,26 @@ impl Renderer {
     /// Begins a frame.
     ///
     /// Returns an [`egui::Context`] for rendering.
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     pub fn begin_frame(&mut self) -> egui::Context {
         let input = self.egui_frame_input();
         self.egui_window = Some(input.window_id);
         self.egui.begin_frame(&input)
     }
 
-    // TODO: shouldn't be necessary
-    #[cfg(renderer_editor)]
-    fn primary_extent(&self) -> vk::Extent2D {
+    #[cfg(feature = "editor")]
+    fn primary_extent(&self) -> Extent3d {
         self.primary_window_id()
             .and_then(|id| self.windows.get(&id))
-            .map_or(
-                vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
-                |window| vk::Extent2D {
-                    width: window.extent().width,
-                    height: window.extent().height,
-                },
-            )
+            .map_or_else(|| Extent3d::new_2d(1, 1), Window::extent)
     }
 
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     fn primary_window_id(&self) -> Option<WindowId> {
         self.window_order.first().copied()
     }
 
-    #[cfg(renderer_editor)]
+    #[cfg(feature = "editor")]
     #[allow(clippy::cast_possible_truncation)]
     fn egui_frame_input(&mut self) -> EguiFrameInput {
         let window_id = self
@@ -486,7 +477,7 @@ impl Renderer {
     /// world (unless in [`WorldEvent::Created`] or [`WorldEvent::Destroyed`].
     fn tick(&mut self, _delta_time: f64) -> Result<()> {
         for event in self.player_spawn_consumer.consume_all() {
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             self.viewport_editor.remove_viewport(event.id, &self.editor);
 
             let viewport = Viewport::new(
@@ -497,14 +488,14 @@ impl Renderer {
                     self.render_device.properties.surface_format,
                 ),
             )?;
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             self.viewport_editor
                 .add_viewport(event.id, &viewport, &self.editor, &mut self.egui)?;
             self.viewports.insert(event.id, viewport);
         }
 
         for event in self.player_despawn_consumer.consume_all() {
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             self.viewport_editor.remove_viewport(event.id, &self.editor);
             self.viewports.remove(&event.id);
         }
@@ -578,22 +569,22 @@ impl Renderer {
     ///
     /// Backend errors can occur during rendering.
     fn end_frame(&mut self) -> Result<()> {
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         self.egui.end_frame();
 
         let frame_index = self.current_frame();
         if let Some(completion) = self.frames[frame_index].completion.take() {
             completion.wait(u64::MAX)?;
         }
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         {
-            self.egui.free_textures_for_frame(frame_index)?;
+            self.egui.free_textures_for_frame(frame_index);
             self.viewport_editor
                 .release_retired_textures(&mut self.egui);
             self.viewport_editor
                 .apply_resize_requests(&mut self.viewports, &mut self.egui)?;
         }
-        #[cfg(not(renderer_editor))]
+        #[cfg(not(feature = "editor"))]
         self.update_non_editor_presentation()?;
 
         self.render_device.rhi.collect_garbage()?;
@@ -717,7 +708,7 @@ impl Renderer {
         &mut self,
         frame_index: usize,
         targets: &[PresentationTarget],
-        #[cfg_attr(renderer_editor, allow(unused_variables))] viewport_submission: Option<
+        #[cfg_attr(feature = "editor", allow(unused_variables))] viewport_submission: Option<
             &ViewportRenderSubmission,
         >,
     ) -> Result<Option<ActiveRecordedCommands>> {
@@ -725,8 +716,21 @@ impl Renderer {
             return Ok(None);
         }
 
+        let mut cmd = self.frames[frame_index]
+            .command_pool
+            .begin("presentation render graph")?;
+        #[cfg(feature = "editor")]
+        if let Some(extent) = targets
+            .iter()
+            .find(|target| Some(target.window) == self.egui_window)
+            .map(|target| target.extent)
+        {
+            self.egui
+                .prepare(&self.render_device, &mut cmd, extent, frame_index)?;
+        }
+
         let mut graph = RenderGraph::new();
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         let mut egui_target = None;
         for target in targets {
             let swapchain = graph.import_texture(target.image.import());
@@ -736,12 +740,12 @@ impl Renderer {
                 frame_graph::AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
             );
 
-            #[cfg(renderer_editor)]
+            #[cfg(feature = "editor")]
             if Some(target.window) == self.egui_window {
                 egui_target = Some((swapchain, target.extent));
             }
 
-            #[cfg(not(renderer_editor))]
+            #[cfg(not(feature = "editor"))]
             if let Some(viewport) = self.assigned_viewport_for_window(target.window) {
                 let rendered_this_frame = viewport_submission.is_some_and(|submission| {
                     submission.rendered_players.contains(&viewport.player())
@@ -782,34 +786,23 @@ impl Renderer {
             }
         }
 
-        #[cfg(renderer_editor)]
+        #[cfg(feature = "editor")]
         if let Some((swapchain, extent)) = egui_target {
             let mut egui_pass = graph.add_pass("egui");
             egui_pass.write_color_attachment(swapchain, frame_graph::AttachmentInfo::load_store());
             let egui = &mut self.egui;
-            egui_pass.execute(Box::new(move |cmd, ctx| {
-                egui.render(
-                    ctx.device(),
-                    cmd,
-                    vk::Extent2D {
-                        width: extent.width,
-                        height: extent.height,
-                    },
-                    frame_index,
-                )
+            egui_pass.execute(Box::new(move |cmd, _| {
+                egui.render(cmd, extent, frame_index)
             }));
         }
 
-        let mut cmd = self.frames[frame_index]
-            .command_pool
-            .begin("presentation render graph")?;
         graph.run(&self.render_device, &mut cmd)?;
         let cmd = cmd.finish()?;
 
         Ok(Some(cmd))
     }
 
-    #[cfg(not(renderer_editor))]
+    #[cfg(not(feature = "editor"))]
     fn update_non_editor_presentation(&mut self) -> Result<()> {
         let assignments = self.current_non_editor_assignments();
         self.presentation_assignments.set(assignments.clone());
@@ -827,7 +820,7 @@ impl Renderer {
         Ok(())
     }
 
-    #[cfg(not(renderer_editor))]
+    #[cfg(not(feature = "editor"))]
     fn current_non_editor_assignments(&self) -> Vec<(WindowId, PlayerId)> {
         let mut players = self.viewports.keys().copied().collect::<Vec<_>>();
         players.sort_unstable();
@@ -839,7 +832,7 @@ impl Renderer {
             .collect()
     }
 
-    #[cfg(not(renderer_editor))]
+    #[cfg(not(feature = "editor"))]
     fn assigned_viewport_for_window(&self, window: WindowId) -> Option<&Viewport> {
         self.presentation_assignments
             .player_for_window(window)
@@ -932,7 +925,9 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        self.render_device.rhi.wait_idle().ok();
+        if let Err(error) = self.render_device.rhi.wait_idle() {
+            tracing::error!(%error, "waiting for GPU work during renderer shutdown failed");
+        }
         info!("cleaning up renderer");
     }
 }

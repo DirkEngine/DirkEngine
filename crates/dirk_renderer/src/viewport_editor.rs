@@ -5,26 +5,16 @@ use dirk_engine::editor::{
 };
 use dirk_input::{ButtonState, InputEvent, egui::input_events_from_egui_response};
 use dirk_player::{PlayerId, PlayerInputSender};
-use dirk_rhi::{
-    AddressMode, BindGroupLayoutEntry, BindingType, Extent3d, FilterMode, SamplerDesc, ShaderStages,
-};
+use dirk_rhi::Extent3d;
 use parking_lot::Mutex;
 
 use crate::{
-    MAX_FRAMES_IN_FLIGHT, Result,
-    egui_integration::EguiState,
-    resources::{
-        ActiveSampler,
-        descriptors::{DescriptorAllocator, DescriptorSet, layouts::SetLayout},
-        device::RenderDevice,
-    },
+    MAX_FRAMES_IN_FLIGHT, Result, egui_integration::EguiState, resources::device::RenderDevice,
     viewport::Viewport,
 };
 
 struct ViewportTextureBinding {
     texture_id: egui::TextureId,
-    /// Just to keep the descriptor set alive as egui holds the raw set.
-    _descriptor_set: DescriptorSet<ViewportTextureSet>,
 }
 
 struct RetiredViewportTextureBinding {
@@ -40,39 +30,25 @@ pub struct ViewportEditorEntry {
     requested_extent: Option<Extent3d>,
 }
 
-struct ViewportTextureSet;
-
-impl SetLayout for ViewportTextureSet {
-    const BINDINGS: &'static [BindGroupLayoutEntry] = &[BindGroupLayoutEntry {
-        binding: 0,
-        ty: BindingType::SampledImage,
-        visibility: ShaderStages::FRAGMENT,
-    }];
-}
-
 pub struct ViewportEditor {
     state: Arc<Mutex<ViewportEditorState>>,
     input_sender: PlayerInputSender,
     windows: HashMap<PlayerId, EditorWindowId>,
     textures: HashMap<PlayerId, ViewportTextureBinding>,
     retired_textures: Vec<RetiredViewportTextureBinding>,
-    descriptor_allocator: DescriptorAllocator<ViewportTextureSet>,
-    sampler: ActiveSampler,
     device: RenderDevice,
 }
 
 impl ViewportEditor {
-    pub fn new(device: &RenderDevice, input_sender: PlayerInputSender) -> Result<Self> {
-        Ok(Self {
+    pub fn new(device: &RenderDevice, input_sender: PlayerInputSender) -> Self {
+        Self {
             state: Arc::new(Mutex::new(ViewportEditorState::default())),
             input_sender,
             windows: HashMap::new(),
             textures: HashMap::new(),
             retired_textures: Vec::new(),
-            descriptor_allocator: DescriptorAllocator::new(device, 8)?,
-            sampler: create_sampler(device)?,
             device: device.clone(),
-        })
+        }
     }
 
     pub fn add_viewport(
@@ -86,12 +62,7 @@ impl ViewportEditor {
             self.remove_viewport(player, editor);
         }
 
-        let descriptor_set = self.descriptor_allocator.sampled_image(
-            0,
-            viewport.output_rhi_view(),
-            &self.sampler,
-        )?;
-        let texture_id = egui.add_user_texture(descriptor_set.raw());
+        let texture_id = egui.add_user_texture(viewport.output_rhi_view())?;
 
         self.state.lock().insert(
             player,
@@ -117,13 +88,8 @@ impl ViewportEditor {
         });
 
         self.windows.insert(player, window_id);
-        self.textures.insert(
-            player,
-            ViewportTextureBinding {
-                texture_id,
-                _descriptor_set: descriptor_set,
-            },
-        );
+        self.textures
+            .insert(player, ViewportTextureBinding { texture_id });
         Ok(())
     }
 
@@ -167,16 +133,8 @@ impl ViewportEditor {
             }
 
             viewport.resize(&self.device, requested_extent)?;
-            let descriptor_set = self.descriptor_allocator.sampled_image(
-                0,
-                viewport.output_rhi_view(),
-                &self.sampler,
-            )?;
-            let texture_id = egui.add_user_texture(descriptor_set.raw());
-            let new_binding = ViewportTextureBinding {
-                texture_id,
-                _descriptor_set: descriptor_set,
-            };
+            let texture_id = egui.add_user_texture(viewport.output_rhi_view())?;
+            let new_binding = ViewportTextureBinding { texture_id };
             if let Some(old_binding) = self.textures.insert(player, new_binding) {
                 self.retired_textures.push(RetiredViewportTextureBinding {
                     binding: old_binding,
@@ -370,21 +328,6 @@ fn point_size_to_pixels(points: f32, pixels_per_point: f32) -> u32 {
 
 fn clamp_extent(extent: Extent3d) -> Extent3d {
     Extent3d::new_2d(extent.width.max(1), extent.height.max(1))
-}
-
-fn create_sampler(device: &RenderDevice) -> Result<ActiveSampler> {
-    Ok(device.rhi.create_sampler(&SamplerDesc {
-        label: "editor viewport sampler",
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        mip_filter: FilterMode::Linear,
-        address_u: AddressMode::ClampToEdge,
-        address_v: AddressMode::ClampToEdge,
-        address_w: AddressMode::ClampToEdge,
-        max_anisotropy: 1,
-        lod_min: 0.0,
-        lod_max: 1.0,
-    })?)
 }
 
 #[cfg(test)]

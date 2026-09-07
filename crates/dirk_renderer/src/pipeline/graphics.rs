@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
 use dirk_rhi::{
-    BindGroupLayoutDesc, BindGroupLayoutEntry, ColorTargetState, ColorWrites, CompareOp, CullMode,
-    DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, PipelineLayoutDesc,
-    PrimitiveTopology, RasterState,
+    BindGroupLayoutDesc, BindGroupLayoutEntry, BlendState, ColorTargetState, ColorWrites,
+    CompareOp, CullMode, DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, IndexFormat,
+    PipelineLayoutDesc, PrimitiveTopology, RasterState, SampleCount,
 };
 use tracing::debug;
 
@@ -26,6 +26,43 @@ pub trait GraphicsPipelineSpec {
     type DescriptorSets: DescriptorSetInput;
 
     const NAME: &'static str;
+
+    fn raster() -> RasterState {
+        RasterState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::CounterClockwise,
+            cull_mode: CullMode::Back,
+        }
+    }
+
+    fn blend() -> Option<BlendState> {
+        None
+    }
+
+    fn depth(device: &RenderDevice) -> Option<DepthState> {
+        Some(DepthState {
+            format: device.properties.depth_format,
+            write_enabled: true,
+            compare: CompareOp::Less,
+            stencil: None,
+        })
+    }
+
+    fn samples(device: &RenderDevice) -> SampleCount {
+        device.properties.msaa_samples
+    }
+
+    fn depth_bias() -> DepthBiasState {
+        DepthBiasState::default()
+    }
+
+    fn primitive_restart() -> Option<IndexFormat> {
+        None
+    }
+
+    fn alpha_to_coverage() -> bool {
+        false
+    }
 
     fn validate() -> Result<()>
     where
@@ -121,29 +158,20 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
             vertex: &vertex,
             fragment: Some(&fragment),
             vertex_buffers: &[vertex_layout],
-            raster: RasterState {
-                topology: PrimitiveTopology::TriangleList,
-                front_face: FrontFace::CounterClockwise,
-                cull_mode: CullMode::Back,
-            },
+            raster: Spec::raster(),
             color_targets: &[ColorTargetState {
                 format: device.properties.surface_format,
-                blend: None,
+                blend: Spec::blend(),
                 write_mask: ColorWrites::RED
                     | ColorWrites::GREEN
                     | ColorWrites::BLUE
                     | ColorWrites::ALPHA,
             }],
-            depth: Some(DepthState {
-                format: device.properties.depth_format,
-                write_enabled: true,
-                compare: CompareOp::Less,
-                stencil: None,
-            }),
-            depth_bias: DepthBiasState::default(),
-            primitive_restart: None,
-            alpha_to_coverage: false,
-            samples: device.properties.msaa_samples,
+            depth: Spec::depth(device),
+            depth_bias: Spec::depth_bias(),
+            primitive_restart: Spec::primitive_restart(),
+            alpha_to_coverage: Spec::alpha_to_coverage(),
+            samples: Spec::samples(device),
         })?;
 
         Ok(Self {

@@ -27,20 +27,10 @@ fn main() -> anyhow::Result<()> {
     dirk_build::configure_platform();
 
     println!("cargo:rustc-check-cfg=cfg(validation)");
-    println!("cargo:rustc-check-cfg=cfg(renderer_editor)");
-
     let profile = std::env::var("PROFILE").unwrap_or_default();
     if profile != "release" {
         println!("cargo:rustc-cfg=validation");
     }
-    // The current editor adapter consumes Vulkan-native handles. Keep Apple
-    // builds on the normal presentation path even when CI enables all features.
-    if std::env::var_os("CARGO_FEATURE_EDITOR").is_some()
-        && std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() != Ok("apple")
-    {
-        println!("cargo:rustc-cfg=renderer_editor");
-    }
-
     build_shaders()?;
 
     Ok(())
@@ -903,7 +893,17 @@ fn shader_stage_suffix(stage: ShaderStage) -> &'static str {
 }
 
 fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
-    let shaders = shaders.iter().map(generate_shader).collect::<Vec<_>>();
+    let (editor_shaders, renderer_shaders): (Vec<_>, Vec<_>) = shaders
+        .iter()
+        .partition(|shader| shader.entrypoint.starts_with("egui_"));
+    let editor_shaders = editor_shaders
+        .into_iter()
+        .map(generate_shader)
+        .collect::<Vec<_>>();
+    let renderer_shaders = renderer_shaders
+        .into_iter()
+        .map(generate_shader)
+        .collect::<Vec<_>>();
 
     quote! {
         use dirk_rhi::{
@@ -912,7 +912,21 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
         };
         use crate::shaders::metadata::{FragmentShader, Shader, VertexShader};
 
-        #(#shaders)*
+        #(#renderer_shaders)*
+
+        #[cfg(feature = "editor")]
+        mod editor {
+            use super::{
+                BindGroupLayoutEntry, BindingType, FragmentShader, Shader, ShaderCode, ShaderStage,
+                ShaderStages, VertexAttribute, VertexBufferLayout, VertexFormat, VertexShader,
+                VertexStepMode,
+            };
+
+            #(#editor_shaders)*
+        }
+
+        #[cfg(feature = "editor")]
+        pub use editor::*;
     }
 }
 
@@ -1079,6 +1093,7 @@ fn rhi_format(name: &str) -> Ident {
     let name = match name {
         "R32G32_SFLOAT" => "Float32x2",
         "R32G32B32_SFLOAT" => "Float32x3",
+        "R32G32B32A32_SFLOAT" => "Float32x4",
         _ => panic!("unsupported reflected vertex format {name}"),
     };
     Ident::new(name, Span::call_site())
