@@ -2,10 +2,7 @@
 
 use std::{marker::PhantomData, mem::size_of_val};
 
-use dirk_rhi::{
-    Backend as _, Buffer as _, BufferCopy, BufferDesc, BufferUsages, CommandBuffer as _,
-    MemoryDomain,
-};
+use dirk_rhi::{BufferCopy, BufferDesc, BufferUsages, MemoryDomain};
 
 use crate::{
     Result,
@@ -70,7 +67,7 @@ impl<Type: BuffType> Buffer<Type> {
     pub fn upload_slice<T: Copy>(device: &RenderDevice, data: &[T]) -> Result<Self> {
         let size = u64::try_from(size_of_val(data))
             .map_err(|_| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange))?;
-        let staging = Buffer::<Custom>::create_custom(
+        let staging = CustomBuffer::create_custom(
             device,
             size,
             BufferUsages::COPY_SRC,
@@ -87,7 +84,7 @@ impl<Type: BuffType> Buffer<Type> {
             MemoryDomain::Device,
         )?;
         let mut command = device.transfer_pool.begin_single_time()?;
-        command.rhi_mut().copy_buffer(
+        command.copy_buffer(
             staging.rhi(),
             output.rhi(),
             &[BufferCopy {
@@ -96,7 +93,7 @@ impl<Type: BuffType> Buffer<Type> {
                 size,
             }],
         )?;
-        command.end_and_submit()?;
+        device.transfer_pool.submit_and_wait(command)?;
         Ok(output)
     }
 }

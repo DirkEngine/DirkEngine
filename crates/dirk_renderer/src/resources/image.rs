@@ -1,28 +1,23 @@
 //! Renderer images and texture uploads backed by the RHI.
 
-use std::num::NonZeroU32;
-
 use dirk_rhi::{
-    Backend as _, Buffer as _, BufferImageCopy, CommandBuffer as _, DependencyInfo, Extent3d,
-    FilterMode, ImageAspects, ImageBarrier, ImageBlit, ImageDesc, ImageDimension, ImageState,
-    ImageUsages, ImageViewDesc, ImageViewType, MemoryDomain, Origin3d, SampleCount, SamplerDesc,
-    TextureFormat,
+    DependencyInfo, Extent3d, FilterMode, ImageBarrier, ImageBlit, ImageDesc, ImageDimension,
+    ImageState, ImageUsages, Origin3d, SampleCount, SamplerDesc, TextureFormat,
 };
 
 use crate::{
     Result,
     models::Texture,
     resources::{
-        ActiveCommandBuffer, ActiveImage, ActiveImageView, buffer::CustomBuffer,
+        ActiveCommandBuffer, ActiveImage, ActiveImageView,
         device::RenderDevice,
+        upload::{ImageUpload, RgbaMip},
     },
 };
 
 pub struct Image {
     inner: ActiveImage,
     view: ActiveImageView,
-    aspects: ImageAspects,
-    mip_levels: u32,
 }
 
 pub struct ImageCreateInfo {
@@ -31,7 +26,6 @@ pub struct ImageCreateInfo {
     pub usage: ImageUsages,
     pub mip_levels: u32,
     pub samples: SampleCount,
-    pub aspects: ImageAspects,
 }
 
 impl Image {
@@ -49,22 +43,8 @@ impl Image {
             array_layers: 1,
             samples: info.samples,
         })?;
-        let view = device.rhi.create_image_view(&ImageViewDesc {
-            label: "renderer image view",
-            image: &inner,
-            view_type: ImageViewType::TwoD,
-            aspects: info.aspects,
-            base_mip_level: 0,
-            mip_level_count: info.mip_levels,
-            base_array_layer: 0,
-            array_layer_count: 1,
-        })?;
-        Ok(Self {
-            inner,
-            view,
-            aspects: info.aspects,
-            mip_levels: info.mip_levels,
-        })
+        let view = device.rhi.view(&inner)?;
+        Ok(Self { inner, view })
     }
 
     pub(crate) fn rhi_image(&self) -> &ActiveImage {
@@ -73,10 +53,6 @@ impl Image {
 
     pub(crate) fn rhi_view(&self) -> &ActiveImageView {
         &self.view
-    }
-
-    pub(crate) fn rhi_aspects(&self) -> ImageAspects {
-        self.aspects
     }
 
     pub fn upload_texture(device: &RenderDevice, texture: &gltf::image::Data) -> Result<Texture> {
@@ -94,15 +70,6 @@ impl Image {
             }
         };
         let mip_levels = Self::mip_levels(texture.width, texture.height);
-        let staging = CustomBuffer::create_custom(
-            device,
-            u64::try_from(pixels.len())
-                .map_err(|_| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange))?,
-            dirk_rhi::BufferUsages::COPY_SRC,
-            MemoryDomain::Upload,
-        )?;
-        staging.rhi().write(0, &pixels)?;
-
         let image = Self::create_image(
             device,
             &ImageCreateInfo {
@@ -111,50 +78,52 @@ impl Image {
                 usage: ImageUsages::COPY_DST | ImageUsages::COPY_SRC | ImageUsages::SAMPLED,
                 mip_levels,
                 samples: SampleCount::One,
-                aspects: ImageAspects::COLOR,
             },
         )?;
         let mut command = device.graphics_pool.begin_single_time()?;
-        command.rhi_mut().barrier(&DependencyInfo {
-            memory_barriers: &[],
-            buffer_barriers: &[],
-            image_barriers: &[ImageBarrier {
+        let mut mip = RgbaMip {
+            width: texture.width,
+            height: texture.height,
+            pixels,
+        };
+        device.upload_image(
+            &mut command,
+            &ImageUpload {
                 image: image.rhi_image(),
-                old_state: ImageState::Undefined,
-                new_state: ImageState::CopyDestination,
-                aspects: ImageAspects::COLOR,
-                base_mip_level: 0,
-                mip_level_count: mip_levels,
-                base_array_layer: 0,
-                array_layer_count: 1,
-                queue_transfer: None,
-            }],
-        })?;
-        let bytes_per_row = texture
-            .width
-            .checked_mul(4)
-            .and_then(NonZeroU32::new)
-            .ok_or(dirk_rhi::Error::from(
-                dirk_rhi::InvalidResourceKind::OutOfRange,
-            ))?;
-        command.rhi_mut().copy_buffer_to_image(
-            staging.rhi(),
-            image.rhi_image(),
-            &[BufferImageCopy {
-                buffer_offset: 0,
-                buffer_bytes_per_row: bytes_per_row,
-                buffer_rows_per_image: NonZeroU32::new(texture.height)
-                    .expect("glTF textures have non-zero height"),
-                mip_level: 0,
-                base_array_layer: 0,
-                array_layer_count: 1,
-                image_origin: Origin3d::default(),
-                extent: Extent3d::new_2d(texture.width, texture.height),
-                aspects: ImageAspects::COLOR,
-            }],
+                mip: 0,
+                origin: Origin3d::default(),
+                extent: Extent3d::new_2d(mip.width, mip.height),
+                pixels: &mip.pixels,
+            },
         )?;
-        image.record_mips(command.rhi_mut(), texture.width, texture.height)?;
-        command.end_and_submit()?;
+        if device
+            .rhi
+            .format_capabilities(TextureFormat::Rgba8Srgb)
+            .blit
+            .supports(FilterMode::Linear)
+        {
+            image.record_mips(&mut command, texture.width, texture.height)?;
+        } else {
+            for level in 1..mip_levels {
+                mip = mip.next();
+                device.upload_image(
+                    &mut command,
+                    &ImageUpload {
+                        image: image.rhi_image(),
+                        mip: level,
+                        origin: Origin3d::default(),
+                        extent: Extent3d::new_2d(mip.width, mip.height),
+                        pixels: &mip.pixels,
+                    },
+                )?;
+            }
+            command.transition(
+                image.rhi_image(),
+                ImageState::ShaderRead(dirk_rhi::ShaderStages::FRAGMENT),
+                dirk_rhi::ImageSubresourceRange::WHOLE,
+            )?;
+        }
+        device.graphics_pool.submit_and_wait(command)?;
 
         let sampler = device.rhi.create_sampler(&SamplerDesc {
             label: "renderer texture sampler",
@@ -179,7 +148,7 @@ impl Image {
         width: u32,
         height: u32,
     ) -> dirk_rhi::Result<()> {
-        for mip in 1..self.mip_levels {
+        for mip in 1..self.inner.description().mip_levels {
             command.barrier(&DependencyInfo {
                 memory_barriers: &[],
                 buffer_barriers: &[],
@@ -187,7 +156,7 @@ impl Image {
                     image: &self.inner,
                     old_state: ImageState::CopyDestination,
                     new_state: ImageState::CopySource,
-                    aspects: self.aspects,
+                    aspects: self.inner.description().format.aspects(),
                     base_mip_level: mip - 1,
                     mip_level_count: 1,
                     base_array_layer: 0,
@@ -211,7 +180,7 @@ impl Image {
                         (height >> (mip - 1)).max(1),
                     ),
                     dst_extent: Extent3d::new_2d((width >> mip).max(1), (height >> mip).max(1)),
-                    aspects: self.aspects,
+                    aspects: self.inner.description().format.aspects(),
                 }],
                 FilterMode::Linear,
             )?;
@@ -221,8 +190,8 @@ impl Image {
                 image_barriers: &[ImageBarrier {
                     image: &self.inner,
                     old_state: ImageState::CopySource,
-                    new_state: ImageState::ShaderRead,
-                    aspects: self.aspects,
+                    new_state: ImageState::ShaderRead(dirk_rhi::ShaderStages::FRAGMENT),
+                    aspects: self.inner.description().format.aspects(),
                     base_mip_level: mip - 1,
                     mip_level_count: 1,
                     base_array_layer: 0,
@@ -237,9 +206,9 @@ impl Image {
             image_barriers: &[ImageBarrier {
                 image: &self.inner,
                 old_state: ImageState::CopyDestination,
-                new_state: ImageState::ShaderRead,
-                aspects: self.aspects,
-                base_mip_level: self.mip_levels - 1,
+                new_state: ImageState::ShaderRead(dirk_rhi::ShaderStages::FRAGMENT),
+                aspects: self.inner.description().format.aspects(),
+                base_mip_level: self.inner.description().mip_levels - 1,
                 mip_level_count: 1,
                 base_array_layer: 0,
                 array_layer_count: 1,

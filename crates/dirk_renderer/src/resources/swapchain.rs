@@ -2,10 +2,7 @@
 
 use std::{num::NonZeroU32, sync::Arc};
 
-use dirk_rhi::{
-    Backend as _, ColorSpace, Extent3d, SurfaceFormat, SurfaceFrame as _, Swapchain as _,
-    SwapchainDesc, TextureFormat,
-};
+use dirk_rhi::{ColorSpace, Extent3d, SurfaceFormat, SwapchainDesc, TextureFormat};
 
 use crate::{
     Result,
@@ -24,7 +21,6 @@ impl RenderImage {
         ImportedTexture {
             image: self.inner.image().clone(),
             view: self.inner.view().clone(),
-            aspects: dirk_rhi::ImageAspects::COLOR,
             initial_state: dirk_rhi::ImageState::Undefined,
             final_state: dirk_rhi::ImageState::Present,
         }
@@ -33,16 +29,14 @@ impl RenderImage {
     pub(crate) fn rhi(&self) -> &ActiveSurfaceFrame {
         &self.inner
     }
-
-    pub fn format(&self) -> TextureFormat {
-        self.inner.format().texture
-    }
 }
 
 /// Reconfigurable renderer swapchain.
 pub struct Swapchain {
     rhi: Arc<ActiveRhi>,
     inner: ActiveSwapchain,
+    extent: Extent3d,
+    format: TextureFormat,
 }
 
 impl Swapchain {
@@ -80,16 +74,18 @@ impl Swapchain {
         })?;
         Ok(Self {
             rhi: rhi.clone(),
+            extent: inner.extent()?,
+            format: inner.format()?.texture,
             inner,
         })
     }
 
     pub fn extent(&self) -> Extent3d {
-        self.inner.extent()
+        self.extent
     }
 
     pub fn format(&self) -> TextureFormat {
-        self.inner.format().texture
+        self.format
     }
 
     pub fn acquire_next_image(&mut self) -> Result<RenderImage> {
@@ -105,6 +101,8 @@ impl Swapchain {
         let height = NonZeroU32::new(window_size.height)
             .ok_or(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Empty))?;
         self.inner.resize(width, height)?;
+        self.extent = self.inner.extent()?;
+        self.format = self.inner.format()?.texture;
         Ok(())
     }
 

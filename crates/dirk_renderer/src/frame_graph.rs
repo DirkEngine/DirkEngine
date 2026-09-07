@@ -2,12 +2,14 @@
 
 use crate::{
     Result,
-    resources::{ActiveImage, ActiveImageView, command_pool::CommandBuffer, device::RenderDevice},
+    resources::{
+        ActiveImage, ActiveImageView, ActiveRenderPass, command_pool::CommandBuffer,
+        device::RenderDevice,
+    },
 };
 use dirk_rhi::{
-    Backend as _, Color, CommandBuffer as _, DependencyInfo, Extent3d, ImageAspects, ImageBarrier,
-    ImageDesc, ImageState, ImageUsages, ImageViewDesc, ImageViewType, LoadOp, RenderingInfo,
-    SampleCount, ShaderStages, StoreOp, TextureFormat,
+    Color, DependencyInfo, Extent3d, ImageBarrier, ImageDesc, ImageState, ImageUsages, LoadOp,
+    RenderingInfo, SampleCount, ShaderStages, StoreOp, TextureFormat,
 };
 
 /// Opaque index into the graph texture table.
@@ -21,34 +23,16 @@ impl TextureHandle {
     }
 }
 
-/// Selected subresources of a graph texture.
-///
-/// Counts use the backend's whole-remainder convention: `u32::MAX` means "all
-/// remaining levels/layers". The compiler tracks state per mip range, so
-/// passes may declare disjoint mip accesses without forcing transitions of
-/// untouched subresources. Array layers are carried through declarations into
-/// emitted barriers untracked until a consumer needs per-layer states.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SubresourceRange {
-    /// First mip level.
-    pub base_mip_level: u32,
-    /// Mip level count.
-    pub mip_level_count: u32,
-    /// First array layer.
-    pub base_array_layer: u32,
-    /// Array layer count.
-    pub array_layer_count: u32,
+/// Portable range shared with the RHI. Graph helpers only split mip spans.
+pub use dirk_rhi::ImageSubresourceRange as SubresourceRange;
+trait GraphRange: Sized {
+    fn overlaps_mips(self, other: Self) -> bool;
+    fn mip_intersect(self, other: Self) -> (u32, u32);
+    fn mip_difference(self, minus: Self) -> [(u32, u32); 2];
+    fn with_mips(self, base: u32, count: u32) -> Self;
+    fn mip_span(&self) -> std::ops::Range<u64>;
 }
-
-impl SubresourceRange {
-    /// Every mip level and array layer.
-    pub const WHOLE: Self = Self {
-        base_mip_level: 0,
-        mip_level_count: u32::MAX,
-        base_array_layer: 0,
-        array_layer_count: u32::MAX,
-    };
-
+impl GraphRange for SubresourceRange {
     fn overlaps_mips(self, other: Self) -> bool {
         let (this, that) = (self.mip_span(), other.mip_span());
         this.start < that.end && that.start < this.end
@@ -124,7 +108,6 @@ pub struct TextureDesc {
 pub struct ImportedTexture {
     pub image: ActiveImage,
     pub view: ActiveImageView,
-    pub aspects: ImageAspects,
     pub initial_state: ImageState,
     pub final_state: ImageState,
 }
@@ -133,7 +116,6 @@ pub struct ImportedTexture {
 pub struct ResolvedImage {
     pub image: ActiveImage,
     pub view: ActiveImageView,
-    pub aspects: ImageAspects,
 }
 
 /// Read-only use of a texture declared by a pass.
@@ -165,8 +147,7 @@ pub enum TextureWrite {
     DepthStencilAttachment(AttachmentInfo),
     /// Shader storage image access.
     Storage {
-        /// Stages accessing the image; honored once states carry stages.
-        #[allow(dead_code)]
+        /// Stages accessing the image.
         stages: ShaderStages,
     },
     /// Destination of a copy or blit.
@@ -178,7 +159,7 @@ impl TextureWrite {
         match self {
             TextureWrite::ColorAttachment { .. } => ImageState::ColorAttachment,
             TextureWrite::DepthStencilAttachment(_) => ImageState::DepthStencilAttachment,
-            TextureWrite::Storage { .. } => ImageState::ShaderWrite,
+            TextureWrite::Storage { stages } => ImageState::ShaderWrite(stages),
             TextureWrite::CopyDestination => ImageState::CopyDestination,
         }
     }
@@ -195,15 +176,8 @@ impl TextureWrite {
 impl TextureRead {
     fn state(self) -> ImageState {
         match self {
-            TextureRead::Sampled { .. } => ImageState::ShaderRead,
+            TextureRead::Sampled { stages } => ImageState::ShaderRead(stages),
             TextureRead::CopySource => ImageState::CopySource,
-        }
-    }
-
-    fn stages(self) -> ShaderStages {
-        match self {
-            TextureRead::Sampled { stages } => stages,
-            TextureRead::CopySource => ShaderStages::NONE,
         }
     }
 }
@@ -292,22 +266,24 @@ struct AccessDecl {
     handle: TextureHandle,
     range: SubresourceRange,
     state: ImageState,
-    /// Declared shader stages; folded into backend state mappings today and
-    /// honored by the compiler once states carry stage granularity.
-    #[allow(dead_code)]
-    stages: ShaderStages,
     attachment: Option<AttachmentInfo>,
 }
 
 pub type PassCallback<'a> =
+    Box<dyn FnOnce(&mut ActiveRenderPass<'_>, &PassContext<'_>) -> Result<()> + 'a>;
+type TransferCallback<'a> =
     Box<dyn FnOnce(&mut CommandBuffer, &PassContext<'_>) -> Result<()> + 'a>;
+enum Callback<'a> {
+    Graphics(PassCallback<'a>),
+    Transfer(TransferCallback<'a>),
+}
 
 struct PassNode<'a> {
     name: String,
     reads: Vec<AccessDecl>,
     writes: Vec<AccessDecl>,
     color_resolves: Vec<(TextureHandle, TextureHandle)>,
-    callback: Option<PassCallback<'a>>,
+    callback: Option<Callback<'a>>,
 }
 
 pub struct PassBuilder<'graph, 'a> {
@@ -326,7 +302,6 @@ impl<'a> PassBuilder<'_, 'a> {
             handle,
             range,
             state: read.state(),
-            stages: read.stages(),
             attachment: None,
         });
         self
@@ -368,7 +343,6 @@ impl<'a> PassBuilder<'_, 'a> {
             handle,
             range,
             state: write.state(),
-            stages: ShaderStages::NONE,
             attachment: write.attachment(),
         });
         if let TextureWrite::ColorAttachment {
@@ -380,7 +354,6 @@ impl<'a> PassBuilder<'_, 'a> {
                 handle: resolve_handle,
                 range,
                 state: ImageState::ColorAttachment,
-                stages: ShaderStages::NONE,
                 attachment: None,
             });
             self.pass.color_resolves.push((handle, resolve_handle));
@@ -442,7 +415,13 @@ impl<'a> PassBuilder<'_, 'a> {
 
     /// Provides the command-recording callback for this pass.
     pub fn execute(&mut self, callback: PassCallback<'a>) {
-        self.pass.callback = Some(callback);
+        self.pass.callback = Some(Callback::Graphics(callback));
+    }
+
+    /// Records transfer work outside a rendering scope.
+    #[cfg_attr(feature = "editor", allow(unused))]
+    pub fn execute_transfer(&mut self, callback: TransferCallback<'a>) {
+        self.pass.callback = Some(Callback::Transfer(callback));
     }
 }
 
@@ -468,12 +447,16 @@ impl<'a> RenderGraph<'a> {
         self.push_texture(desc)
     }
 
-    pub fn import_texture(&mut self, desc: TextureDesc) -> TextureHandle {
-        assert!(
-            desc.imported.is_some(),
-            "import_texture requires an imported image"
-        );
-        self.push_texture(desc)
+    /// Imports allocation metadata from the image itself.
+    pub fn import_texture(&mut self, imported: ImportedTexture) -> TextureHandle {
+        let info = imported.image.description();
+        self.push_texture(TextureDesc {
+            width: info.extent.width,
+            height: info.extent.height,
+            format: info.format,
+            samples: info.samples,
+            imported: Some(imported),
+        })
     }
 
     fn push_texture(&mut self, desc: TextureDesc) -> TextureHandle {
@@ -652,32 +635,11 @@ fn barrier_needed(old: ImageState, new: ImageState) -> bool {
 }
 
 fn is_write(state: ImageState) -> bool {
-    matches!(
-        state,
-        ImageState::CopyDestination
-            | ImageState::ShaderWrite
-            | ImageState::ColorAttachment
-            | ImageState::DepthStencilAttachment
-    )
+    state.writes()
 }
 
-/// Derives allocation capabilities from a semantic state.
-///
-/// Exact because access kinds distinguish sampled reads from storage access.
-/// Transient-memory inference is deliberately not done here; that belongs to
-/// the planned transient allocator (.agents/plans/03).
 fn usage_bits(state: ImageState) -> ImageUsages {
-    match state {
-        ImageState::CopySource => ImageUsages::COPY_SRC,
-        ImageState::CopyDestination => ImageUsages::COPY_DST,
-        ImageState::ShaderRead => ImageUsages::SAMPLED,
-        ImageState::ShaderWrite => ImageUsages::STORAGE,
-        ImageState::ColorAttachment => ImageUsages::COLOR_ATTACHMENT,
-        ImageState::DepthStencilAttachment | ImageState::DepthStencilAttachmentReadOnly => {
-            ImageUsages::DEPTH_STENCIL_ATTACHMENT
-        }
-        ImageState::Undefined | ImageState::Present => ImageUsages::NONE,
-    }
+    state.image_usage()
 }
 
 /// Last-known synchronization state of one mip span.
@@ -750,7 +712,7 @@ struct CompiledPass<'a> {
     depth: Option<(TextureHandle, AttachmentInfo)>,
     extent: Option<Extent3d>,
     declared: Vec<(u32, bool)>,
-    callback: Option<PassCallback<'a>>,
+    callback: Option<Callback<'a>>,
 }
 
 struct CompiledGraph<'a> {
@@ -779,7 +741,6 @@ impl<'a> GraphExecutor<'a> {
         let mut images = Vec::with_capacity(textures.len());
         for (desc, usage) in textures.into_iter().zip(usages) {
             let Some(imported) = desc.imported else {
-                let aspects = format_aspects(desc.format);
                 let image = device.rhi.create_image(&ImageDesc {
                     label: "render graph texture",
                     dimension: dirk_rhi::ImageDimension::TwoD,
@@ -790,27 +751,13 @@ impl<'a> GraphExecutor<'a> {
                     array_layers: 1,
                     samples: desc.samples,
                 })?;
-                let view = device.rhi.create_image_view(&ImageViewDesc {
-                    label: "render graph texture view",
-                    image: &image,
-                    view_type: ImageViewType::TwoD,
-                    aspects,
-                    base_mip_level: 0,
-                    mip_level_count: 1,
-                    base_array_layer: 0,
-                    array_layer_count: 1,
-                })?;
-                images.push(ResolvedImage {
-                    image,
-                    view,
-                    aspects,
-                });
+                let view = device.rhi.view(&image)?;
+                images.push(ResolvedImage { image, view });
                 continue;
             };
             images.push(ResolvedImage {
                 image: imported.image,
                 view: imported.view,
-                aspects: imported.aspects,
             });
         }
         Ok(Self {
@@ -826,6 +773,11 @@ impl<'a> GraphExecutor<'a> {
             record_barriers(cmd, &self.images, &pass.barriers)?;
             let has_rendering = !pass.colors.is_empty() || pass.depth.is_some();
 
+            let context = PassContext {
+                device: &self.device,
+                images: &self.images,
+                declared: &pass.declared,
+            };
             if has_rendering {
                 let colors = pass
                     .colors
@@ -847,7 +799,7 @@ impl<'a> GraphExecutor<'a> {
                     stencil_store: info.store,
                 });
                 let extent = pass.extent.unwrap_or_else(|| Extent3d::new_2d(1, 1));
-                cmd.rhi_mut().begin_rendering(&RenderingInfo {
+                let mut scope = cmd.begin_render_pass(&RenderingInfo {
                     label: &pass.name,
                     width: extent.width,
                     height: extent.height,
@@ -855,18 +807,24 @@ impl<'a> GraphExecutor<'a> {
                     color_attachments: &colors,
                     depth_attachment: depth,
                 })?;
-            }
-
-            if let Some(callback) = pass.callback.take() {
-                let context = PassContext {
-                    device: &self.device,
-                    images: &self.images,
-                    declared: &pass.declared,
-                };
-                callback(cmd, &context)?;
-            }
-            if has_rendering {
-                cmd.rhi_mut().end_rendering()?;
+                match pass.callback.take() {
+                    Some(Callback::Graphics(callback)) => callback(&mut scope, &context)?,
+                    Some(Callback::Transfer(_)) => {
+                        return Err(
+                            dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Mismatch).into(),
+                        );
+                    }
+                    None => {}
+                }
+            } else if let Some(callback) = pass.callback.take() {
+                match callback {
+                    Callback::Transfer(callback) => callback(cmd, &context)?,
+                    Callback::Graphics(_) => {
+                        return Err(
+                            dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Mismatch).into(),
+                        );
+                    }
+                }
             }
         }
         record_barriers(cmd, &self.images, &self.final_barriers)?;
@@ -890,7 +848,11 @@ fn record_barriers(
                 image: &image.image,
                 old_state: barrier.old_state,
                 new_state: barrier.new_state,
-                aspects: image.aspects,
+                aspects: if barrier.range.aspects.is_empty() {
+                    image.image.description().format.aspects()
+                } else {
+                    barrier.range.aspects
+                },
                 base_mip_level: barrier.range.base_mip_level,
                 mip_level_count: barrier.range.mip_level_count,
                 base_array_layer: barrier.range.base_array_layer,
@@ -899,22 +861,12 @@ fn record_barriers(
             }
         })
         .collect::<Vec<_>>();
-    cmd.rhi_mut().barrier(&DependencyInfo {
+    cmd.barrier(&DependencyInfo {
         memory_barriers: &[],
         buffer_barriers: &[],
         image_barriers: &barriers,
     })?;
     Ok(())
-}
-
-fn format_aspects(format: TextureFormat) -> ImageAspects {
-    match format {
-        TextureFormat::Depth16Unorm | TextureFormat::Depth32Float => ImageAspects::DEPTH,
-        TextureFormat::Depth24UnormStencil8 | TextureFormat::Depth32FloatStencil8 => {
-            ImageAspects::DEPTH | ImageAspects::STENCIL
-        }
-        _ => ImageAspects::COLOR,
-    }
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -972,8 +924,8 @@ mod tests {
     #[test]
     fn read_after_read_in_the_same_state_needs_no_barrier() {
         assert!(!barrier_needed(
-            ImageState::ShaderRead,
-            ImageState::ShaderRead
+            ImageState::ShaderRead(ShaderStages::FRAGMENT),
+            ImageState::ShaderRead(ShaderStages::FRAGMENT)
         ));
     }
 
@@ -1079,6 +1031,7 @@ mod tests {
 
     fn mip_range(base: u32) -> SubresourceRange {
         SubresourceRange {
+            aspects: dirk_rhi::ImageAspects::NONE,
             base_mip_level: base,
             mip_level_count: 1,
             base_array_layer: 0,

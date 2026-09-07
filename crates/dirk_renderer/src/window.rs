@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dirk_platform::WindowId;
-use dirk_rhi::{Backend as _, Extent3d, TextureFormat};
+use dirk_rhi::{Extent3d, TextureFormat};
 
 use crate::{
     Result,

@@ -1,10 +1,7 @@
 use dirk_rhi::{SampleCount, TextureFormat, VertexAttribute, VertexFormat};
 
 use crate::{
-    resources::{
-        command_pool::{CommandBuffer, CommandPool, Graphics},
-        sync::Fence,
-    },
+    resources::command_pool::{CommandPool, Graphics},
     shaders::metadata::VertexInput,
 };
 
@@ -41,13 +38,8 @@ impl VertexInput for Vertex {
 pub struct Frame {
     /// Command pool to allocate command buffers on every frame
     pub command_pool: CommandPool<Graphics>,
-    /// Submitted command buffers kept alive until this frame's fence completes.
-    pub submitted_command_buffers: Vec<CommandBuffer>,
-    /// Main synchronization fence
-    pub fence: Fence,
-    // TODO: have one primary command buffer that is allocated once and
-    // secondary command for each scene. Should be allocated every time
-    // there is a change in scene count. If not reallocated, reset.
+    /// Completion of the previous work submitted for this frame slot.
+    pub completion: Option<crate::resources::ActiveFence>,
 }
 
 pub struct RendererProperties {

@@ -12,9 +12,9 @@ use std::{
 use anyhow::Context;
 #[cfg(feature = "editor")]
 use ash::vk;
-use dirk_rhi::{Backend as _, Extent3d, SampleCount};
+use dirk_rhi::Extent3d;
 #[cfg(not(feature = "editor"))]
-use dirk_rhi::{CommandBuffer as _, ImageAspects, ImageCopy};
+use dirk_rhi::{ImageAspects, ImageCopy};
 
 #[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
@@ -50,11 +50,10 @@ use window::Window;
 
 mod resources;
 use resources::{
-    ActiveRhi,
-    command_pool::{CommandBuffer, CommandPool},
+    ActiveRecordedCommands, ActiveRhi,
+    command_pool::CommandPool,
     device::{FrameCounters, RenderDevice},
     swapchain::RenderImage,
-    sync::Fence,
 };
 
 mod proxy;
@@ -81,7 +80,7 @@ mod viewport_editor;
 use viewport_editor::ViewportEditor;
 
 mod frame_graph;
-use frame_graph::{RenderGraph, TextureDesc};
+use frame_graph::RenderGraph;
 
 /// Registers renderer integration with the engine.
 pub struct RendererPlugin;
@@ -212,7 +211,7 @@ struct PresentationTarget {
 }
 
 struct ViewportRenderSubmission {
-    command_buffer: CommandBuffer,
+    command_buffer: ActiveRecordedCommands,
     rendered_players: Vec<PlayerId>,
 }
 
@@ -257,8 +256,7 @@ impl Renderer {
         let build_frame = || -> Result<Frame> {
             Ok(Frame {
                 command_pool: CommandPool::build(&render_device.rhi)?,
-                submitted_command_buffers: Vec::new(),
-                fence: Fence::signaled(&render_device.rhi)?,
+                completion: None,
             })
         };
         Ok([build_frame()?, build_frame()?])
@@ -586,6 +584,9 @@ impl Renderer {
         self.egui.end_frame();
 
         let frame_index = self.current_frame();
+        if let Some(completion) = self.frames[frame_index].completion.take() {
+            completion.wait(u64::MAX)?;
+        }
         #[cfg(feature = "editor")]
         {
             self.egui.free_textures_for_frame(frame_index)?;
@@ -597,8 +598,6 @@ impl Renderer {
         #[cfg(not(feature = "editor"))]
         self.update_non_editor_presentation()?;
 
-        self.frames[frame_index].fence.wait(u64::MAX)?;
-        self.frames[frame_index].submitted_command_buffers.clear();
         self.render_device.rhi.collect_garbage()?;
 
         let viewport_submission = self.record_viewport_graph(frame_index)?;
@@ -609,25 +608,19 @@ impl Renderer {
             viewport_submission.as_ref(),
         )?;
 
+        let rendered_players = viewport_submission
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.rendered_players.clone());
         self.submit_frame(
             frame_index,
-            viewport_submission.as_ref(),
-            presentation_cmd.as_ref(),
+            viewport_submission,
+            presentation_cmd,
             &presentation_targets,
         )?;
-
-        if let Some(submission) = viewport_submission {
-            for player in submission.rendered_players {
-                if let Some(viewport) = self.viewports.get_mut(&player) {
-                    viewport.mark_render_submitted(viewport.next_render_value());
-                }
+        for player in rendered_players {
+            if let Some(viewport) = self.viewports.get_mut(&player) {
+                viewport.mark_render_submitted(viewport.next_render_value());
             }
-            self.frames[frame_index]
-                .submitted_command_buffers
-                .push(submission.command_buffer);
-        }
-        if let Some(cmd) = presentation_cmd {
-            self.frames[frame_index].submitted_command_buffers.push(cmd);
         }
 
         for target in presentation_targets {
@@ -669,13 +662,7 @@ impl Renderer {
             };
             rendered_players.push(viewport.player());
 
-            let output = graph.import_texture(TextureDesc {
-                width: viewport.settings().extent.width,
-                height: viewport.settings().extent.height,
-                format: viewport.settings().format,
-                samples: SampleCount::One,
-                imported: Some(viewport.import()),
-            });
+            let output = graph.import_texture(viewport.import());
             self.scene_manager.render(
                 &mut graph,
                 &self.models,
@@ -697,10 +684,11 @@ impl Renderer {
             return Ok(None);
         }
 
-        let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
-        cmd.begin("viewport render graph")?;
+        let mut cmd = self.frames[frame_index]
+            .command_pool
+            .begin("viewport render graph")?;
         graph.run(&self.render_device, &mut cmd)?;
-        cmd.end()?;
+        let cmd = cmd.finish()?;
 
         Ok(Some(ViewportRenderSubmission {
             command_buffer: cmd,
@@ -734,7 +722,7 @@ impl Renderer {
         #[cfg_attr(feature = "editor", allow(unused_variables))] viewport_submission: Option<
             &ViewportRenderSubmission,
         >,
-    ) -> Result<Option<resources::command_pool::CommandBuffer>> {
+    ) -> Result<Option<ActiveRecordedCommands>> {
         if targets.is_empty() {
             return Ok(None);
         }
@@ -743,13 +731,7 @@ impl Renderer {
         #[cfg(feature = "editor")]
         let mut egui_target = None;
         for target in targets {
-            let swapchain = graph.import_texture(TextureDesc {
-                width: target.extent.width,
-                height: target.extent.height,
-                format: target.image.format(),
-                samples: SampleCount::One,
-                imported: Some(target.image.import()),
-            });
+            let swapchain = graph.import_texture(target.image.import());
 
             graph.add_pass("clear swapchain").write_color_attachment(
                 swapchain,
@@ -767,28 +749,21 @@ impl Renderer {
                     submission.rendered_players.contains(&viewport.player())
                 });
                 if viewport.has_rendered() || rendered_this_frame {
-                    let viewport_extent = viewport.settings().extent;
                     let target_extent = target.extent;
-                    let viewport_source = graph.import_texture(TextureDesc {
-                        width: viewport_extent.width,
-                        height: viewport_extent.height,
-                        format: viewport.settings().format,
-                        samples: SampleCount::One,
-                        imported: Some(if rendered_this_frame {
-                            viewport.import_after_render()
-                        } else {
-                            viewport.import()
-                        }),
+                    let viewport_source = graph.import_texture(if rendered_this_frame {
+                        viewport.import_after_render()
+                    } else {
+                        viewport.import()
                     });
 
                     let mut copy_pass = graph.add_pass("copy scene to swapchain");
                     copy_pass
                         .read_transfer_src(viewport_source)
                         .write_transfer_dst(swapchain);
-                    copy_pass.execute(Box::new(move |cmd, ctx| {
+                    copy_pass.execute_transfer(Box::new(move |cmd, ctx| {
                         let source = ctx.resolve(viewport_source)?;
                         let destination = ctx.resolve(swapchain)?;
-                        cmd.rhi_mut().copy_image(
+                        cmd.copy_image(
                             &source.image,
                             &destination.image,
                             &[ImageCopy {
@@ -802,7 +777,7 @@ impl Renderer {
                                 extent: Extent3d::new_2d(target_extent.width, target_extent.height),
                                 aspects: ImageAspects::COLOR,
                             }],
-                        );
+                        )?;
                         Ok(())
                     }));
                 }
@@ -827,10 +802,11 @@ impl Renderer {
             }));
         }
 
-        let mut cmd = self.frames[frame_index].command_pool.allocate_buffer()?;
-        cmd.begin("presentation render graph")?;
+        let mut cmd = self.frames[frame_index]
+            .command_pool
+            .begin("presentation render graph")?;
         graph.run(&self.render_device, &mut cmd)?;
-        cmd.end()?;
+        let cmd = cmd.finish()?;
 
         Ok(Some(cmd))
     }
@@ -873,19 +849,21 @@ impl Renderer {
     }
 
     fn submit_frame(
-        &self,
+        &mut self,
         frame_index: usize,
-        viewport_submission: Option<&ViewportRenderSubmission>,
-        presentation_cmd: Option<&resources::command_pool::CommandBuffer>,
+        viewport_submission: Option<ViewportRenderSubmission>,
+        presentation_cmd: Option<ActiveRecordedCommands>,
         presentation_targets: &[PresentationTarget],
     ) -> Result<()> {
-        let rendered_viewports = viewport_submission.map_or_else(Vec::new, |submission| {
-            submission
-                .rendered_players
-                .iter()
-                .filter_map(|player| self.viewports.get(player))
-                .collect::<Vec<_>>()
-        });
+        let rendered_viewports = viewport_submission
+            .as_ref()
+            .map_or_else(Vec::new, |submission| {
+                submission
+                    .rendered_players
+                    .iter()
+                    .filter_map(|player| self.viewports.get(player))
+                    .collect::<Vec<_>>()
+            });
 
         let signal_timelines = rendered_viewports
             .iter()
@@ -896,26 +874,28 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         let command_buffers = viewport_submission
-            .map(|submission| submission.command_buffer.rhi())
+            .map(|submission| submission.command_buffer)
             .into_iter()
-            .chain(presentation_cmd.map(resources::command_pool::CommandBuffer::rhi))
+            .chain(presentation_cmd)
             .collect::<Vec<_>>();
         let surface_frames = presentation_targets
             .iter()
             .map(|target| target.image.rhi())
             .collect::<Vec<_>>();
 
-        self.frames[frame_index].fence.reset()?;
-        self.render_device.rhi.submit(
-            dirk_rhi::QueueType::Graphics,
-            &dirk_rhi::Submission {
-                command_buffers: &command_buffers,
-                surface_frames: &surface_frames,
-                wait_timelines: &[],
-                signal_timelines: &signal_timelines,
-                fence: Some(self.frames[frame_index].fence.rhi()),
-            },
-        )?;
+        self.frames[frame_index].completion = Some(
+            self.render_device
+                .rhi
+                .queue::<dirk_rhi::Graphics>()
+                .submit(
+                    command_buffers,
+                    &dirk_rhi::SubmitInfo {
+                        surface_frames: &surface_frames,
+                        wait_timelines: &[],
+                        signal_timelines: &signal_timelines,
+                    },
+                )?,
+        );
 
         Ok(())
     }

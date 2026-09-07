@@ -97,3 +97,14 @@ See [the backend conformance plan](rhi-backend-conformance.md). Actual-backend
 testing is intentionally deferred while GPU availability and OS/CI constraints
 are investigated. Mock contract tests remain useful but do not prove native
 backend behavior.
+
+## Renderer integration status
+
+The renderer uses shared resource handles, scoped graphics callbacks, typed
+transfer encoders, and consuming frame submissions. Frame slots retain only
+completion tokens. Graph imports derive allocation metadata from their images;
+semantic dependencies carry shader visibility and the RHI's subresource range.
+Asset uploads share aligned staging code with the UI path further up the stack.
+Backends without exact linear blits use CPU sRGB mip generation for assets.
+The legacy Vulkan egui adapter remains an explicitly unsafe native integration
+until its replacement in the egui PR.

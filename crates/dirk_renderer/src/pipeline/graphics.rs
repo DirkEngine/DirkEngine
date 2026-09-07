@@ -1,18 +1,17 @@
 use std::marker::PhantomData;
 
 use dirk_rhi::{
-    Backend as _, BindGroupLayoutDesc, BindGroupLayoutEntry, ColorTargetState, ColorWrites,
-    CommandBuffer as _, CompareOp, CullMode, DepthBiasState, DepthState, FrontFace,
-    GraphicsPipelineDesc, PipelineLayoutDesc, PrimitiveTopology, RasterState,
+    BindGroupLayoutDesc, BindGroupLayoutEntry, ColorTargetState, ColorWrites, CompareOp, CullMode,
+    DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, PipelineLayoutDesc,
+    PrimitiveTopology, RasterState,
 };
 use tracing::debug;
 
 use crate::{
     Error, Result,
     resources::{
-        ActiveBindGroup, ActiveGraphicsPipeline, ActivePipelineLayout,
+        ActiveBindGroup, ActiveGraphicsPipeline, ActivePipelineLayout, ActiveRenderPass,
         buffer::VertexBuffer,
-        command_pool::CommandBuffer,
         descriptors::{DescriptorSet, layouts::SetLayout},
         device::RenderDevice,
     },
@@ -88,8 +87,8 @@ pub struct GraphicsPipeline<Spec: GraphicsPipelineSpec> {
 }
 
 /// Typed rendering context for a bound graphics pipeline.
-pub struct GraphicsPipelineRenderingContext<'cmd, Spec: GraphicsPipelineSpec> {
-    command: &'cmd mut CommandBuffer,
+pub struct GraphicsPipelineRenderingContext<'cmd, 'pass, Spec: GraphicsPipelineSpec> {
+    command: &'cmd mut ActiveRenderPass<'pass>,
     layout: &'cmd ActivePipelineLayout,
     _spec: PhantomData<Spec>,
 }
@@ -154,11 +153,11 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
         })
     }
 
-    pub fn bind<'cmd>(
+    pub fn bind<'cmd, 'pass>(
         &'cmd self,
-        command: &'cmd mut CommandBuffer,
-    ) -> Result<GraphicsPipelineRenderingContext<'cmd, Spec>> {
-        command.rhi_mut().bind_graphics_pipeline(&self.pipeline)?;
+        command: &'cmd mut ActiveRenderPass<'pass>,
+    ) -> Result<GraphicsPipelineRenderingContext<'cmd, 'pass, Spec>> {
+        command.bind_graphics_pipeline(&self.pipeline)?;
         Ok(GraphicsPipelineRenderingContext {
             command,
             layout: &self.layout,
@@ -167,26 +166,24 @@ impl<Spec: GraphicsPipelineSpec> GraphicsPipeline<Spec> {
     }
 }
 
-impl<Spec: GraphicsPipelineSpec> GraphicsPipelineRenderingContext<'_, Spec> {
+impl<'pass, Spec: GraphicsPipelineSpec> GraphicsPipelineRenderingContext<'_, 'pass, Spec> {
     pub fn bind_descriptor_sets<'a>(
         &mut self,
         sets: &'a <Spec::DescriptorSets as DescriptorSetInput>::Refs<'a>,
     ) -> Result<()> {
         let groups = Spec::DescriptorSets::groups(sets);
         self.command
-            .rhi_mut()
             .bind_groups(self.layout, 0, &groups, &[])
             .map_err(Into::into)
     }
 
     pub fn bind_vertex_buffer(&mut self, vertex_buffer: &VertexBuffer<Spec::Input>) -> Result<()> {
         self.command
-            .rhi_mut()
             .bind_vertex_buffer(0, vertex_buffer.buffer(), 0)
             .map_err(Into::into)
     }
 
-    pub fn command(&mut self) -> &mut CommandBuffer {
+    pub fn command(&mut self) -> &mut ActiveRenderPass<'pass> {
         self.command
     }
 }

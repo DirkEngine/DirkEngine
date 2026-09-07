@@ -1,134 +1,51 @@
-use std::{marker::PhantomData, sync::Arc};
-
-use parking_lot::Mutex;
-
-#[cfg(feature = "editor")]
-use std::ops::Deref;
-
-#[cfg(feature = "editor")]
-use ash::vk;
-use dirk_rhi::{Backend as _, CommandBuffer as _, Fence as _, QueueType, Submission};
-
+//! Typed command allocation; the shared RHI owns native pools through completion.
 use crate::{
     Result,
-    resources::{ActiveCommandBuffer, ActiveCommandPool, ActiveRhi},
+    resources::{ActiveBackend, ActiveRhi},
 };
+use dirk_rhi::{CommandEncoder, QueueKind};
+pub use dirk_rhi::{CopyQueue as Transfer, Graphics};
+use std::{marker::PhantomData, sync::Arc};
+pub type CommandBuffer = CommandEncoder<ActiveBackend>;
 
-#[derive(Debug)]
-pub struct Graphics;
-#[derive(Debug)]
-pub struct Transfer;
-
-/// Queue marker implemented by command-pool kinds used by the renderer.
-pub trait Pool {
-    /// Semantic RHI queue used by this pool.
-    const QUEUE: QueueType;
-}
-
-impl Pool for Graphics {
-    const QUEUE: QueueType = QueueType::Graphics;
-}
-
-impl Pool for Transfer {
-    const QUEUE: QueueType = QueueType::Copy;
-}
-
-/// Typed renderer wrapper around an RHI command pool.
-///
-/// The inner pool is mutex-guarded because the RHI requires exclusive access
-/// for command-buffer allocation while renderer pools are shared by `&self`.
-pub struct CommandPool<Type: Pool> {
+pub struct CommandPool<Q: QueueKind> {
     rhi: Arc<ActiveRhi>,
-    inner: Mutex<ActiveCommandPool>,
-    pool_type: PhantomData<Type>,
+    kind: PhantomData<Q>,
+    // Temporary compatibility allocator for egui-ash's synchronous uploads.
+    #[cfg(feature = "editor")]
+    legacy: dirk_rhi_vulkan::VulkanCommandPool,
 }
-
-impl<Type: Pool> CommandPool<Type> {
-    /// Creates a resettable command pool for this marker's queue.
+impl<Q: QueueKind> CommandPool<Q> {
+    #[cfg_attr(
+        not(feature = "editor"),
+        allow(
+            clippy::unnecessary_wraps,
+            reason = "the editor compatibility allocator is fallible; keep one feature-independent signature"
+        )
+    )]
     pub fn build(rhi: &Arc<ActiveRhi>) -> Result<Self> {
         Ok(Self {
-            inner: Mutex::new(rhi.create_command_pool(Type::QUEUE)?),
-            rhi: rhi.clone(),
-            pool_type: PhantomData,
-        })
-    }
-
-    #[cfg(feature = "editor")]
-    pub fn raw(&self) -> vk::CommandPool {
-        self.inner.lock().raw()
-    }
-
-    pub fn allocate_buffer(&self) -> Result<CommandBuffer> {
-        let mut pool = self.inner.lock();
-        let inner = self.rhi.create_command_buffer(&mut pool)?;
-        Ok(CommandBuffer {
+            rhi: rhi.clone(), kind: PhantomData,
             #[cfg(feature = "editor")]
-            raw: inner.raw(),
-            inner,
-            rhi: self.rhi.clone(),
-            queue: Type::QUEUE,
+            // SAFETY: renderer initialization is exclusive; egui waits for its uploads.
+            legacy: unsafe { dirk_rhi::Backend::create_command_pool(rhi.native(), dirk_rhi::QueueType::Graphics)? },
         })
     }
-
-    pub fn begin_single_time(&self) -> Result<CommandBuffer> {
-        let mut command = self.allocate_buffer()?;
-        command.inner.begin("immediate renderer command", true)?;
-        Ok(command)
+    pub fn begin(&self, label: &str) -> Result<CommandEncoder<ActiveBackend, Q>> {
+        Ok(self.rhi.create_encoder(label)?)
     }
-}
-
-/// Renderer command buffer backed by the active RHI.
-pub struct CommandBuffer {
+    pub fn begin_single_time(&self) -> Result<CommandEncoder<ActiveBackend, Q>> {
+        self.begin("renderer upload")
+    }
+    pub fn submit_and_wait(&self, command: CommandEncoder<ActiveBackend, Q>) -> Result<()> {
+        self.rhi
+            .queue::<Q>()
+            .submit(vec![command.finish()?], &dirk_rhi::SubmitInfo::default())?
+            .wait(u64::MAX)?;
+        Ok(())
+    }
     #[cfg(feature = "editor")]
-    raw: vk::CommandBuffer,
-    inner: ActiveCommandBuffer,
-    rhi: Arc<ActiveRhi>,
-    queue: QueueType,
-}
-
-impl CommandBuffer {
-    pub fn begin(&mut self, label: &str) -> Result<()> {
-        self.inner.begin(label, false)?;
-        Ok(())
-    }
-
-    pub fn end(&mut self) -> Result<()> {
-        self.inner.end()?;
-        Ok(())
-    }
-
-    pub(crate) fn rhi_mut(&mut self) -> &mut ActiveCommandBuffer {
-        &mut self.inner
-    }
-
-    pub(crate) fn rhi(&self) -> &ActiveCommandBuffer {
-        &self.inner
-    }
-
-    /// Ends, submits, and waits for a short-lived command buffer.
-    pub fn end_and_submit(&mut self) -> Result<()> {
-        self.inner.end()?;
-        let fence = self.rhi.create_fence(false)?;
-        self.rhi.submit(
-            self.queue,
-            &Submission {
-                command_buffers: &[&self.inner],
-                surface_frames: &[],
-                wait_timelines: &[],
-                signal_timelines: &[],
-                fence: Some(&fence),
-            },
-        )?;
-        fence.wait(u64::MAX)?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "editor")]
-impl Deref for CommandBuffer {
-    type Target = vk::CommandBuffer;
-
-    fn deref(&self) -> &Self::Target {
-        &self.raw
+    pub fn raw(&self) -> ash::vk::CommandPool {
+        self.legacy.raw()
     }
 }

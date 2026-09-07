@@ -8,7 +8,7 @@ use egui_ash_renderer::{DynamicRendering, Options};
 
 use crate::{
     MAX_FRAMES_IN_FLIGHT, Result,
-    resources::{command_pool::CommandBuffer, device::RenderDevice},
+    resources::{ActiveRenderPass, device::RenderDevice},
 };
 
 pub struct EguiState {
@@ -43,9 +43,9 @@ impl EguiState {
             }
         };
         let renderer = egui_ash_renderer::Renderer::with_default_allocator(
-            device.rhi.instance(),
-            device.rhi.physical_device(),
-            device.rhi.device().clone(),
+            unsafe { device.rhi.native() }.instance(),
+            unsafe { device.rhi.native() }.physical_device(),
+            unsafe { device.rhi.native() }.device().clone(),
             DynamicRendering {
                 color_attachment_format: surface_format,
                 depth_attachment_format: None,
@@ -138,7 +138,7 @@ impl EguiState {
     pub fn render(
         &mut self,
         device: &RenderDevice,
-        cmd: &CommandBuffer,
+        cmd: &mut ActiveRenderPass<'_>,
         extent: vk::Extent2D,
         frame: usize,
     ) -> Result<()> {
@@ -147,13 +147,14 @@ impl EguiState {
         };
 
         self.renderer.set_textures(
-            device.rhi.queue(dirk_rhi::QueueType::Graphics),
+            unsafe { device.rhi.native() }.queue(dirk_rhi::QueueType::Graphics),
             device.graphics_pool.raw(),
             pending.textures_delta.set.as_slice(),
         )?;
 
         self.renderer.cmd_draw(
-            **cmd,
+            // SAFETY: egui owns its resources until frame completion and is the last draw in this pass.
+            unsafe { cmd.native() }.raw(),
             extent,
             pending.pixels_per_point,
             pending.primitives.as_slice(),

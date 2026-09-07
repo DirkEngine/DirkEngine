@@ -1,7 +1,5 @@
 //! Compiled shader blobs used by the renderer.
 
-use dirk_rhi::Backend as _;
-
 macro_rules! shader_code {
     ($name:literal) => {
         ShaderCode {
@@ -25,12 +23,15 @@ impl ShaderCode {
         entry: &'static str,
     ) -> crate::Result<crate::resources::ActiveShader> {
         let words = self.code_as_u32();
-        Ok(device.rhi.create_shader(&dirk_rhi::ShaderDesc {
-            label: entry,
-            stage,
-            entry,
-            source: dirk_rhi::ShaderSource::SpirV(&words),
-        })?)
+        // SAFETY: trusted engine shaders are compiled and reflected together by build.rs.
+        Ok(unsafe {
+            device.rhi.create_shader(&dirk_rhi::ShaderDesc {
+                label: entry,
+                stage,
+                entry,
+                source: dirk_rhi::ShaderSource::SpirV(&words),
+            })
+        }?)
     }
 
     /// Returns the shader code as little-endian `u32` words.

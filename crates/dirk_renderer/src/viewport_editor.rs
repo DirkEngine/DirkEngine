@@ -6,8 +6,7 @@ use dirk_engine::editor::{
 use dirk_input::{ButtonState, InputEvent, egui::input_events_from_egui_response};
 use dirk_player::{PlayerId, PlayerInputSender};
 use dirk_rhi::{
-    AddressMode, Backend as _, BindGroupLayoutEntry, BindingType, Extent3d, FilterMode,
-    SamplerDesc, ShaderStages,
+    AddressMode, BindGroupLayoutEntry, BindingType, Extent3d, FilterMode, SamplerDesc, ShaderStages,
 };
 use parking_lot::Mutex;
 

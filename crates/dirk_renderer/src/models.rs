@@ -13,7 +13,7 @@ use std::{
     ops::Deref,
 };
 
-use dirk_rhi::{CommandBuffer as _, IndexFormat};
+use dirk_rhi::IndexFormat;
 
 use crate::{
     Error, Result,
@@ -159,7 +159,7 @@ impl ModelRegistry {
         handle: &dirk_assets::AssetHandle,
         scene_set: &DescriptorSet<SceneSet>,
         proxy_set: &DescriptorSet<ObjectSet>,
-        ctx: &mut GraphicsPipelineRenderingContext<'_, MainPipelineSpec>,
+        ctx: &mut GraphicsPipelineRenderingContext<'_, '_, MainPipelineSpec>,
     ) -> Result<()> {
         if handle.asset_type() != dirk_assets::AssetType::Model {
             return Err(dirk_assets::Error::TypeMismatch(handle.to_string()).into());
@@ -182,14 +182,9 @@ impl ModelRegistry {
 
             ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set))?;
             ctx.bind_vertex_buffer(&prim.vertex_buffer)?;
-            ctx.command().rhi_mut().bind_index_buffer(
-                prim.index_buffer.rhi(),
-                0,
-                IndexFormat::Uint32,
-            )?;
             ctx.command()
-                .rhi_mut()
-                .draw_indexed(prim.index_count, 1, 0, 0, 0)?;
+                .bind_index_buffer(prim.index_buffer.rhi(), 0, IndexFormat::Uint32)?;
+            ctx.command().draw_indexed(prim.index_count, 1, 0, 0, 0)?;
         }
         Ok(())
     }

@@ -1,42 +1,8 @@
-//! Synchronization wrappers backed by the active RHI.
-
-use dirk_rhi::{Backend as _, Fence as _, TimelineSemaphore as _};
-
+//! Renderer timeline synchronization.
 use crate::{
     Result,
-    resources::{ActiveFence, ActiveRhi, ActiveTimelineSemaphore},
+    resources::{ActiveRhi, ActiveTimelineSemaphore},
 };
-
-/// Reusable per-frame completion fence.
-pub struct Fence {
-    inner: ActiveFence,
-}
-
-impl Fence {
-    /// Creates a signaled fence.
-    pub fn signaled(rhi: &ActiveRhi) -> Result<Self> {
-        Ok(Self {
-            inner: rhi.create_fence(true)?,
-        })
-    }
-
-    /// Waits for the submission associated with this fence to complete.
-    pub fn wait(&self, timeout: u64) -> Result<()> {
-        self.inner.wait(timeout)?;
-        Ok(())
-    }
-
-    /// Resets this fence before its next submission.
-    pub fn reset(&self) -> Result<()> {
-        self.inner.reset()?;
-        Ok(())
-    }
-
-    /// Returns the backend fence used in an RHI submission.
-    pub(crate) fn rhi(&self) -> &ActiveFence {
-        &self.inner
-    }
-}
 
 /// Renderer timeline semaphore used to order viewport output.
 #[derive(Clone)]

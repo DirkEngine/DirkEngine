@@ -1,5 +1,5 @@
 use dirk_player::PlayerId;
-use dirk_rhi::{Extent3d, ImageAspects, ImageUsages, SampleCount, TextureFormat};
+use dirk_rhi::{Extent3d, ImageUsages, SampleCount, TextureFormat};
 use dirk_universe::{Entity, WorldId};
 
 use crate::{
@@ -95,7 +95,6 @@ impl Viewport {
         ImportedTexture {
             image: self.output.rhi_image().clone(),
             view: self.output.rhi_view().clone(),
-            aspects: self.output.rhi_aspects(),
             initial_state: self.output_state.state,
             final_state: Self::shader_read_state().state,
         }
@@ -130,7 +129,7 @@ impl Viewport {
 
     fn shader_read_state() -> TextureState {
         TextureState {
-            state: dirk_rhi::ImageState::ShaderRead,
+            state: dirk_rhi::ImageState::ShaderRead(dirk_rhi::ShaderStages::FRAGMENT),
         }
     }
 
@@ -143,7 +142,6 @@ impl Viewport {
                 usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
                 mip_levels: 1,
                 samples: SampleCount::One,
-                aspects: ImageAspects::COLOR,
             },
         )
     }

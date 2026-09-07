@@ -28,6 +28,7 @@ impl<L: SetLayout> DescriptorSet<L> {
     /// Returns the Vulkan descriptor set used by the temporary editor adapter.
     #[cfg(feature = "editor")]
     pub fn raw(&self) -> vk::DescriptorSet {
-        self.inner.raw()
+        // SAFETY: legacy egui descriptors are retained by the viewport until frame completion.
+        unsafe { self.inner.native() }.raw()
     }
 }

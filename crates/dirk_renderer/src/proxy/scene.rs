@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dirk_rhi::{
-    CommandBuffer as _, Extent3d, MemoryDomain, Rect, SampleCount, TextureFormat, Viewport,
-};
+use dirk_rhi::{Extent3d, MemoryDomain, Rect, SampleCount, TextureFormat, Viewport};
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
 
@@ -12,8 +10,8 @@ use crate::{
     models::ModelRegistry,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipeline},
     resources::{
+        ActiveRenderPass,
         buffer::UniformBuffer,
-        command_pool::CommandBuffer,
         descriptors::{
             DescriptorAllocator, DescriptorSet,
             sets::{ObjectSet, SceneSet},
@@ -111,7 +109,7 @@ impl SceneManager {
     fn record_scene_draws(
         &self,
         models: &ModelRegistry,
-        cmd: &mut CommandBuffer,
+        cmd: &mut ActiveRenderPass<'_>,
         world: WorldId,
         settings: &SceneRenderSettings,
         camera: Entity,
@@ -162,7 +160,7 @@ impl SceneManager {
 
         // the window size never gets anywhere near 2^23
         #[allow(clippy::cast_precision_loss)]
-        ctx.command().rhi_mut().set_viewport(Viewport {
+        ctx.command().set_viewport(Viewport {
             x: 0.0,
             y: 0.0,
             width: settings.extent.width as f32,
@@ -170,7 +168,7 @@ impl SceneManager {
             min_depth: 0.0,
             max_depth: 1.0,
         })?;
-        ctx.command().rhi_mut().set_scissor(Rect {
+        ctx.command().set_scissor(Rect {
             x: 0,
             y: 0,
             width: settings.extent.width,

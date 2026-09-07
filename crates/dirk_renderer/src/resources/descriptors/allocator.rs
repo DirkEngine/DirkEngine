@@ -2,9 +2,7 @@
 
 use std::{marker::PhantomData, sync::Arc};
 
-use dirk_rhi::{
-    Backend as _, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindingResource, BindingType,
-};
+use dirk_rhi::{BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindingResource, BindingType};
 
 use crate::{
     Result,
@@ -18,7 +16,7 @@ use crate::{
 /// Owns one typed bind-group layout and creates groups implementing it.
 pub struct DescriptorAllocator<L: SetLayout> {
     rhi: Arc<ActiveRhi>,
-    layout: <ActiveRhi as dirk_rhi::Backend>::BindGroupLayout,
+    layout: <ActiveRhi as dirk_rhi::Api>::BindGroupLayout,
     _layout: PhantomData<L>,
 }
 
