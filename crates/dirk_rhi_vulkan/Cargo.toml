@@ -1,0 +1,31 @@
+[package]
+name = "dirk_rhi_vulkan"
+description = "Vulkan backend for DirkEngine's render hardware interface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ash.workspace = true
+ash-window.workspace = true
+dirk_rhi.workspace = true
+gpu-allocator.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+# Calling Vulkan through ash necessarily crosses an unsafe FFI boundary. The
+# unsafe code is contained in this backend crate and exposed through safe RHI
+# resource and command types.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"

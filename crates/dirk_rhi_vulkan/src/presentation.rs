@@ -1,0 +1,627 @@
+use std::{
+    ffi::CStr,
+    num::NonZeroU32,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use ash::vk;
+use dirk_rhi::{
+    Error, Extent3d, ImageUsages, InvalidResourceKind as Ir, PresentMode, Result,
+    SurfaceCreateInfo, SurfaceFormat, SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc,
+};
+use parking_lot::Mutex;
+
+use crate::{
+    VulkanBackend, VulkanFence, VulkanImage, VulkanImageView, convert,
+    device::{Context, Garbage},
+    vk_error,
+};
+
+#[derive(Clone)]
+/// Vulkan presentation surface tied to the backend instance.
+pub struct VulkanSurface(Arc<SurfaceInner>);
+
+struct SurfaceInner {
+    context: Arc<Context>,
+    raw: vk::SurfaceKHR,
+    _target: Arc<dyn dirk_rhi::SurfaceTarget>,
+}
+
+impl VulkanSurface {
+    pub(crate) fn create(context: &Arc<Context>, info: &SurfaceCreateInfo) -> Result<Self> {
+        let display = info.display_handle().map_err(|error| {
+            Error::Backend(anyhow::anyhow!("display handle is unavailable: {error:?}"))
+        })?;
+        let window = info.window_handle().map_err(|error| {
+            Error::Backend(anyhow::anyhow!("window handle is unavailable: {error:?}"))
+        })?;
+        let required_extensions =
+            ash_window::enumerate_required_extensions(display.as_raw()).map_err(vk_error)?;
+        if required_extensions.iter().any(|&extension| {
+            let extension = unsafe { CStr::from_ptr(extension) }.to_string_lossy();
+            !context
+                .enabled_instance_extensions
+                .contains(extension.as_ref())
+        }) {
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the RHI was not created with the instance extensions required by this surface"
+            )));
+        }
+        let raw = unsafe {
+            ash_window::create_surface(
+                &context.entry,
+                &context.instance,
+                display.as_raw(),
+                window.as_raw(),
+                None,
+            )
+        }
+        .map_err(vk_error)?;
+        let supported = unsafe {
+            context.surface_loader.get_physical_device_surface_support(
+                context.physical_device,
+                context.families.present,
+                raw,
+            )
+        }
+        .map_err(vk_error)?;
+        if !supported {
+            unsafe { context.surface_loader.destroy_surface(raw, None) };
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the selected Vulkan queue family cannot present to this surface"
+            )));
+        }
+        Ok(Self(Arc::new(SurfaceInner {
+            context: context.clone(),
+            raw,
+            _target: info.target().clone(),
+        })))
+    }
+
+    #[must_use]
+    /// Returns the native surface handle.
+    pub fn raw(&self) -> vk::SurfaceKHR {
+        self.0.raw
+    }
+}
+
+impl Drop for SurfaceInner {
+    fn drop(&mut self) {
+        self.context.retire(Garbage::Surface(self.raw));
+    }
+}
+
+#[derive(Default)]
+struct AcquireSlot {
+    acquired: bool,
+    completion: Option<VulkanFence>,
+}
+
+pub(crate) struct SwapchainGeneration {
+    pub(crate) context: Arc<Context>,
+    surface: VulkanSurface,
+    raw: vk::SwapchainKHR,
+    images: Vec<vk::Image>,
+    views: Vec<vk::ImageView>,
+    semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
+    acquisitions: Mutex<Vec<AcquireSlot>>,
+    format: SurfaceFormat,
+    extent: Extent3d,
+}
+
+impl SwapchainGeneration {
+    #[allow(
+        clippy::too_many_lines,
+        clippy::too_many_arguments,
+        reason = "swapchain creation keeps queried capabilities, format preference, and presentation policy together"
+    )]
+    fn create(
+        context: &Arc<Context>,
+        surface: &VulkanSurface,
+        width: u32,
+        height: u32,
+        usage: ImageUsages,
+        preferred_formats: &[SurfaceFormat],
+        desired_image_count: Option<NonZeroU32>,
+        present_mode: PresentMode,
+        old_swapchain: vk::SwapchainKHR,
+    ) -> Result<Arc<Self>> {
+        if !Arc::ptr_eq(context, &surface.0.context) {
+            return Err(Ir::ForeignInstance
+                .with_detail("surface belongs to another Vulkan device")
+                .into());
+        }
+        let capabilities = unsafe {
+            context
+                .surface_loader
+                .get_physical_device_surface_capabilities(context.physical_device, surface.raw())
+        }
+        .map_err(vk_error)?;
+        let extent = if capabilities.current_extent.width == u32::MAX {
+            vk::Extent2D {
+                width: width.clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: height.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
+        } else {
+            capabilities.current_extent
+        };
+        let formats = unsafe {
+            context
+                .surface_loader
+                .get_physical_device_surface_formats(context.physical_device, surface.raw())
+        }
+        .map_err(vk_error)?;
+        let surface_format = preferred_formats
+            .iter()
+            .find_map(|preferred| {
+                let requested = convert::format(preferred.texture);
+                formats
+                    .iter()
+                    .find(|format| {
+                        format.format == requested
+                            && format.color_space == convert::color_space(preferred.color_space)
+                    })
+                    .copied()
+            })
+            .or_else(|| {
+                formats
+                    .iter()
+                    .find(|format| {
+                        format.format == vk::Format::B8G8R8A8_SRGB
+                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                    })
+                    .copied()
+            })
+            .or_else(|| {
+                formats
+                    .iter()
+                    .find(|format| {
+                        convert::rhi_format(format.format).is_some()
+                            && convert::rhi_color_space(format.color_space).is_some()
+                    })
+                    .copied()
+            })
+            .ok_or_else(|| {
+                Error::Backend(anyhow::anyhow!(
+                    "the surface exposes no color format representable by the RHI"
+                ))
+            })?;
+        let texture = convert::rhi_format(surface_format.format).ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!(
+                "surface format is not represented by the RHI"
+            ))
+        })?;
+        let color_space =
+            convert::rhi_color_space(surface_format.color_space).ok_or_else(|| {
+                Error::Backend(anyhow::anyhow!(
+                    "surface color space is not represented by the RHI"
+                ))
+            })?;
+        let format = SurfaceFormat {
+            texture,
+            color_space,
+        };
+        let present_modes = unsafe {
+            context
+                .surface_loader
+                .get_physical_device_surface_present_modes(context.physical_device, surface.raw())
+        }
+        .map_err(vk_error)?;
+        let present_mode = if present_modes.contains(&convert::present_mode(present_mode)) {
+            convert::present_mode(present_mode)
+        } else {
+            vk::PresentModeKHR::FIFO
+        };
+        let image_usage = convert::image_usage(usage);
+        if image_usage.is_empty() || !capabilities.supported_usage_flags.contains(image_usage) {
+            return Err(Error::Backend(anyhow::anyhow!(
+                "the surface does not support the requested swapchain image usage"
+            )));
+        }
+        let mut image_count = desired_image_count.map_or_else(
+            || capabilities.min_image_count.saturating_add(1),
+            NonZeroU32::get,
+        );
+        image_count = image_count.max(capabilities.min_image_count);
+        if capabilities.max_image_count > 0 {
+            image_count = image_count.min(capabilities.max_image_count);
+        }
+        let mut queue_families = vec![context.families.graphics, context.families.present];
+        queue_families.sort_unstable();
+        queue_families.dedup();
+        let (sharing_mode, family_slice) = if queue_families.len() > 1 {
+            (vk::SharingMode::CONCURRENT, queue_families.as_slice())
+        } else {
+            (vk::SharingMode::EXCLUSIVE, &[][..])
+        };
+        let composite_alpha = [
+            vk::CompositeAlphaFlagsKHR::OPAQUE,
+            vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+            vk::CompositeAlphaFlagsKHR::INHERIT,
+        ]
+        .into_iter()
+        .find(|mode| capabilities.supported_composite_alpha.contains(*mode))
+        .ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!(
+                "the surface exposes no supported composite alpha mode"
+            ))
+        })?;
+        let create_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(surface.raw())
+            .min_image_count(image_count)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
+            .image_extent(extent)
+            .image_array_layers(1)
+            .image_usage(image_usage)
+            .image_sharing_mode(sharing_mode)
+            .queue_family_indices(family_slice)
+            .pre_transform(capabilities.current_transform)
+            .composite_alpha(composite_alpha)
+            .present_mode(present_mode)
+            .clipped(true)
+            .old_swapchain(old_swapchain);
+        let raw = unsafe {
+            context
+                .swapchain_loader
+                .create_swapchain(&create_info, None)
+        }
+        .map_err(vk_error)?;
+        let images = match unsafe { context.swapchain_loader.get_swapchain_images(raw) } {
+            Ok(images) => images,
+            Err(error) => {
+                unsafe { context.swapchain_loader.destroy_swapchain(raw, None) };
+                return Err(vk_error(error));
+            }
+        };
+        let mut views = Vec::with_capacity(images.len());
+        for &image in &images {
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(surface_format.format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            match unsafe { context.device.create_image_view(&view_info, None) } {
+                Ok(view) => views.push(view),
+                Err(error) => {
+                    for view in views {
+                        unsafe { context.device.destroy_image_view(view, None) };
+                    }
+                    unsafe { context.swapchain_loader.destroy_swapchain(raw, None) };
+                    return Err(vk_error(error));
+                }
+            }
+        }
+        let mut semaphores = Vec::with_capacity(images.len());
+        for _ in 0..images.len() {
+            let create_info = vk::SemaphoreCreateInfo::default();
+            let image_available =
+                match unsafe { context.device.create_semaphore(&create_info, None) } {
+                    Ok(semaphore) => semaphore,
+                    Err(error) => {
+                        destroy_partial(context, raw, views, semaphores);
+                        return Err(vk_error(error));
+                    }
+                };
+            let render_finished =
+                match unsafe { context.device.create_semaphore(&create_info, None) } {
+                    Ok(semaphore) => semaphore,
+                    Err(error) => {
+                        unsafe { context.device.destroy_semaphore(image_available, None) };
+                        destroy_partial(context, raw, views, semaphores);
+                        return Err(vk_error(error));
+                    }
+                };
+            semaphores.push((image_available, render_finished));
+        }
+        Ok(Arc::new(Self {
+            context: context.clone(),
+            surface: surface.clone(),
+            raw,
+            acquisitions: Mutex::new((0..images.len()).map(|_| AcquireSlot::default()).collect()),
+            images,
+            views,
+            semaphores,
+            format,
+            extent: Extent3d::new_2d(extent.width, extent.height),
+        }))
+    }
+}
+
+impl Drop for SwapchainGeneration {
+    fn drop(&mut self) {
+        let views = std::mem::take(&mut self.views);
+        let semaphores = std::mem::take(&mut self.semaphores)
+            .into_iter()
+            .flat_map(|(available, finished)| [available, finished])
+            .collect();
+        self.context.retire(Garbage::Swapchain {
+            raw: self.raw,
+            views,
+            semaphores,
+        });
+    }
+}
+
+/// Vulkan swapchain and its current recreatable generation.
+pub struct VulkanSwapchain {
+    generation: Arc<SwapchainGeneration>,
+    usage: ImageUsages,
+    preferred_formats: Vec<SurfaceFormat>,
+    desired_image_count: Option<NonZeroU32>,
+    present_mode: PresentMode,
+    next_acquisition: usize,
+}
+
+impl VulkanSwapchain {
+    pub(crate) fn create(
+        context: &Arc<Context>,
+        desc: &SwapchainDesc<'_, VulkanBackend>,
+    ) -> Result<Self> {
+        Ok(Self {
+            generation: SwapchainGeneration::create(
+                context,
+                desc.surface,
+                desc.width.get(),
+                desc.height.get(),
+                desc.usage,
+                desc.preferred_formats,
+                desc.desired_image_count,
+                desc.present_mode,
+                vk::SwapchainKHR::null(),
+            )?,
+            usage: desc.usage,
+            preferred_formats: desc.preferred_formats.to_vec(),
+            desired_image_count: desc.desired_image_count,
+            present_mode: desc.present_mode,
+            next_acquisition: 0,
+        })
+    }
+
+    #[must_use]
+    /// Returns the native handle for the current swapchain generation.
+    pub fn raw(&self) -> vk::SwapchainKHR {
+        self.generation.raw
+    }
+}
+
+unsafe impl Swapchain<VulkanBackend> for VulkanSwapchain {
+    fn format(&self) -> SurfaceFormat {
+        self.generation.format
+    }
+
+    fn extent(&self) -> Extent3d {
+        self.generation.extent
+    }
+
+    fn image_count(&self) -> NonZeroU32 {
+        NonZeroU32::new(self.generation.images.len().try_into().unwrap_or(u32::MAX))
+            .expect("a Vulkan swapchain always has at least one image")
+    }
+
+    unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<VulkanSurfaceFrame> {
+        let mut acquisitions = self.generation.acquisitions.lock();
+        let semaphore_index = (0..acquisitions.len())
+            .map(|offset| (self.next_acquisition + offset) % acquisitions.len())
+            .find(|&index| !acquisitions[index].acquired)
+            .ok_or_else(|| {
+                Ir::BadState.with_detail("all swapchain acquisition slots are in use")
+            })?;
+        let slot = &mut acquisitions[semaphore_index];
+        if let Some(completion) = &slot.completion {
+            // The prior submission must have consumed this binary semaphore.
+            unsafe { dirk_rhi::Fence::wait(completion, timeout_ns) }?;
+        }
+        let image_available = self.generation.semaphores[semaphore_index].0;
+        let (image_index, suboptimal) = unsafe {
+            self.generation.context.swapchain_loader.acquire_next_image(
+                self.generation.raw,
+                timeout_ns,
+                image_available,
+                vk::Fence::null(),
+            )
+        }
+        .map_err(vk_error)?;
+        self.next_acquisition = (semaphore_index + 1) % self.generation.semaphores.len();
+        slot.acquired = true;
+        slot.completion = None;
+        let generation = self.generation.clone();
+        let index = usize::try_from(image_index).map_err(|_| {
+            Error::Backend(anyhow::anyhow!(
+                "Vulkan returned an invalid swapchain image index"
+            ))
+        })?;
+        let image = VulkanImage::surface(
+            generation.clone(),
+            generation.images[index],
+            generation.format.texture,
+            generation.extent,
+        );
+        let view = VulkanImageView::surface(generation.clone(), generation.views[index]);
+        Ok(VulkanSurfaceFrame {
+            generation,
+            image,
+            view,
+            image_index,
+            semaphore_index,
+            status: if suboptimal {
+                SurfaceStatus::Suboptimal
+            } else {
+                SurfaceStatus::Optimal
+            },
+            submitted: AtomicBool::new(false),
+        })
+    }
+
+    unsafe fn discard(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
+        if !Arc::ptr_eq(&self.generation, &frame.generation) {
+            return Err(Ir::ForeignInstance
+                .with_detail("frame belongs to another swapchain generation")
+                .into());
+        }
+        if frame.submitted.load(Ordering::Acquire) {
+            return Err(Ir::BadState
+                .with_detail("a submitted frame must be presented")
+                .into());
+        }
+        let extent = self.extent();
+        unsafe { self.generation.context.device.device_wait_idle() }.map_err(vk_error)?;
+        unsafe {
+            self.resize(
+                NonZeroU32::new(extent.width).expect("swapchain width is non-zero"),
+                NonZeroU32::new(extent.height).expect("swapchain height is non-zero"),
+            )
+        }
+    }
+
+    unsafe fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
+        let generation = SwapchainGeneration::create(
+            &self.generation.context,
+            &self.generation.surface,
+            width.get(),
+            height.get(),
+            self.usage,
+            &self.preferred_formats,
+            self.desired_image_count,
+            self.present_mode,
+            self.generation.raw,
+        )?;
+        self.generation = generation;
+        self.next_acquisition = 0;
+        Ok(())
+    }
+
+    unsafe fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
+        if !Arc::ptr_eq(&self.generation.context, frame.context()) {
+            return Err(Ir::ForeignInstance
+                .with_detail("frame belongs to another Vulkan device")
+                .into());
+        }
+        if !frame.submitted.load(Ordering::Acquire) {
+            return Err(Ir::BadState
+                .with_detail("frame must be submitted exactly once before presentation")
+                .into());
+        }
+        let waits = [frame.render_finished()];
+        let swapchains = [frame.generation.raw];
+        let image_indices = [frame.image_index];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&waits)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+        match unsafe {
+            self.generation
+                .context
+                .swapchain_loader
+                .queue_present(self.generation.context.queues.present, &present_info)
+        } {
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(SurfaceStatus::Suboptimal),
+            Ok(false) => Ok(SurfaceStatus::Optimal),
+            Err(error) => Err(vk_error(error)),
+        }
+    }
+}
+
+/// Acquired Vulkan presentation image and its binary synchronization.
+pub struct VulkanSurfaceFrame {
+    pub(crate) generation: Arc<SwapchainGeneration>,
+    image: VulkanImage,
+    view: VulkanImageView,
+    pub(crate) image_index: u32,
+    pub(crate) semaphore_index: usize,
+    status: SurfaceStatus,
+    submitted: AtomicBool,
+}
+
+impl VulkanSurfaceFrame {
+    pub(crate) fn image_available(&self) -> vk::Semaphore {
+        self.generation.semaphores[self.semaphore_index].0
+    }
+
+    pub(crate) fn render_finished(&self) -> vk::Semaphore {
+        // Reacquiring this image establishes completion of its prior presentation wait.
+        self.generation.semaphores[self.image_index as usize].1
+    }
+
+    pub(crate) fn context(&self) -> &Arc<Context> {
+        &self.generation.context
+    }
+
+    pub(crate) fn mark_submitted(&self) -> Result<()> {
+        self.submitted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| {
+                Ir::BadState
+                    .with_detail("surface frame was already submitted")
+                    .into()
+            })
+    }
+
+    pub(crate) fn track_completion(&self, fence: &VulkanFence) {
+        let mut acquisitions = self.generation.acquisitions.lock();
+        let slot = &mut acquisitions[self.semaphore_index];
+        slot.completion = Some(fence.clone());
+        slot.acquired = false;
+    }
+
+    pub(crate) fn unmark_submitted(&self) {
+        self.submitted.store(false, Ordering::Release);
+    }
+}
+
+unsafe impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
+    fn image(&self) -> &VulkanImage {
+        &self.image
+    }
+
+    fn view(&self) -> &VulkanImageView {
+        &self.view
+    }
+
+    fn format(&self) -> SurfaceFormat {
+        self.generation.format
+    }
+
+    fn extent(&self) -> Extent3d {
+        self.generation.extent
+    }
+
+    fn status(&self) -> SurfaceStatus {
+        self.status
+    }
+}
+
+fn destroy_partial(
+    context: &Context,
+    swapchain: vk::SwapchainKHR,
+    views: Vec<vk::ImageView>,
+    semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
+) {
+    unsafe {
+        for view in views {
+            context.device.destroy_image_view(view, None);
+        }
+        for (available, finished) in semaphores {
+            context.device.destroy_semaphore(available, None);
+            context.device.destroy_semaphore(finished, None);
+        }
+        context.swapchain_loader.destroy_swapchain(swapchain, None);
+    }
+}
