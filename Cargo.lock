@@ -661,6 +661,8 @@ dependencies = [
  "dirk_input",
  "dirk_platform",
  "dirk_player",
+ "dirk_rhi",
+ "dirk_rhi_vulkan",
  "dirk_shaders",
  "dirk_universe",
  "dirk_utils",

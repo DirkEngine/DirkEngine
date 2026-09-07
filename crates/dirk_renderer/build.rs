@@ -1,6 +1,6 @@
 //! Builds platform configuration and generated shader metadata for `dirk_renderer`.
 
-use anyhow::{Context, anyhow, bail, ensure};
+use anyhow::{Context, anyhow, bail};
 use cargo_gpu_install::{
     install::Install,
     spirv_builder::{ModuleResult, SpirvMetadata},
@@ -60,7 +60,7 @@ fn build_shaders() -> anyhow::Result<()> {
     shaders.sort_by(|left, right| left.entrypoint.cmp(&right.entrypoint));
     fs::write(
         out_dir.join("generated_shaders.rs"),
-        generate_shader_module(&shaders)?.to_string(),
+        generate_shader_module(&shaders).to_string(),
     )?;
 
     Ok(())
@@ -765,26 +765,29 @@ fn shader_stage_suffix(stage: ShaderStage) -> &'static str {
     }
 }
 
-fn generate_shader_module(shaders: &[ReflectedShader]) -> anyhow::Result<TokenStream> {
-    let shaders = shaders
-        .iter()
-        .map(generate_shader)
-        .collect::<anyhow::Result<Vec<_>>>()?;
+fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
+    let shaders = shaders.iter().map(generate_shader).collect::<Vec<_>>();
 
-    Ok(quote! {
-        use std::ffi::CStr;
-        use ash::vk;
+    quote! {
+        use dirk_rhi::{
+            BindGroupLayoutEntry, BindingType, ShaderStage, ShaderStages, VertexAttribute,
+            VertexBufferLayout, VertexFormat, VertexStepMode,
+        };
         use crate::shaders::metadata::{FragmentShader, Shader, VertexShader};
 
         #(#shaders)*
-    })
+    }
 }
 
-fn generate_shader(shader: &ReflectedShader) -> anyhow::Result<TokenStream> {
+fn generate_shader(shader: &ReflectedShader) -> TokenStream {
     let const_prefix = shader_const_prefix(&shader.entrypoint);
     let type_name = format_ident!("{}", shader.type_name);
     let entrypoint = &shader.entrypoint;
-    let entrypoint_cstr = c_string_literal(entrypoint)?;
+    let stage = match shader.stage {
+        ShaderStage::Vertex => quote!(ShaderStage::Vertex),
+        ShaderStage::Fragment => quote!(ShaderStage::Fragment),
+        ShaderStage::Compute => quote!(ShaderStage::Compute),
+    };
 
     let set_binding_idents = shader
         .set_layouts
@@ -801,15 +804,15 @@ fn generate_shader(shader: &ReflectedShader) -> anyhow::Result<TokenStream> {
             .map(|(bindings, ident)| {
                 let bindings = bindings.iter().map(generate_descriptor_binding);
                 quote! {
-                    const #ident: &[vk::DescriptorSetLayoutBinding<'static>] = &[
+                    const #ident: &[BindGroupLayoutEntry] = &[
                         #(#bindings,)*
                     ];
                 }
             });
 
     let vertex_input = if shader.stage == ShaderStage::Vertex {
-        let input_bindings_ident = format_ident!("{const_prefix}_INPUT_BINDINGS");
         let input_attributes_ident = format_ident!("{const_prefix}_INPUT_ATTRIBUTES");
+        let input_layouts_ident = format_ident!("{const_prefix}_INPUT_LAYOUTS");
         let stride = shader
             .vertex_inputs
             .last()
@@ -817,23 +820,20 @@ fn generate_shader(shader: &ReflectedShader) -> anyhow::Result<TokenStream> {
         let attributes = shader.vertex_inputs.iter().map(generate_vertex_attribute);
 
         quote! {
-            const #input_bindings_ident: &[vk::VertexInputBindingDescription] = &[
-                vk::VertexInputBindingDescription {
-                    binding: 0,
-                    stride: #stride,
-                    input_rate: vk::VertexInputRate::VERTEX,
-                },
-            ];
-
-            const #input_attributes_ident: &[vk::VertexInputAttributeDescription] = &[
+            const #input_attributes_ident: &[VertexAttribute] = &[
                 #(#attributes,)*
             ];
 
+            const #input_layouts_ident: &[VertexBufferLayout<'static>] = &[
+                VertexBufferLayout {
+                    stride: #stride,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: #input_attributes_ident,
+                },
+            ];
+
             impl VertexShader for #type_name {
-                const INPUT_BINDINGS: &'static [vk::VertexInputBindingDescription] =
-                    #input_bindings_ident;
-                const INPUT_ATTRIBUTES: &'static [vk::VertexInputAttributeDescription] =
-                    #input_attributes_ident;
+                const INPUT_LAYOUTS: &'static [VertexBufferLayout<'static>] = #input_layouts_ident;
             }
         }
     } else {
@@ -847,7 +847,7 @@ fn generate_shader(shader: &ReflectedShader) -> anyhow::Result<TokenStream> {
         },
     };
 
-    Ok(quote! {
+    quote! {
         #(#set_bindings)*
         #vertex_input
 
@@ -855,44 +855,44 @@ fn generate_shader(shader: &ReflectedShader) -> anyhow::Result<TokenStream> {
 
         impl Shader for #type_name {
             const CODE: ShaderCode = shader_code!(#entrypoint);
-            const ENTRYPOINT: &'static CStr = #entrypoint_cstr;
-            const SET_LAYOUTS: &'static [&'static [vk::DescriptorSetLayoutBinding<'static>]] = &[
+            const ENTRYPOINT: &'static str = #entrypoint;
+            const STAGE: ShaderStage = #stage;
+            const SET_LAYOUTS: &'static [&'static [BindGroupLayoutEntry]] = &[
                 #(#set_binding_idents,)*
             ];
         }
 
         #stage_impl
-    })
+    }
 }
 
 fn generate_descriptor_binding(binding: &DescriptorBinding) -> TokenStream {
-    let descriptor_type = vk_ident(binding.descriptor_type);
-    let stage_flags = vk_ident(binding.stage_flags);
+    assert_eq!(
+        binding.descriptor_count, 1,
+        "descriptor arrays are not supported by the RHI"
+    );
+    let descriptor_type = rhi_binding_type(binding.descriptor_type);
+    let stage_flags = rhi_shader_stages(binding.stage_flags);
     let binding_index = binding.binding;
-    let descriptor_count = binding.descriptor_count;
 
     quote! {
-        vk::DescriptorSetLayoutBinding {
+        BindGroupLayoutEntry {
             binding: #binding_index,
-            descriptor_type: vk::DescriptorType::#descriptor_type,
-            descriptor_count: #descriptor_count,
-            stage_flags: vk::ShaderStageFlags::#stage_flags,
-            p_immutable_samplers: ::core::ptr::null(),
-            _marker: ::core::marker::PhantomData,
+            ty: #descriptor_type,
+            visibility: ShaderStages::#stage_flags,
         }
     }
 }
 
 fn generate_vertex_attribute(input: &VertexInput) -> TokenStream {
     let location = input.location;
-    let format = vk_ident(input.format);
+    let format = rhi_format(input.format);
     let offset = input.offset;
 
     quote! {
-        vk::VertexInputAttributeDescription {
+        VertexAttribute {
             location: #location,
-            binding: 0,
-            format: vk::Format::#format,
+            format: VertexFormat::#format,
             offset: #offset,
         }
     }
@@ -911,18 +911,38 @@ fn shader_const_prefix(entrypoint: &str) -> String {
         .collect()
 }
 
-fn vk_ident(name: &str) -> Ident {
+fn rhi_binding_type(name: &str) -> TokenStream {
+    match name {
+        "UNIFORM_BUFFER" => quote!(BindingType::UniformBuffer {
+            dynamic_offset: false
+        }),
+        "STORAGE_BUFFER" => quote!(BindingType::StorageBuffer {
+            read_only: false,
+            dynamic_offset: false,
+        }),
+        "COMBINED_IMAGE_SAMPLER" | "SAMPLED_IMAGE" | "SAMPLER" => {
+            quote!(BindingType::SampledImage)
+        }
+        "STORAGE_IMAGE" => quote!(BindingType::StorageImage),
+        _ => panic!("unsupported reflected descriptor type {name}"),
+    }
+}
+
+fn rhi_shader_stages(name: &str) -> Ident {
+    let name = match name {
+        "VERTEX" => "VERTEX",
+        "FRAGMENT" => "FRAGMENT",
+        "COMPUTE" => "COMPUTE",
+        _ => panic!("unsupported reflected shader stage {name}"),
+    };
     Ident::new(name, Span::call_site())
 }
 
-fn c_string_literal(entrypoint: &str) -> anyhow::Result<TokenStream> {
-    ensure!(
-        !entrypoint
-            .bytes()
-            .any(|byte| matches!(byte, b'\0' | b'"' | b'\\')),
-        "shader entry point `{entrypoint}` cannot be emitted as a C string literal"
-    );
-    format!("c\"{entrypoint}\"")
-        .parse()
-        .map_err(|err| anyhow!("failed to emit C string literal for shader `{entrypoint}`: {err}"))
+fn rhi_format(name: &str) -> Ident {
+    let name = match name {
+        "R32G32_SFLOAT" => "Float32x2",
+        "R32G32B32_SFLOAT" => "Float32x3",
+        _ => panic!("unsupported reflected vertex format {name}"),
+    };
+    Ident::new(name, Span::call_site())
 }

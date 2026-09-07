@@ -119,7 +119,7 @@ impl Deref for Windows<'_> {
 /// Internal platform representation of a window. Holds the
 /// [`winit::window::Window`] and other state.
 pub struct Window {
-    raw: Box<dyn winit::window::Window>,
+    raw: Arc<dyn winit::window::Window>,
     focused: bool,
     theme: Theme,
     /// If the window is completely hidden (minized or covered by another
@@ -135,7 +135,7 @@ impl Window {
             focused: false,
             theme: window.theme().unwrap_or(Theme::Dark),
             occluded: false,
-            raw: window,
+            raw: Arc::from(window),
         }
     }
     /// Returns the unique ID of the window
@@ -148,6 +148,14 @@ impl Window {
     #[must_use]
     pub fn size(&self) -> PhysicalSize<u32> {
         self.raw.surface_size()
+    }
+
+    /// Returns an owned native-handle provider suitable for a graphics surface.
+    #[must_use]
+    pub fn surface_target(&self) -> Arc<WindowSurfaceTarget> {
+        Arc::new(WindowSurfaceTarget {
+            raw: self.raw.clone(),
+        })
     }
 
     /// Returns the native scale factor for this window.
@@ -182,6 +190,29 @@ impl Window {
             WindowEvent::FocusChanged { id: _, focused } => self.focused = focused,
             WindowEvent::ThemeChanged { id: _, theme } => self.theme = theme,
         }
+    }
+}
+
+/// Owned native window handles retained by presentation backends.
+pub struct WindowSurfaceTarget {
+    raw: Arc<dyn winit::window::Window>,
+}
+
+impl HasWindowHandle for WindowSurfaceTarget {
+    fn window_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        self.raw.window_handle()
+    }
+}
+
+impl HasDisplayHandle for WindowSurfaceTarget {
+    fn display_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        self.raw.display_handle()
     }
 }
 

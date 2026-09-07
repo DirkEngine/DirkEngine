@@ -172,7 +172,7 @@ impl ComponentSystem for RendererTransformSystem {
                 .scene_manager
                 .get_proxy_mut(entity)
                 .ok_or(Error::EntityDoesNotExist(entity))?;
-            proxy.set_model_matrix(Some(model));
+            proxy.set_model_matrix(Some(model))?;
             proxy.set_view(Some(view));
             Ok(())
         });
@@ -194,7 +194,7 @@ impl ComponentSystem for RendererTransformSystem {
                 .scene_manager
                 .get_proxy_mut(entity)
                 .ok_or(Error::EntityDoesNotExist(entity))?;
-            proxy.set_model_matrix(None);
+            proxy.set_model_matrix(None)?;
             proxy.set_view(None);
             Ok(())
         });

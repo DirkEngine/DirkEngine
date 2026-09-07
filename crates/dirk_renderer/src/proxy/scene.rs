@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use ash::vk;
+use dirk_rhi::{Extent3d, MemoryDomain, Rect, SampleCount, TextureFormat, Viewport};
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
     Error, MAX_FRAMES_IN_FLIGHT, Result,
@@ -11,10 +10,10 @@ use crate::{
     models::ModelRegistry,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipeline},
     resources::{
+        ActiveRenderPass,
         buffer::UniformBuffer,
-        command_pool::CommandBuffer,
         descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
+            DescriptorAllocator, DescriptorSet,
             sets::{ObjectSet, SceneSet},
         },
         device::RenderDevice,
@@ -22,8 +21,8 @@ use crate::{
 };
 
 pub(crate) struct SceneRenderSettings {
-    pub extent: vk::Extent2D,
-    pub format: vk::Format,
+    pub extent: Extent3d,
+    pub format: TextureFormat,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,
@@ -75,23 +74,21 @@ impl SceneManager {
             width: settings.extent.width,
             height: settings.extent.height,
             format: self.device.properties.depth_format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             samples: self.device.properties.msaa_samples,
             imported: None,
         });
 
-        let msaa_color = (self.device.properties.msaa_samples != vk::SampleCountFlags::TYPE_1)
-            .then(|| {
-                graph.create_texture(TextureDesc {
-                    width: settings.extent.width,
-                    height: settings.extent.height,
-                    format: settings.format,
-                    usage: vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    samples: self.device.properties.msaa_samples,
-                    imported: None,
-                })
-            });
+        let msaa_color = if self.device.properties.msaa_samples == SampleCount::One {
+            None
+        } else {
+            Some(graph.create_texture(TextureDesc {
+                width: settings.extent.width,
+                height: settings.extent.height,
+                format: settings.format,
+                samples: self.device.properties.msaa_samples,
+                imported: None,
+            }))
+        };
 
         let mut pass = graph.add_pass("scene");
         let [r, g, b, a] = settings.clear_color;
@@ -105,14 +102,14 @@ impl SceneManager {
             pass.write_color_attachment(target, AttachmentInfo::clear_color(r, g, b, a));
         }
         pass.write_depth_attachment(depth, AttachmentInfo::clear_discard_depth(1., 0));
-        pass.execute(Box::new(move |_, cmd, _| {
+        pass.execute(Box::new(move |cmd, _| {
             self.record_scene_draws(models, cmd, world, &settings, camera)
         }));
     }
     fn record_scene_draws(
         &self,
         models: &ModelRegistry,
-        cmd: &CommandBuffer,
+        cmd: &mut ActiveRenderPass<'_>,
         world: WorldId,
         settings: &SceneRenderSettings,
         camera: Entity,
@@ -152,37 +149,40 @@ impl SceneManager {
             };
 
             let scene_ubo = SceneUbo { view, proj };
-            unsafe { scene.ubo[frame].write(&scene_ubo) };
+            scene.ubo[frame].write(&scene_ubo)?;
         };
 
         for proxy in &proxies {
-            proxy.write_ubo(frame);
+            proxy.write_ubo(frame)?;
         }
 
-        let ctx = self.graphics_pipeline.bind(cmd);
+        let mut ctx = self.graphics_pipeline.bind(cmd)?;
 
         // the window size never gets anywhere near 2^23
         #[allow(clippy::cast_precision_loss)]
-        let viewport = vk::Viewport::default()
-            .width(settings.extent.width as f32)
-            .height(settings.extent.height as f32)
-            .min_depth(0.)
-            .max_depth(1.);
-        cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D::default())
-            .extent(settings.extent);
-        cmd.set_scissor(0, &[scissor]);
+        ctx.command().set_viewport(Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: settings.extent.width as f32,
+            height: settings.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        })?;
+        ctx.command().set_scissor(Rect {
+            x: 0,
+            y: 0,
+            width: settings.extent.width,
+            height: settings.extent.height,
+        })?;
 
         for proxy in &proxies {
             let Some(ref model) = proxy.model else {
                 continue;
             };
 
-            match models.render_model(model, cmd, &scene.sets[frame], &proxy.sets[frame], &ctx) {
-                Ok(()) | Err(dirk_assets::Error::NotFound(_)) => (),
-                Err(err) => return Err(err.into()),
+            match models.render_model(model, &scene.sets[frame], &proxy.sets[frame], &mut ctx) {
+                Ok(()) | Err(crate::Error::AssetError(dirk_assets::Error::NotFound(_))) => (),
+                Err(err) => return Err(err),
             }
         }
 
@@ -282,21 +282,17 @@ impl Scene {
     /// Constructs the renderer stuff like command pools, descriptor sets, ... from
     /// the [Renderer].
     pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .scene_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
         let ubo_size = size_of::<SceneUbo>() as u64;
-        let build_ubo =
-            || UniformBuffer::create(&manager.device, ubo_size, MemoryLocation::CpuToGpu);
+        let build_ubo = || UniformBuffer::create(&manager.device, ubo_size, MemoryDomain::Upload);
         let ubo = [build_ubo()?, build_ubo()?];
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), ubo_size);
-        }
-        writer.flush();
+        let sets = [
+            manager
+                .scene_alloc
+                .uniform_buffer(0, ubo[0].rhi(), ubo_size)?,
+            manager
+                .scene_alloc
+                .uniform_buffer(0, ubo[1].rhi(), ubo_size)?,
+        ];
 
         Ok(Self {
             entities: HashSet::new(),
@@ -324,19 +320,12 @@ pub struct SceneProxy {
 impl SceneProxy {
     pub fn build(manager: &mut SceneManager) -> Result<Self> {
         let size = size_of::<ProxyUbo>() as u64;
-        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryLocation::CpuToGpu);
+        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryDomain::Upload);
         let ubo = [build_ubo()?, build_ubo()?];
-
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .proxy_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), size);
-        }
-        writer.flush();
+        let sets = [
+            manager.proxy_alloc.uniform_buffer(0, ubo[0].rhi(), size)?,
+            manager.proxy_alloc.uniform_buffer(0, ubo[1].rhi(), size)?,
+        ];
 
         Ok(Self {
             model: None,
@@ -349,25 +338,26 @@ impl SceneProxy {
     pub fn set_model(&mut self, model: Option<dirk_assets::AssetHandle>) {
         self.model = model;
     }
-    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) {
+    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) -> Result<()> {
         self.model_matrix = mat;
 
         if let Some(mat) = mat {
             let proxy_ubo = ProxyUbo { model: mat };
             for ubo in &self.ubo {
-                unsafe { ubo.write(&proxy_ubo) };
+                ubo.write(&proxy_ubo)?;
             }
         }
+        Ok(())
     }
     pub fn set_view(&mut self, view: Option<glam::Mat4>) {
         self.view = view;
     }
-    pub fn write_ubo(&self, frame: usize) {
+    pub fn write_ubo(&self, frame: usize) -> Result<()> {
         let Some(model) = self.model_matrix else {
-            return;
+            return Ok(());
         };
 
         let data = ProxyUbo { model };
-        unsafe { self.ubo[frame].write(&data) };
+        self.ubo[frame].write(&data)
     }
 }

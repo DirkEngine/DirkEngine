@@ -1,11 +1,12 @@
-use ash::vk;
+use std::sync::Arc;
+
 use dirk_platform::WindowId;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use dirk_rhi::{Extent3d, TextureFormat};
 
 use crate::{
     Result,
     resources::{
-        device::{Garbage, RenderDevice},
+        ActiveRhi,
         swapchain::{RenderImage, Swapchain},
     },
 };
@@ -14,10 +15,7 @@ use crate::{
 /// Holds the swapchain, surface & other related state.
 /// Doesn't actually do any of the rendering of the game.
 pub struct Window {
-    device: RenderDevice,
-
     id: WindowId,
-    surface: vk::SurfaceKHR,
     swapchain: Swapchain,
 
     // TODO: stop rendering when the window is occluded
@@ -25,29 +23,18 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn build(device: &RenderDevice, plat_window: &dirk_platform::Window) -> Result<Self> {
-        let surface = unsafe {
-            ash_window::create_surface(
-                &device.entry,
-                &device.instance,
-                plat_window.display_handle()?.as_raw(),
-                plat_window.window_handle()?.as_raw(),
-                None,
-            )?
-        };
+    pub fn build(rhi: &Arc<ActiveRhi>, plat_window: &dirk_platform::Window) -> Result<Self> {
+        let surface = rhi.create_surface(dirk_rhi::SurfaceCreateInfo::new(
+            plat_window.surface_target(),
+        ))?;
 
         let window_size = plat_window.size();
-        let size = vk::Extent2D {
-            width: window_size.width,
-            height: window_size.height,
-        };
+        let size = Extent3d::new_2d(window_size.width, window_size.height);
 
-        let swapchain = Swapchain::build(device, surface, size)?;
+        let swapchain = Swapchain::build(rhi, &surface, size)?;
 
         Ok(Self {
             id: plat_window.id(),
-            device: device.clone(),
-            surface,
             swapchain,
             occluded: false,
         })
@@ -56,23 +43,22 @@ impl Window {
     pub fn id(&self) -> WindowId {
         self.id
     }
-    pub fn extent(&self) -> vk::Extent2D {
+    pub fn extent(&self) -> Extent3d {
         self.swapchain.extent()
+    }
+    pub fn format(&self) -> TextureFormat {
+        self.swapchain.format()
     }
     pub fn next_image(&mut self) -> Result<RenderImage> {
         self.swapchain.acquire_next_image()
     }
-    pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
+    pub fn resize(&mut self, extent: Extent3d) -> Result<()> {
         self.swapchain.recreate(extent)
+    }
+    pub fn present(&mut self, image: RenderImage) -> Result<()> {
+        self.swapchain.present(image)
     }
     pub fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
-    }
-}
-
-impl Drop for Window {
-    fn drop(&mut self) {
-        self.swapchain.destroy();
-        self.device.destroy(Garbage::Surface(self.surface));
     }
 }

@@ -8,7 +8,7 @@ use egui_ash_renderer::{DynamicRendering, Options};
 
 use crate::{
     MAX_FRAMES_IN_FLIGHT, Result,
-    resources::{command_pool::CommandBuffer, device::RenderDevice, queues::QueueType},
+    resources::{ActiveRenderPass, device::RenderDevice},
 };
 
 pub struct EguiState {
@@ -30,11 +30,22 @@ pub struct EguiFrameInput {
 
 impl EguiState {
     pub fn new(device: &RenderDevice) -> Result<Self> {
-        let surface_format = device.properties.surface_format.format;
+        let surface_format = match device.properties.surface_format {
+            dirk_rhi::TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            dirk_rhi::TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
+            dirk_rhi::TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+            dirk_rhi::TextureFormat::Bgra8Srgb => vk::Format::B8G8R8A8_SRGB,
+            unsupported => {
+                return Err(dirk_rhi::Error::Unsupported(
+                    dirk_rhi::UnsupportedOperation::TextureFormat(unsupported),
+                )
+                .into());
+            }
+        };
         let renderer = egui_ash_renderer::Renderer::with_default_allocator(
-            &device.instance,
-            device.physical_device,
-            device.device.clone(),
+            unsafe { device.rhi.native() }.instance(),
+            unsafe { device.rhi.native() }.physical_device(),
+            unsafe { device.rhi.native() }.device().clone(),
             DynamicRendering {
                 color_attachment_format: surface_format,
                 depth_attachment_format: None,
@@ -127,7 +138,7 @@ impl EguiState {
     pub fn render(
         &mut self,
         device: &RenderDevice,
-        cmd: &CommandBuffer,
+        cmd: &mut ActiveRenderPass<'_>,
         extent: vk::Extent2D,
         frame: usize,
     ) -> Result<()> {
@@ -136,13 +147,14 @@ impl EguiState {
         };
 
         self.renderer.set_textures(
-            device.queues.raw(QueueType::Graphics),
+            unsafe { device.rhi.native() }.queue(dirk_rhi::QueueType::Graphics),
             device.graphics_pool.raw(),
             pending.textures_delta.set.as_slice(),
         )?;
 
         self.renderer.cmd_draw(
-            **cmd,
+            // SAFETY: egui owns its resources until frame completion and is the last draw in this pass.
+            unsafe { cmd.native() }.raw(),
             extent,
             pending.pixels_per_point,
             pending.primitives.as_slice(),
