@@ -101,7 +101,9 @@ impl Image {
         let pixels = match tex.format {
             gltf::image::Format::R8G8B8 => tex
                 .pixels
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect(),
             gltf::image::Format::R8G8B8A8 => tex.pixels.clone(),
