@@ -25,10 +25,7 @@ pub(crate) fn format(value: TextureFormat) -> MTLPixelFormat {
         TextureFormat::R11G11B10Float => MTLPixelFormat::RG11B10Float,
         TextureFormat::Depth16Unorm => MTLPixelFormat::Depth16Unorm,
         TextureFormat::Depth32Float => MTLPixelFormat::Depth32Float,
-        // Apple GPUs have no packed 24-bit depth; it maps to float32+stencil.
-        TextureFormat::Depth24UnormStencil8 | TextureFormat::Depth32FloatStencil8 => {
-            MTLPixelFormat::Depth32Float_Stencil8
-        }
+        TextureFormat::Depth32FloatStencil8 => MTLPixelFormat::Depth32Float_Stencil8,
         _ => MTLPixelFormat::Invalid,
     }
 }

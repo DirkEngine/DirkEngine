@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -8,7 +8,7 @@ use dirk_rhi::{
     BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, Buffer, BufferDesc, Fence,
     GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageDimension, ImageUsages, ImageViewDesc,
     ImageViewType, InvalidResourceKind as Ir, MemoryDomain, PipelineLayoutDesc, Result,
-    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderStages, TimelineSemaphore,
+    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, TimelineSemaphore,
 };
 use metal::{
     CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLColorWriteMask,
@@ -62,12 +62,12 @@ impl MetalBuffer {
     }
 }
 
-impl Buffer for MetalBuffer {
+unsafe impl Buffer for MetalBuffer {
     fn size(&self) -> u64 {
         self.size
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    unsafe fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let _guard = self.host_access.lock();
         if self.memory == MemoryDomain::Device {
             return Err(dirk_rhi::InvalidResourceKind::NotHostAccessible.into());
@@ -91,7 +91,7 @@ impl Buffer for MetalBuffer {
         Ok(())
     }
 
-    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
+    unsafe fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
         let _guard = self.host_access.lock();
         if self.memory != MemoryDomain::Readback {
             return Err(Ir::NotHostAccessible.into());
@@ -526,19 +526,13 @@ impl MetalBindGroup {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct GroupOffsets {
-    pub buffers: u64,
-    pub textures: u64,
-    pub samplers: u64,
-}
-
 /// Metal pipeline binding layout.
 #[derive(Clone)]
 pub struct MetalPipelineLayout {
     pub(crate) context: Arc<Context>,
     pub(crate) layouts: Arc<[MetalBindGroupLayout]>,
-    pub(crate) offsets: Arc<[GroupOffsets]>,
+    pub(crate) vertex: dirk_rhi::BindingMap,
+    pub(crate) fragment: dirk_rhi::BindingMap,
 }
 
 impl MetalPipelineLayout {
@@ -546,43 +540,24 @@ impl MetalPipelineLayout {
         context: &Arc<Context>,
         desc: &PipelineLayoutDesc<'_, crate::MetalBackend>,
     ) -> Result<Self> {
-        let mut offsets = Vec::with_capacity(desc.bind_group_layouts.len());
-        let mut next = GroupOffsets::default();
         let mut layouts = Vec::with_capacity(desc.bind_group_layouts.len());
         for layout in desc.bind_group_layouts {
             require_context(context, &layout.context)?;
-            offsets.push(next);
-            for entry in layout.entries.iter() {
-                let end = u64::from(entry.binding) + 1;
-                match entry.ty {
-                    BindingType::UniformBuffer { .. } | BindingType::StorageBuffer { .. } => {
-                        next.buffers = next
-                            .buffers
-                            .max(offsets.last().map_or(0, |base| base.buffers) + end);
-                    }
-                    BindingType::SampledImage => {
-                        let base = *offsets.last().unwrap_or(&GroupOffsets::default());
-                        next.textures = next.textures.max(base.textures + end);
-                        next.samplers = next.samplers.max(base.samplers + end);
-                    }
-                    BindingType::StorageImage => {
-                        next.textures = next
-                            .textures
-                            .max(offsets.last().map_or(0, |base| base.textures) + end);
-                    }
-                }
-            }
             layouts.push((*layout).clone());
         }
-        if next.buffers > VERTEX_BUFFER_BASE {
-            return Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
-                "Metal pipeline layouts support at most 16 shader buffer slots"
-            )));
-        }
+        let entries = layouts
+            .iter()
+            .map(|layout| layout.entries.as_ref())
+            .collect::<Vec<_>>();
+        let vertex = dirk_rhi::BindingMap::new(&entries, ShaderStage::Vertex)?;
+        let fragment = dirk_rhi::BindingMap::new(&entries, ShaderStage::Fragment)?;
+        vertex.validate(dirk_rhi::Limits::default())?;
+        fragment.validate(dirk_rhi::Limits::default())?;
         Ok(Self {
             context: context.clone(),
             layouts: layouts.into(),
-            offsets: offsets.into(),
+            vertex,
+            fragment,
         })
     }
 }
@@ -734,42 +709,57 @@ impl MetalGraphicsPipeline {
     }
 }
 
-/// CPU-waitable Metal submission fence.
+/// CPU-waitable completion of the actual native command buffers, including errors.
 pub struct MetalFence {
     pub(crate) context: Arc<Context>,
-    pub(crate) event: SharedEvent,
-    pub(crate) target: AtomicU64,
+    commands: parking_lot::Mutex<Vec<metal::CommandBuffer>>,
+    signaled: AtomicBool,
 }
-
 impl MetalFence {
     pub(crate) fn create(context: &Arc<Context>, signaled: bool) -> Self {
-        let event = context.device.new_shared_event();
-        if signaled {
-            event.set_signaled_value(1);
-        }
         Self {
             context: context.clone(),
-            event,
-            target: AtomicU64::new(1),
+            commands: parking_lot::Mutex::new(Vec::new()),
+            signaled: AtomicBool::new(signaled),
         }
     }
-
-    pub(crate) fn value(&self) -> u64 {
-        self.target.load(Ordering::Acquire)
+    pub(crate) fn track(&self, commands: &[metal::CommandBuffer]) {
+        self.commands.lock().clone_from(&commands.to_vec());
     }
 }
-
-impl Fence for MetalFence {
-    fn wait(&self, timeout_ns: u64) -> Result<()> {
-        wait_event(&self.event, self.value(), timeout_ns)
-    }
-
-    fn reset(&self) -> Result<()> {
-        let value = self.value();
-        if self.event.signaled_value() < value {
-            return Err(Ir::BadState.into());
+unsafe impl Fence for MetalFence {
+    unsafe fn wait(&self, timeout_ns: u64) -> Result<()> {
+        let started = Instant::now();
+        loop {
+            let commands = self.commands.lock();
+            if self.signaled.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if commands
+                .iter()
+                .any(|command| command.status() == metal::MTLCommandBufferStatus::Error)
+            {
+                return Err(dirk_rhi::Error::DeviceLost);
+            }
+            if !commands.is_empty()
+                && commands
+                    .iter()
+                    .all(|command| command.status() == metal::MTLCommandBufferStatus::Completed)
+            {
+                self.signaled.store(true, Ordering::Release);
+                return Ok(());
+            }
+            if timeout_ns != u64::MAX && started.elapsed() >= Duration::from_nanos(timeout_ns) {
+                return Err(dirk_rhi::Error::Timeout);
+            }
+            drop(commands);
+            std::thread::yield_now();
         }
-        self.target.fetch_add(1, Ordering::AcqRel);
+    }
+    unsafe fn reset(&self) -> Result<()> {
+        unsafe { self.wait(0) }?;
+        self.commands.lock().clear();
+        self.signaled.store(false, Ordering::Release);
         Ok(())
     }
 }
@@ -781,12 +771,12 @@ pub struct MetalTimelineSemaphore {
     pub(crate) event: SharedEvent,
 }
 
-impl TimelineSemaphore for MetalTimelineSemaphore {
-    fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
+unsafe impl TimelineSemaphore for MetalTimelineSemaphore {
+    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
         wait_event(&self.event, value, timeout_ns)
     }
 
-    fn value(&self) -> Result<u64> {
+    unsafe fn value(&self) -> Result<u64> {
         Ok(self.event.signaled_value())
     }
 }
@@ -796,9 +786,7 @@ fn wait_event(event: &metal::SharedEventRef, value: u64, timeout_ns: u64) -> Res
     let timeout = Duration::from_nanos(timeout_ns);
     while event.signaled_value() < value {
         if timeout_ns != u64::MAX && started.elapsed() >= timeout {
-            return Err(dirk_rhi::Error::Backend(anyhow::anyhow!(
-                "timed out waiting for a Metal shared event"
-            )));
+            return Err(dirk_rhi::Error::Timeout);
         }
         std::thread::yield_now();
     }
@@ -811,14 +799,6 @@ pub(crate) fn require_context(expected: &Arc<Context>, actual: &Arc<Context>) ->
     } else {
         Err(dirk_rhi::Error::from(Ir::ForeignInstance))
     }
-}
-
-pub(crate) fn binding_visibility(layout: &MetalBindGroupLayout, binding: u32) -> ShaderStages {
-    layout
-        .entries
-        .iter()
-        .find(|entry| entry.binding == binding)
-        .map_or(ShaderStages::NONE, |entry| entry.visibility)
 }
 
 #[cfg(test)]

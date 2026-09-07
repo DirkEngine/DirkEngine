@@ -124,7 +124,7 @@ impl MetalSwapchain {
     }
 }
 
-impl Swapchain<MetalBackend> for MetalSwapchain {
+unsafe impl Swapchain<MetalBackend> for MetalSwapchain {
     fn format(&self) -> SurfaceFormat {
         self.format
     }
@@ -137,7 +137,7 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         self.image_count
     }
 
-    fn acquire(&mut self, timeout_ns: u64) -> Result<MetalSurfaceFrame> {
+    unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<MetalSurfaceFrame> {
         if timeout_ns == 0 {
             return Err(dirk_rhi::Error::Timeout);
         }
@@ -162,7 +162,7 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         })
     }
 
-    fn discard(&mut self, frame: MetalSurfaceFrame) -> Result<()> {
+    unsafe fn discard(&mut self, frame: MetalSurfaceFrame) -> Result<()> {
         require_context(&self.context, &frame.context)?;
         if frame.was_submitted() {
             return Err(Ir::BadState.into());
@@ -170,13 +170,13 @@ impl Swapchain<MetalBackend> for MetalSwapchain {
         Ok(())
     }
 
-    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
+    unsafe fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
         set_extent(&self.surface.0.layer, width.get(), height.get());
         self.extent = Extent3d::new_2d(width.get(), height.get());
         Ok(())
     }
 
-    fn present(&mut self, frame: MetalSurfaceFrame) -> Result<SurfaceStatus> {
+    unsafe fn present(&mut self, frame: MetalSurfaceFrame) -> Result<SurfaceStatus> {
         require_context(&self.context, &frame.context)?;
         if frame.was_submitted() {
             // `CAMetalLayer` presents at vertical blank and never reports a
@@ -212,7 +212,7 @@ impl MetalSurfaceFrame {
     }
 }
 
-impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
+unsafe impl SurfaceFrame<MetalBackend> for MetalSurfaceFrame {
     fn image(&self) -> &MetalImage {
         &self.image
     }

@@ -3,9 +3,8 @@ use std::sync::Arc;
 use dirk_rhi::{
     BufferCopy, BufferImageCopy, Color, CommandBuffer as RhiCommandBuffer, DependencyInfo,
     FilterMode, ImageBlit, ImageCopy, IndexFormat, InvalidResourceKind as Ir, Origin3d, QueueType,
-    Rect, RenderingInfo, Result, ShaderStages, Viewport,
+    Rect, RenderingInfo, Result, Viewport,
 };
-use metal::foreign_types::ForeignType;
 use metal::{
     MTLBlitOption, MTLClearColor, MTLOrigin, MTLScissorRect, MTLSize, MTLViewport,
     RenderPassDescriptor,
@@ -18,7 +17,7 @@ use crate::{
     convert,
     resource::{
         MetalBindGroup, MetalBuffer, MetalGraphicsPipeline, MetalImage, MetalPipelineLayout,
-        OwnedBinding, VERTEX_BUFFER_BASE, binding_visibility, require_context,
+        OwnedBinding, VERTEX_BUFFER_BASE, require_context,
     },
 };
 
@@ -91,12 +90,12 @@ impl MetalCommandBuffer {
     }
 }
 
-impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
+unsafe impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
     fn queue_type(&self) -> QueueType {
         self.queue
     }
 
-    fn begin(&mut self, label: &str, _one_time_submit: bool) -> Result<()> {
+    unsafe fn begin(&mut self, label: &str, _one_time_submit: bool) -> Result<()> {
         let state = self.state.get_mut();
         if state.command.is_some() && !state.submitted {
             return Err(Ir::BadState.into());
@@ -118,7 +117,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn end(&mut self) -> Result<()> {
+    unsafe fn end(&mut self) -> Result<()> {
         let state = self.state.get_mut();
         if state.render.is_some() {
             return Err(dirk_rhi::Error::from(Ir::BadState));
@@ -130,7 +129,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn begin_rendering(&mut self, info: &RenderingInfo<'_, MetalBackend>) -> Result<()> {
+    unsafe fn begin_rendering(&mut self, info: &RenderingInfo<'_, MetalBackend>) -> Result<()> {
         let state = self.state.get_mut();
         if state.render.is_some() {
             return Err(Ir::BadState.into());
@@ -204,7 +203,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn end_rendering(&mut self) -> Result<()> {
+    unsafe fn end_rendering(&mut self) -> Result<()> {
         let encoder = self
             .state
             .get_mut()
@@ -215,7 +214,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
+    unsafe fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
         let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
         encoder.set_viewport(MTLViewport {
             originX: f64::from(viewport.x),
@@ -228,7 +227,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
+    unsafe fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
         let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
         encoder.set_scissor_rect(MTLScissorRect {
             x: u64::try_from(scissor.x.max(0)).unwrap_or(0),
@@ -239,19 +238,19 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn set_blend_constants(&mut self, color: Color) -> Result<()> {
+    unsafe fn set_blend_constants(&mut self, color: Color) -> Result<()> {
         let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
         encoder.set_blend_color(color.r, color.g, color.b, color.a);
         Ok(())
     }
 
-    fn set_stencil_reference(&mut self, front: u32, back: u32) -> Result<()> {
+    unsafe fn set_stencil_reference(&mut self, front: u32, back: u32) -> Result<()> {
         let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
         encoder.set_stencil_front_back_reference_value(front, back);
         Ok(())
     }
 
-    fn draw(
+    unsafe fn draw(
         &mut self,
         vertex_count: u32,
         instance_count: u32,
@@ -272,7 +271,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn bind_graphics_pipeline(&mut self, pipeline: &MetalGraphicsPipeline) -> Result<()> {
+    unsafe fn bind_graphics_pipeline(&mut self, pipeline: &MetalGraphicsPipeline) -> Result<()> {
         require_context(&self.context, &pipeline.context)?;
         let state = self.state.get_mut();
         let encoder = state.render.as_ref().ok_or(Ir::BadState)?;
@@ -291,7 +290,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn bind_groups(
+    unsafe fn bind_groups(
         &mut self,
         layout: &MetalPipelineLayout,
         first_group: u32,
@@ -304,10 +303,6 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         for (relative, group) in groups.iter().enumerate() {
             let relative = u32::try_from(relative).map_err(|_| Ir::OutOfRange)?;
             let group_index = first_group.checked_add(relative).ok_or(Ir::OutOfRange)?;
-            let offsets = layout
-                .offsets
-                .get(group_index as usize)
-                .ok_or(Ir::Mismatch)?;
             let expected_layout = layout
                 .layouts
                 .get(group_index as usize)
@@ -318,10 +313,8 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                 return Err(Ir::Mismatch.into());
             }
             for (binding, resource) in group.entries.iter() {
-                let visibility = binding_visibility(&group.layout, *binding);
-                let buffer_index = offsets.buffers + u64::from(*binding);
-                let texture_index = offsets.textures + u64::from(*binding);
-                let sampler_index = offsets.samplers + u64::from(*binding);
+                let vertex = layout.vertex.get(group_index, *binding);
+                let fragment = layout.fragment.get(group_index, *binding);
                 match resource {
                     OwnedBinding::Buffer { buffer, offset } => {
                         let dynamic = expected_layout
@@ -342,24 +335,29 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
                         } else {
                             *offset
                         };
-                        if visibility.contains(ShaderStages::VERTEX) {
-                            encoder.set_vertex_buffer(buffer_index, Some(&buffer.raw), offset);
+                        if let Some(index) = vertex.and_then(|slots| slots.buffer) {
+                            encoder.set_vertex_buffer(u64::from(index), Some(&buffer.raw), offset);
                         }
-                        if visibility.contains(ShaderStages::FRAGMENT) {
-                            encoder.set_fragment_buffer(buffer_index, Some(&buffer.raw), offset);
+                        if let Some(index) = fragment.and_then(|slots| slots.buffer) {
+                            encoder.set_fragment_buffer(
+                                u64::from(index),
+                                Some(&buffer.raw),
+                                offset,
+                            );
                         }
                     }
                     OwnedBinding::SampledImage { view, sampler } => {
-                        bind_texture(encoder, visibility, texture_index, &view.raw);
-                        if visibility.contains(ShaderStages::VERTEX) {
-                            encoder.set_vertex_sampler_state(sampler_index, Some(&sampler.raw));
+                        Self::bind_texture(encoder, vertex, fragment, &view.raw);
+                        if let Some(index) = vertex.and_then(|slots| slots.sampler) {
+                            encoder.set_vertex_sampler_state(u64::from(index), Some(&sampler.raw));
                         }
-                        if visibility.contains(ShaderStages::FRAGMENT) {
-                            encoder.set_fragment_sampler_state(sampler_index, Some(&sampler.raw));
+                        if let Some(index) = fragment.and_then(|slots| slots.sampler) {
+                            encoder
+                                .set_fragment_sampler_state(u64::from(index), Some(&sampler.raw));
                         }
                     }
                     OwnedBinding::StorageImage(view) => {
-                        bind_texture(encoder, visibility, texture_index, &view.raw);
+                        Self::bind_texture(encoder, vertex, fragment, &view.raw);
                     }
                 }
             }
@@ -370,7 +368,12 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn bind_vertex_buffer(&mut self, slot: u32, buffer: &MetalBuffer, offset: u64) -> Result<()> {
+    unsafe fn bind_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer: &MetalBuffer,
+        offset: u64,
+    ) -> Result<()> {
         require_context(&self.context, &buffer.context)?;
         let encoder = self.state.get_mut().render.as_ref().ok_or(Ir::BadState)?;
         encoder.set_vertex_buffer(
@@ -381,7 +384,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn bind_index_buffer(
+    unsafe fn bind_index_buffer(
         &mut self,
         buffer: &MetalBuffer,
         offset: u64,
@@ -396,7 +399,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn draw_indexed(
+    unsafe fn draw_indexed(
         &mut self,
         index_count: u32,
         instance_count: u32,
@@ -427,7 +430,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         Ok(())
     }
 
-    fn copy_buffer(
+    unsafe fn copy_buffer(
         &mut self,
         src: &MetalBuffer,
         dst: &MetalBuffer,
@@ -448,7 +451,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         })
     }
 
-    fn copy_buffer_to_image(
+    unsafe fn copy_buffer_to_image(
         &mut self,
         src: &MetalBuffer,
         dst: &MetalImage,
@@ -478,7 +481,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         })
     }
 
-    fn copy_image_to_buffer(
+    unsafe fn copy_image_to_buffer(
         &mut self,
         src: &MetalImage,
         dst: &MetalBuffer,
@@ -508,7 +511,7 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         })
     }
 
-    fn copy_image(
+    unsafe fn copy_image(
         &mut self,
         src: &MetalImage,
         dst: &MetalImage,
@@ -535,80 +538,37 @@ impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
         })
     }
 
-    fn blit_image(
+    unsafe fn blit_image(
         &mut self,
-        src: &MetalImage,
-        dst: &MetalImage,
-        regions: &[ImageBlit],
-        filter: FilterMode,
+        _src: &MetalImage,
+        _dst: &MetalImage,
+        _regions: &[ImageBlit],
+        _filter: FilterMode,
     ) -> Result<()> {
-        if regions.is_empty() {
-            return Ok(());
-        }
-        let same_texture = src.raw.as_ptr() == dst.raw.as_ptr();
-        if same_texture {
-            if filter != FilterMode::Linear
-                || regions
-                    .iter()
-                    .any(|region| region.src_mip_level.checked_add(1) != Some(region.dst_mip_level))
-            {
-                return Err(dirk_rhi::UnsupportedOperation::ImageBlit.into());
-            }
-            self.with_blit(|encoder| {
-                encoder.generate_mipmaps(&src.raw);
-            })?;
-            return Ok(());
-        }
-        if regions
-            .iter()
-            .any(|region| region.src_extent != region.dst_extent)
-        {
-            return Err(dirk_rhi::UnsupportedOperation::ImageBlit.into());
-        }
-        self.with_blit(|encoder| {
-            for region in regions {
-                encoder.copy_from_texture(
-                    &src.raw,
-                    u64::from(region.src_base_array_layer),
-                    u64::from(region.src_mip_level),
-                    MTLOrigin {
-                        x: u64::from(region.src_origin.x),
-                        y: u64::from(region.src_origin.y),
-                        z: u64::from(region.src_origin.z),
-                    },
-                    size(region.src_extent),
-                    &dst.raw,
-                    u64::from(region.dst_base_array_layer),
-                    u64::from(region.dst_mip_level),
-                    MTLOrigin {
-                        x: u64::from(region.dst_origin.x),
-                        y: u64::from(region.dst_origin.y),
-                        z: u64::from(region.dst_origin.z),
-                    },
-                );
-            }
-        })?;
-        Ok(())
+        // Whole-chain generate_mipmaps does not implement an exact-region blit.
+        Err(dirk_rhi::UnsupportedOperation::ImageBlit.into())
     }
 
-    fn barrier(&mut self, _dependency: &DependencyInfo<'_, MetalBackend>) -> Result<()> {
+    unsafe fn barrier(&mut self, _dependency: &DependencyInfo<'_, MetalBackend>) -> Result<()> {
         // Resources use Metal's tracked hazard mode, so encoder boundaries are
         // sufficient for render-graph transitions and visibility.
         Ok(())
     }
 }
 
-fn bind_texture(
-    encoder: &metal::RenderCommandEncoderRef,
-    visibility: ShaderStages,
-    index: u64,
-    texture: &metal::TextureRef,
-) {
-    if visibility.contains(ShaderStages::VERTEX) {
-        encoder.set_vertex_texture(index, Some(texture));
-    }
-    if visibility.contains(ShaderStages::FRAGMENT) {
-        encoder.set_fragment_texture(index, Some(texture));
+impl MetalCommandBuffer {
+    fn bind_texture(
+        encoder: &metal::RenderCommandEncoderRef,
+        vertex: Option<dirk_rhi::BindingSlots>,
+        fragment: Option<dirk_rhi::BindingSlots>,
+        texture: &metal::TextureRef,
+    ) {
+        if let Some(index) = vertex.and_then(|slots| slots.texture) {
+            encoder.set_vertex_texture(u64::from(index), Some(texture));
+        }
+        if let Some(index) = fragment.and_then(|slots| slots.texture) {
+            encoder.set_fragment_texture(u64::from(index), Some(texture));
+        }
     }
 }
 

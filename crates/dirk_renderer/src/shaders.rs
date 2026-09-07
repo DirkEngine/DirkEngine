@@ -35,7 +35,14 @@ impl ShaderCode {
         #[cfg(target_vendor = "apple")]
         let source = dirk_rhi::ShaderSource::Msl(self.msl);
         // SAFETY: trusted engine shaders are compiled and reflected together by build.rs.
-        Ok(unsafe { device.rhi.create_shader(&dirk_rhi::ShaderDesc { label: entry, stage, entry, source }) }?)
+        Ok(unsafe {
+            device.rhi.create_shader(&dirk_rhi::ShaderDesc {
+                label: entry,
+                stage,
+                entry,
+                source,
+            })
+        }?)
     }
 
     /// Returns the shader code as little-endian `u32` words.

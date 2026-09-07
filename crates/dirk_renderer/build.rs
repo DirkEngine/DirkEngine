@@ -93,80 +93,6 @@ struct ReflectedShader {
     vertex_inputs: Vec<VertexInput>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct MetalBindingOffsets {
-    buffers: u32,
-    textures: u32,
-    samplers: u32,
-}
-
-impl MetalBindingOffsets {
-    fn bind_target(
-        &mut self,
-        base: Self,
-        shader: &ReflectedShader,
-        set: u32,
-        binding: &DescriptorBinding,
-    ) -> anyhow::Result<BindTarget> {
-        if binding.descriptor_count != 1 {
-            bail!(
-                "shader `{}` uses a descriptor array at set {set}, binding {}; descriptor arrays are not supported by the RHI",
-                shader.entrypoint,
-                binding.binding
-            );
-        }
-        let index = |base: u32, resource: &str| {
-            base.checked_add(binding.binding).ok_or_else(|| {
-                anyhow!(
-                    "Metal {resource} index overflowed for shader `{}`",
-                    shader.entrypoint
-                )
-            })
-        };
-        let end = binding.binding.checked_add(1).ok_or_else(|| {
-            anyhow!(
-                "shader `{}` binding index overflowed at set {set}",
-                shader.entrypoint
-            )
-        })?;
-        let range_end = |base: u32, resource: &str| {
-            base.checked_add(end).ok_or_else(|| {
-                anyhow!(
-                    "Metal {resource} range overflowed for shader `{}`",
-                    shader.entrypoint
-                )
-            })
-        };
-        let mut target = BindTarget {
-            buffer: 0,
-            texture: 0,
-            sampler: 0,
-            count: None,
-        };
-        match binding.descriptor_type {
-            "UNIFORM_BUFFER" | "STORAGE_BUFFER" => {
-                target.buffer = index(base.buffers, "buffer")?;
-                self.buffers = self.buffers.max(range_end(base.buffers, "buffer")?);
-            }
-            "COMBINED_IMAGE_SAMPLER" => {
-                target.texture = index(base.textures, "texture")?;
-                target.sampler = index(base.samplers, "sampler")?;
-                self.textures = self.textures.max(range_end(base.textures, "texture")?);
-                self.samplers = self.samplers.max(range_end(base.samplers, "sampler")?);
-            }
-            "STORAGE_IMAGE" => {
-                target.texture = index(base.textures, "texture")?;
-                self.textures = self.textures.max(range_end(base.textures, "texture")?);
-            }
-            descriptor_type => bail!(
-                "shader `{}` uses descriptor type `{descriptor_type}`, which cannot be represented by the RHI",
-                shader.entrypoint
-            ),
-        }
-        Ok(target)
-    }
-}
-
 impl ReflectedShader {
     /// Translates this shader and applies the same compact slot allocation as
     /// the Metal pipeline layout.
@@ -184,8 +110,10 @@ impl ReflectedShader {
             );
         }
         let words = bytes
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte chunk")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
             .collect::<Vec<_>>();
         let mut compiler = Compiler::<Msl>::new(Module::from_words(&words)).with_context(|| {
             format!(
@@ -199,12 +127,36 @@ impl ReflectedShader {
             ShaderStage::Compute => spirv_cross2::spirv::ExecutionModel::GLCompute,
         };
 
-        let mut next = MetalBindingOffsets::default();
+        let rhi_stage = match self.stage {
+            ShaderStage::Vertex => dirk_rhi::ShaderStage::Vertex,
+            ShaderStage::Fragment => dirk_rhi::ShaderStage::Fragment,
+            ShaderStage::Compute => dirk_rhi::ShaderStage::Compute,
+        };
+        let groups = self
+            .set_layouts
+            .iter()
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(DescriptorBinding::rhi_entry)
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let groups = groups.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let map = dirk_rhi::BindingMap::new(&groups, rhi_stage)?;
+        map.validate(dirk_rhi::Limits::default())?;
         for (set, bindings) in self.set_layouts.iter().enumerate() {
             let set = u32::try_from(set).context("shader descriptor set index exceeds u32")?;
-            let base = next;
             for binding in bindings {
-                let target = next.bind_target(base, self, set, binding)?;
+                let slots = map
+                    .get(set, binding.binding)
+                    .ok_or_else(|| anyhow!("shader binding is absent from its stage map"))?;
+                let target = BindTarget {
+                    buffer: slots.buffer.unwrap_or(0),
+                    texture: slots.texture.unwrap_or(0),
+                    sampler: slots.sampler.unwrap_or(0),
+                    count: None,
+                };
                 compiler
                     .add_resource_binding(
                         stage,
@@ -235,6 +187,37 @@ struct DescriptorBinding {
     descriptor_type: &'static str,
     descriptor_count: u32,
     stage_flags: &'static str,
+}
+
+impl DescriptorBinding {
+    fn rhi_entry(&self) -> anyhow::Result<dirk_rhi::BindGroupLayoutEntry> {
+        if self.descriptor_count != 1 {
+            bail!("descriptor arrays are not supported by the RHI");
+        }
+        let ty = match self.descriptor_type {
+            "UNIFORM_BUFFER" => dirk_rhi::BindingType::UniformBuffer {
+                dynamic_offset: false,
+            },
+            "STORAGE_BUFFER" => dirk_rhi::BindingType::StorageBuffer {
+                read_only: false,
+                dynamic_offset: false,
+            },
+            "COMBINED_IMAGE_SAMPLER" => dirk_rhi::BindingType::SampledImage,
+            "STORAGE_IMAGE" => dirk_rhi::BindingType::StorageImage,
+            other => bail!("unsupported RHI binding type {other}"),
+        };
+        let visibility = match self.stage_flags {
+            "VERTEX" => dirk_rhi::ShaderStages::VERTEX,
+            "FRAGMENT" => dirk_rhi::ShaderStages::FRAGMENT,
+            "COMPUTE" => dirk_rhi::ShaderStages::COMPUTE,
+            other => bail!("unsupported shader visibility {other}"),
+        };
+        Ok(dirk_rhi::BindGroupLayoutEntry {
+            binding: self.binding,
+            ty,
+            visibility,
+        })
+    }
 }
 
 #[derive(Debug)]

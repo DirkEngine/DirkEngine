@@ -281,12 +281,7 @@ impl Renderer {
         #[cfg(not(target_vendor = "apple"))]
         info!("initializing renderer RHI with Vulkan");
 
-        let surface_info = unsafe {
-            (
-                raw_window_handle::DisplayHandle::borrow_raw(window.display_handle()?.as_raw()),
-                raw_window_handle::WindowHandle::borrow_raw(window.window_handle()?.as_raw()),
-            )
-        };
+        let surface_info = (window.display_handle()?, window.window_handle()?);
         let version = |version: Version| (version.major(), version.minor(), version.patch());
         let rhi = Arc::new(ActiveRhi::new(&dirk_rhi::RhiCreateInfo {
             engine_name: create_info.engine_name.to_string_lossy().as_ref(),

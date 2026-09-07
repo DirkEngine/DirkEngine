@@ -1,13 +1,13 @@
 //! Metal implementation of [`dirk_rhi`].
 //!
-//! The implementation is available on Apple targets. MSL shaders use a simple
-//! binding convention: bind-group buffers, textures, and samplers are flattened
-//! independently by group and binding number, while vertex buffers start at
-//! Metal buffer index 16.
+//! The implementation is available on Apple targets. Shader bindings use the
+//! shared [`dirk_rhi::BindingMap`], independently for each shader stage. Vertex
+//! buffers start at Metal buffer index 16. Use [`dirk_rhi::Rhi`] for shared
+//! resource retention, validation, and recording scopes.
 //!
-//! Metal's native mipmap generator implements linear, same-image mip blits.
-//! Cross-image blits are supported when source and destination extents match;
-//! scaled cross-image blits return [`dirk_rhi::Error::Unsupported`].
+//! Exact-region filtered blits are currently unsupported. Callers query this
+//! before recording and select an explicit fallback; whole-chain native mipmap
+//! generation is not substituted for a regional operation.
 
 #![cfg(target_vendor = "apple")]
 

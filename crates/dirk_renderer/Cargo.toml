@@ -46,6 +46,7 @@ gpu-allocator.workspace = true
 egui-ash-renderer = { workspace = true, optional = true }
 
 [build-dependencies]
+dirk_rhi.workspace = true
 cargo-gpu-install.workspace = true
 anyhow.workspace = true
 rspirv-reflect.workspace = true
