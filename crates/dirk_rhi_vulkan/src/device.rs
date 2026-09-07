@@ -1,10 +1,7 @@
 use std::{
     collections::HashSet,
     ffi::{CStr, CString, c_void},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
 use ash::{
@@ -25,9 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::{backend_error, convert::QueueKind, vk_error};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
-const RETIREMENT_DELAY: u64 = 3;
 
-pub(crate) type Retained = Arc<dyn Send + Sync>;
 type DebugMessenger = (debug_utils::Instance, vk::DebugUtilsMessengerEXT);
 
 #[derive(Clone, Copy, Debug)]
@@ -82,11 +77,6 @@ pub(crate) enum Garbage {
     },
 }
 
-struct PendingGarbage {
-    retire_at: u64,
-    value: Garbage,
-}
-
 pub(crate) struct Context {
     pub(crate) entry: ash::Entry,
     pub(crate) instance: ash::Instance,
@@ -102,8 +92,7 @@ pub(crate) struct Context {
     pub(crate) non_coherent_atom_size: u64,
     pub(crate) enabled_instance_extensions: HashSet<String>,
     allocator: Mutex<Option<Allocator>>,
-    garbage: Mutex<Vec<PendingGarbage>>,
-    retirement_epoch: AtomicU64,
+    garbage: Mutex<Vec<Garbage>>,
     debug_messenger: Option<DebugMessenger>,
 }
 
@@ -326,7 +315,6 @@ impl Context {
             enabled_instance_extensions,
             allocator: Mutex::new(Some(allocator)),
             garbage: Mutex::new(Vec::new()),
-            retirement_epoch: AtomicU64::new(0),
             debug_messenger,
         }))
     }
@@ -347,32 +335,20 @@ impl Context {
         self.free(allocation);
     }
 
+    // Native resources reach this point only after the shared RHI has released
+    // all recording/submission ownership. No frame-count heuristic is involved.
     pub(crate) fn retire(&self, value: Garbage) {
-        let retire_at = self.retirement_epoch.load(Ordering::Relaxed) + RETIREMENT_DELAY;
-        self.garbage
-            .lock()
-            .push(PendingGarbage { retire_at, value });
+        self.garbage.lock().push(value);
     }
 
     pub(crate) fn collect_garbage(&self) {
-        let epoch = self.retirement_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        let mut garbage = self.garbage.lock();
-        let mut index = 0;
-        while index < garbage.len() {
-            if garbage[index].retire_at <= epoch {
-                let pending = garbage.swap_remove(index);
-                self.destroy(pending.value);
-            } else {
-                index += 1;
-            }
+        let pending = std::mem::take(&mut *self.garbage.lock());
+        for value in pending {
+            self.destroy(value);
         }
     }
-
     pub(crate) fn collect_all_garbage(&self) {
-        let pending = std::mem::take(&mut *self.garbage.lock());
-        for pending in pending {
-            self.destroy(pending.value);
-        }
+        self.collect_garbage();
     }
 
     pub(crate) fn queue(&self, queue: QueueType) -> vk::Queue {
@@ -416,6 +392,15 @@ impl Context {
                     views,
                     semaphores,
                 } => {
+                    // A submission fence does not cover the presentation engine.
+                    // Collection is externally synchronized by the shared device.
+                    if let Err(error) = self.device.device_wait_idle() {
+                        error!(
+                            ?error,
+                            "cannot retire a swapchain with uncertain presentation completion"
+                        );
+                        return;
+                    }
                     for view in views {
                         self.device.destroy_image_view(view, None);
                     }
@@ -443,9 +428,9 @@ impl Drop for Context {
         unsafe {
             let _ = self.device.device_wait_idle();
         }
-        let pending = self.garbage.get_mut().drain(..).collect::<Vec<_>>();
+        let pending = std::mem::take(self.garbage.get_mut());
         for pending in pending {
-            self.destroy(pending.value);
+            self.destroy(pending);
         }
         drop(self.allocator.get_mut().take());
         unsafe {
@@ -541,6 +526,9 @@ fn inspect_device(
         return None;
     }
 
+    if unsafe { instance.get_physical_device_features(raw) }.robust_buffer_access != vk::TRUE {
+        return None;
+    }
     let sampler_anisotropy =
         unsafe { instance.get_physical_device_features(raw) }.sampler_anisotropy == vk::TRUE;
     #[allow(
@@ -580,6 +568,27 @@ fn inspect_device(
             ),
             families,
             capabilities: Capabilities {
+                limits: dirk_rhi::Limits {
+                    max_buffer_size: u64::from(properties.limits.max_storage_buffer_range),
+                    max_image_dimension_2d: properties.limits.max_image_dimension2_d,
+                    max_image_dimension_3d: properties.limits.max_image_dimension3_d,
+                    max_image_array_layers: properties.limits.max_image_array_layers,
+                    max_color_attachments: properties.limits.max_color_attachments,
+                    max_bind_groups: properties.limits.max_bound_descriptor_sets,
+                    max_shader_buffers: properties
+                        .limits
+                        .max_per_stage_descriptor_uniform_buffers
+                        .min(properties.limits.max_per_stage_descriptor_storage_buffers),
+                    max_shader_textures: properties
+                        .limits
+                        .max_per_stage_descriptor_sampled_images
+                        .min(properties.limits.max_per_stage_descriptor_storage_images),
+                    max_shader_samplers: properties.limits.max_per_stage_descriptor_samplers,
+                    max_vertex_buffers: properties.limits.max_vertex_input_bindings,
+                },
+                depth_bias_clamp: unsafe { instance.get_physical_device_features(raw) }
+                    .depth_bias_clamp
+                    == vk::TRUE,
                 max_sampler_anisotropy,
                 min_uniform_buffer_offset_alignment: properties
                     .limits
@@ -674,8 +683,10 @@ fn create_device(
     if extension_available(&selected.extensions, ash::khr::portability_subset::NAME) {
         extensions.push(ash::khr::portability_subset::NAME.as_ptr());
     }
-    let features =
-        vk::PhysicalDeviceFeatures::default().sampler_anisotropy(selected.sampler_anisotropy);
+    let features = vk::PhysicalDeviceFeatures::default()
+        .sampler_anisotropy(selected.sampler_anisotropy)
+        .robust_buffer_access(true)
+        .depth_bias_clamp(selected.capabilities.depth_bias_clamp);
     let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
         .timeline_semaphore(true)
         .vulkan_memory_model(true);

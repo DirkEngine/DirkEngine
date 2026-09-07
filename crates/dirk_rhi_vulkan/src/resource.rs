@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 
 use crate::{
     VulkanBackend, convert,
-    device::{Context, Garbage, Retained},
+    device::{Context, Garbage},
     presentation::SwapchainGeneration,
     vk_error,
 };
@@ -90,21 +90,17 @@ impl VulkanBuffer {
         self.0.size
     }
 
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
     }
 }
 
-impl Buffer for VulkanBuffer {
+unsafe impl Buffer for VulkanBuffer {
     fn size(&self) -> u64 {
         self.0.size
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    unsafe fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let data_len = u64::try_from(data.len()).map_err(|_| Ir::OutOfRange)?;
         if offset
             .checked_add(data_len)
@@ -145,7 +141,7 @@ impl Buffer for VulkanBuffer {
         Ok(())
     }
 
-    fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
+    unsafe fn read(&self, offset: u64, data: &mut [u8]) -> Result<()> {
         let data_len = u64::try_from(data.len()).map_err(|_| Ir::OutOfRange)?;
         if offset
             .checked_add(data_len)
@@ -327,10 +323,6 @@ impl VulkanImage {
         }
     }
 
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
     #[must_use]
     /// Returns the native image handle.
     pub fn raw(&self) -> vk::Image {
@@ -434,10 +426,6 @@ impl VulkanImageView {
 
     pub(crate) fn aspects(&self) -> dirk_rhi::ImageAspects {
         self.0.aspects
-    }
-
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
     }
 
     pub(crate) fn context(&self) -> &Arc<Context> {
@@ -820,10 +808,6 @@ impl VulkanBindGroup {
         self.0.raw
     }
 
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
     }
@@ -884,10 +868,6 @@ impl VulkanPipelineLayout {
 
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
-    }
-
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
     }
 }
 
@@ -1089,10 +1069,6 @@ impl VulkanGraphicsPipeline {
         self.0.raw
     }
 
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
     }
@@ -1147,7 +1123,6 @@ pub struct VulkanFence(Arc<FenceInner>);
 struct FenceInner {
     context: Arc<Context>,
     raw: vk::Fence,
-    retained: Mutex<Vec<Retained>>,
 }
 
 impl VulkanFence {
@@ -1157,21 +1132,13 @@ impl VulkanFence {
         self.0.raw
     }
 
-    pub(crate) fn retain_resources(&self, resources: impl IntoIterator<Item = Retained>) {
-        self.0.retained.lock().extend(resources);
-    }
-
-    pub(crate) fn release_resources(&self) {
-        self.0.retained.lock().clear();
-    }
-
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
     }
 }
 
-impl Fence for VulkanFence {
-    fn wait(&self, timeout_ns: u64) -> Result<()> {
+unsafe impl Fence for VulkanFence {
+    unsafe fn wait(&self, timeout_ns: u64) -> Result<()> {
         unsafe {
             self.0
                 .context
@@ -1181,8 +1148,7 @@ impl Fence for VulkanFence {
         }
     }
 
-    fn reset(&self) -> Result<()> {
-        self.release_resources();
+    unsafe fn reset(&self) -> Result<()> {
         unsafe {
             self.0
                 .context
@@ -1215,7 +1181,6 @@ impl VulkanFence {
         Ok(Self(Arc::new(FenceInner {
             context: context.clone(),
             raw,
-            retained: Mutex::new(Vec::new()),
         })))
     }
 }
@@ -1234,17 +1199,13 @@ impl VulkanTimelineSemaphore {
         })))
     }
 
-    pub(crate) fn retain(&self) -> Retained {
-        self.0.clone()
-    }
-
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
     }
 }
 
-impl TimelineSemaphore for VulkanTimelineSemaphore {
-    fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
+unsafe impl TimelineSemaphore for VulkanTimelineSemaphore {
+    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
         let semaphores = [self.0.raw];
         let values = [value];
         let wait_info = vk::SemaphoreWaitInfo::default()
@@ -1259,7 +1220,7 @@ impl TimelineSemaphore for VulkanTimelineSemaphore {
         }
     }
 
-    fn value(&self) -> Result<u64> {
+    unsafe fn value(&self) -> Result<u64> {
         unsafe {
             self.0
                 .context

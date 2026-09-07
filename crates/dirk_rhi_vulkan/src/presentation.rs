@@ -12,10 +12,11 @@ use dirk_rhi::{
     Error, Extent3d, ImageUsages, InvalidResourceKind as Ir, PresentMode, Result,
     SurfaceCreateInfo, SurfaceFormat, SurfaceFrame, SurfaceStatus, Swapchain, SwapchainDesc,
 };
+use parking_lot::Mutex;
 
 use crate::{
-    VulkanBackend, VulkanImage, VulkanImageView, convert,
-    device::{Context, Garbage, Retained},
+    VulkanBackend, VulkanFence, VulkanImage, VulkanImageView, convert,
+    device::{Context, Garbage},
     vk_error,
 };
 
@@ -93,6 +94,12 @@ impl Drop for SurfaceInner {
     }
 }
 
+#[derive(Default)]
+struct AcquireSlot {
+    acquired: bool,
+    completion: Option<VulkanFence>,
+}
+
 pub(crate) struct SwapchainGeneration {
     pub(crate) context: Arc<Context>,
     surface: VulkanSurface,
@@ -100,15 +107,12 @@ pub(crate) struct SwapchainGeneration {
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
+    acquisitions: Mutex<Vec<AcquireSlot>>,
     format: SurfaceFormat,
     extent: Extent3d,
 }
 
 impl SwapchainGeneration {
-    pub(crate) fn retain(self: &Arc<Self>) -> Retained {
-        self.clone()
-    }
-
     #[allow(
         clippy::too_many_lines,
         clippy::too_many_arguments,
@@ -330,6 +334,7 @@ impl SwapchainGeneration {
             context: context.clone(),
             surface: surface.clone(),
             raw,
+            acquisitions: Mutex::new((0..images.len()).map(|_| AcquireSlot::default()).collect()),
             images,
             views,
             semaphores,
@@ -361,7 +366,7 @@ pub struct VulkanSwapchain {
     preferred_formats: Vec<SurfaceFormat>,
     desired_image_count: Option<NonZeroU32>,
     present_mode: PresentMode,
-    semaphore_index: usize,
+    next_acquisition: usize,
 }
 
 impl VulkanSwapchain {
@@ -385,7 +390,7 @@ impl VulkanSwapchain {
             preferred_formats: desc.preferred_formats.to_vec(),
             desired_image_count: desc.desired_image_count,
             present_mode: desc.present_mode,
-            semaphore_index: 0,
+            next_acquisition: 0,
         })
     }
 
@@ -396,7 +401,7 @@ impl VulkanSwapchain {
     }
 }
 
-impl Swapchain<VulkanBackend> for VulkanSwapchain {
+unsafe impl Swapchain<VulkanBackend> for VulkanSwapchain {
     fn format(&self) -> SurfaceFormat {
         self.generation.format
     }
@@ -410,9 +415,19 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             .expect("a Vulkan swapchain always has at least one image")
     }
 
-    fn acquire(&mut self, timeout_ns: u64) -> Result<VulkanSurfaceFrame> {
-        let semaphore_index = self.semaphore_index;
-        self.semaphore_index = (self.semaphore_index + 1) % self.generation.semaphores.len();
+    unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<VulkanSurfaceFrame> {
+        let mut acquisitions = self.generation.acquisitions.lock();
+        let semaphore_index = (0..acquisitions.len())
+            .map(|offset| (self.next_acquisition + offset) % acquisitions.len())
+            .find(|&index| !acquisitions[index].acquired)
+            .ok_or_else(|| {
+                Ir::BadState.with_detail("all swapchain acquisition slots are in use")
+            })?;
+        let slot = &mut acquisitions[semaphore_index];
+        if let Some(completion) = &slot.completion {
+            // The prior submission must have consumed this binary semaphore.
+            unsafe { dirk_rhi::Fence::wait(completion, timeout_ns) }?;
+        }
         let image_available = self.generation.semaphores[semaphore_index].0;
         let (image_index, suboptimal) = unsafe {
             self.generation.context.swapchain_loader.acquire_next_image(
@@ -423,6 +438,9 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             )
         }
         .map_err(vk_error)?;
+        self.next_acquisition = (semaphore_index + 1) % self.generation.semaphores.len();
+        slot.acquired = true;
+        slot.completion = None;
         let generation = self.generation.clone();
         let index = usize::try_from(image_index).map_err(|_| {
             Error::Backend(anyhow::anyhow!(
@@ -451,7 +469,7 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
         })
     }
 
-    fn discard(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
+    unsafe fn discard(&mut self, frame: VulkanSurfaceFrame) -> Result<()> {
         if !Arc::ptr_eq(&self.generation, &frame.generation) {
             return Err(Ir::ForeignInstance
                 .with_detail("frame belongs to another swapchain generation")
@@ -463,13 +481,16 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
                 .into());
         }
         let extent = self.extent();
-        self.resize(
-            NonZeroU32::new(extent.width).expect("swapchain width is non-zero"),
-            NonZeroU32::new(extent.height).expect("swapchain height is non-zero"),
-        )
+        unsafe { self.generation.context.device.device_wait_idle() }.map_err(vk_error)?;
+        unsafe {
+            self.resize(
+                NonZeroU32::new(extent.width).expect("swapchain width is non-zero"),
+                NonZeroU32::new(extent.height).expect("swapchain height is non-zero"),
+            )
+        }
     }
 
-    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
+    unsafe fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
         let generation = SwapchainGeneration::create(
             &self.generation.context,
             &self.generation.surface,
@@ -482,11 +503,11 @@ impl Swapchain<VulkanBackend> for VulkanSwapchain {
             self.generation.raw,
         )?;
         self.generation = generation;
-        self.semaphore_index = 0;
+        self.next_acquisition = 0;
         Ok(())
     }
 
-    fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
+    unsafe fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
         if !Arc::ptr_eq(&self.generation.context, frame.context()) {
             return Err(Ir::ForeignInstance
                 .with_detail("frame belongs to another Vulkan device")
@@ -534,7 +555,8 @@ impl VulkanSurfaceFrame {
     }
 
     pub(crate) fn render_finished(&self) -> vk::Semaphore {
-        self.generation.semaphores[self.semaphore_index].1
+        // Reacquiring this image establishes completion of its prior presentation wait.
+        self.generation.semaphores[self.image_index as usize].1
     }
 
     pub(crate) fn context(&self) -> &Arc<Context> {
@@ -552,12 +574,19 @@ impl VulkanSurfaceFrame {
             })
     }
 
+    pub(crate) fn track_completion(&self, fence: &VulkanFence) {
+        let mut acquisitions = self.generation.acquisitions.lock();
+        let slot = &mut acquisitions[self.semaphore_index];
+        slot.completion = Some(fence.clone());
+        slot.acquired = false;
+    }
+
     pub(crate) fn unmark_submitted(&self) {
         self.submitted.store(false, Ordering::Release);
     }
 }
 
-impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
+unsafe impl SurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
     fn image(&self) -> &VulkanImage {
         &self.image
     }

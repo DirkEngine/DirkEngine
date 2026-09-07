@@ -58,6 +58,11 @@ impl VulkanBackend {
         queue: QueueType,
         submission: &'a Submission<'a, Self>,
     ) -> Result<Vec<&'a VulkanSurfaceFrame>> {
+        if !submission.surface_frames.is_empty() && submission.fence.is_none() {
+            return Err(Ir::BadState
+                .with_detail("surface submissions require a completion fence")
+                .into());
+        }
         if let Some(fence) = submission.fence {
             self.require_context(fence.context())?;
         }
@@ -123,7 +128,7 @@ impl VulkanBackend {
     }
 }
 
-impl Backend for VulkanBackend {
+impl dirk_rhi::Api for VulkanBackend {
     type Buffer = VulkanBuffer;
     type Image = VulkanImage;
     type ImageView = VulkanImageView;
@@ -140,8 +145,11 @@ impl Backend for VulkanBackend {
     type Surface = VulkanSurface;
     type Swapchain = VulkanSwapchain;
     type SurfaceFrame = VulkanSurfaceFrame;
+}
 
-    fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
+// SAFETY: native resources own their parent objects; the shared RHI validates calls and retains GPU use.
+unsafe impl Backend for VulkanBackend {
+    unsafe fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
         Ok(Self {
             context: Context::new(info)?,
         })
@@ -163,7 +171,13 @@ impl Backend for VulkanBackend {
             )
         };
         let features = properties.optimal_tiling_features;
-        let mut usages = ImageUsages::COPY_SRC | ImageUsages::COPY_DST;
+        let mut usages = ImageUsages::NONE;
+        if features.contains(vk::FormatFeatureFlags::TRANSFER_SRC) {
+            usages |= ImageUsages::COPY_SRC;
+        }
+        if features.contains(vk::FormatFeatureFlags::TRANSFER_DST) {
+            usages |= ImageUsages::COPY_DST;
+        }
         if features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE) {
             usages |= ImageUsages::SAMPLED;
         }
@@ -176,7 +190,24 @@ impl Backend for VulkanBackend {
         if features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
             usages |= ImageUsages::DEPTH_STENCIL_ATTACHMENT;
         }
-        FormatCapabilities { usages }
+        let filterable = features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR);
+        let blit = if features
+            .contains(vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST)
+        {
+            if filterable {
+                dirk_rhi::BlitSupport::Linear
+            } else {
+                dirk_rhi::BlitSupport::Nearest
+            }
+        } else {
+            dirk_rhi::BlitSupport::None
+        };
+        FormatCapabilities {
+            usages,
+            filterable,
+            blendable: features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND),
+            blit,
+        }
     }
 
     fn supported_sample_counts(&self, format: TextureFormat, usages: ImageUsages) -> SampleCounts {
@@ -197,26 +228,26 @@ impl Backend for VulkanBackend {
         })
     }
 
-    fn wait_idle(&self) -> Result<()> {
+    unsafe fn wait_idle(&self) -> Result<()> {
         unsafe { self.context.device.device_wait_idle() }.map_err(vk_error)?;
         self.context.collect_all_garbage();
         Ok(())
     }
 
-    fn collect_garbage(&self) -> Result<()> {
+    unsafe fn collect_garbage(&self) -> Result<()> {
         self.context.collect_garbage();
         Ok(())
     }
 
-    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<VulkanBuffer> {
+    unsafe fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<VulkanBuffer> {
         VulkanBuffer::create(&self.context, desc)
     }
 
-    fn create_image(&self, desc: &ImageDesc<'_>) -> Result<VulkanImage> {
+    unsafe fn create_image(&self, desc: &ImageDesc<'_>) -> Result<VulkanImage> {
         VulkanImage::create(&self.context, desc)
     }
 
-    fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<VulkanImageView> {
+    unsafe fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<VulkanImageView> {
         if !Arc::ptr_eq(&self.context, desc.image.context()) {
             return Err(Ir::ForeignInstance
                 .with_detail("image belongs to another Vulkan device")
@@ -225,57 +256,63 @@ impl Backend for VulkanBackend {
         VulkanImageView::create(&self.context, desc)
     }
 
-    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<VulkanSampler> {
+    unsafe fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<VulkanSampler> {
         VulkanSampler::create(&self.context, desc)
     }
 
-    fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<VulkanShader> {
+    unsafe fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<VulkanShader> {
         VulkanShader::create(&self.context, desc)
     }
 
-    fn create_bind_group_layout(
+    unsafe fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<VulkanBindGroupLayout> {
         VulkanBindGroupLayout::create(&self.context, desc)
     }
 
-    fn create_bind_group(&self, desc: &BindGroupDesc<'_, Self>) -> Result<VulkanBindGroup> {
+    unsafe fn create_bind_group(&self, desc: &BindGroupDesc<'_, Self>) -> Result<VulkanBindGroup> {
         VulkanBindGroup::create(&self.context, desc)
     }
 
-    fn create_pipeline_layout(
+    unsafe fn create_pipeline_layout(
         &self,
         desc: &PipelineLayoutDesc<'_, Self>,
     ) -> Result<VulkanPipelineLayout> {
         VulkanPipelineLayout::create(&self.context, desc)
     }
 
-    fn create_graphics_pipeline(
+    unsafe fn create_graphics_pipeline(
         &self,
         desc: &GraphicsPipelineDesc<'_, Self>,
     ) -> Result<VulkanGraphicsPipeline> {
         VulkanGraphicsPipeline::create(&self.context, desc)
     }
 
-    fn create_command_pool(&self, queue: QueueType) -> Result<VulkanCommandPool> {
+    unsafe fn create_command_pool(&self, queue: QueueType) -> Result<VulkanCommandPool> {
         VulkanCommandPool::create(&self.context, queue)
     }
 
-    fn create_command_buffer(&self, pool: &mut VulkanCommandPool) -> Result<VulkanCommandBuffer> {
+    unsafe fn create_command_buffer(
+        &self,
+        pool: &mut VulkanCommandPool,
+    ) -> Result<VulkanCommandBuffer> {
         self.require_context(pool.context())?;
         VulkanCommandBuffer::create(pool)
     }
 
-    fn create_fence(&self, signaled: bool) -> Result<VulkanFence> {
+    unsafe fn create_fence(&self, signaled: bool) -> Result<VulkanFence> {
         VulkanFence::create(&self.context, signaled)
     }
 
-    fn create_timeline_semaphore(&self, initial_value: u64) -> Result<VulkanTimelineSemaphore> {
+    unsafe fn create_timeline_semaphore(
+        &self,
+        initial_value: u64,
+    ) -> Result<VulkanTimelineSemaphore> {
         VulkanTimelineSemaphore::create(&self.context, initial_value)
     }
 
-    fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
+    unsafe fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
         let marked_frames = self.validate_submission(queue, submission)?;
         let fence = submission.fence;
         let mut waits =
@@ -328,39 +365,19 @@ impl Backend for VulkanBackend {
             }
             return Err(error);
         }
-        let retained = submission
-            .command_buffers
-            .iter()
-            .flat_map(|command| command.retained())
-            .chain(
-                submission
-                    .surface_frames
-                    .iter()
-                    .map(|frame| frame.generation.retain()),
-            )
-            .chain(
-                submission
-                    .wait_timelines
-                    .iter()
-                    .map(|point| point.semaphore.retain()),
-            )
-            .chain(
-                submission
-                    .signal_timelines
-                    .iter()
-                    .map(|point| point.semaphore.retain()),
-            );
         if let Some(fence) = fence {
-            fence.retain_resources(retained);
+            for frame in marked_frames {
+                frame.track_completion(fence);
+            }
         }
         Ok(())
     }
 
-    fn create_surface(&self, info: SurfaceCreateInfo) -> Result<VulkanSurface> {
+    unsafe fn create_surface(&self, info: SurfaceCreateInfo) -> Result<VulkanSurface> {
         VulkanSurface::create(&self.context, &info)
     }
 
-    fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<VulkanSwapchain> {
+    unsafe fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<VulkanSwapchain> {
         VulkanSwapchain::create(&self.context, desc)
     }
 }

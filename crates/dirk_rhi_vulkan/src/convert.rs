@@ -161,6 +161,10 @@ pub(crate) fn pipeline_stages(value: PipelineStages) -> vk::PipelineStageFlags2 
     if value == PipelineStages::ALL {
         return vk::PipelineStageFlags2::ALL_COMMANDS;
     }
+
+    if value == PipelineStages::ALL {
+        return vk::PipelineStageFlags2::ALL_COMMANDS;
+    }
     let mut flags = vk::PipelineStageFlags2::empty();
     for (rhi, vulkan) in [
         (
@@ -205,32 +209,72 @@ pub(crate) fn pipeline_stages(value: PipelineStages) -> vk::PipelineStageFlags2 
     flags
 }
 
+fn shader_pipeline_stages(stages: ShaderStages) -> vk::PipelineStageFlags2 {
+    let mut result = vk::PipelineStageFlags2::empty();
+    for (stage, native) in [
+        (ShaderStages::VERTEX, vk::PipelineStageFlags2::VERTEX_SHADER),
+        (
+            ShaderStages::FRAGMENT,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+        ),
+        (
+            ShaderStages::COMPUTE,
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+        ),
+    ] {
+        if stages.contains(stage) {
+            result |= native;
+        }
+    }
+    result
+}
+
 pub(crate) fn image_state(
     value: ImageState,
 ) -> (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout) {
     match value {
+        ImageState::Vertex => (
+            vk::PipelineStageFlags2::VERTEX_INPUT,
+            vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            vk::ImageLayout::UNDEFINED,
+        ),
+        ImageState::Index => (
+            vk::PipelineStageFlags2::VERTEX_INPUT,
+            vk::AccessFlags2::INDEX_READ,
+            vk::ImageLayout::UNDEFINED,
+        ),
+        ImageState::Uniform(stages) => (
+            shader_pipeline_stages(stages),
+            vk::AccessFlags2::UNIFORM_READ,
+            vk::ImageLayout::UNDEFINED,
+        ),
+        ImageState::StorageRead(stages) => (
+            shader_pipeline_stages(stages),
+            vk::AccessFlags2::SHADER_STORAGE_READ,
+            vk::ImageLayout::GENERAL,
+        ),
         ImageState::Undefined => (
             vk::PipelineStageFlags2::TOP_OF_PIPE,
             vk::AccessFlags2::empty(),
             vk::ImageLayout::UNDEFINED,
         ),
         ImageState::CopySource => (
-            vk::PipelineStageFlags2::COPY,
+            vk::PipelineStageFlags2::ALL_TRANSFER,
             vk::AccessFlags2::TRANSFER_READ,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         ),
         ImageState::CopyDestination => (
-            vk::PipelineStageFlags2::COPY,
+            vk::PipelineStageFlags2::ALL_TRANSFER,
             vk::AccessFlags2::TRANSFER_WRITE,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         ),
-        ImageState::ShaderRead => (
-            vk::PipelineStageFlags2::ALL_GRAPHICS | vk::PipelineStageFlags2::COMPUTE_SHADER,
+        ImageState::ShaderRead(stages) => (
+            shader_pipeline_stages(stages),
             vk::AccessFlags2::SHADER_READ,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         ),
-        ImageState::ShaderWrite => (
-            vk::PipelineStageFlags2::ALL_GRAPHICS | vk::PipelineStageFlags2::COMPUTE_SHADER,
+        ImageState::ShaderWrite(stages) => (
+            shader_pipeline_stages(stages),
             vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
             vk::ImageLayout::GENERAL,
         ),
@@ -246,11 +290,17 @@ pub(crate) fn image_state(
                 | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         ),
-        ImageState::DepthStencilAttachmentReadOnly => (
+        ImageState::DepthStencilAttachmentReadOnly(stages) => (
             vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-            vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS
+                | shader_pipeline_stages(stages),
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                | if stages.is_empty() {
+                    vk::AccessFlags2::empty()
+                } else {
+                    vk::AccessFlags2::SHADER_SAMPLED_READ
+                },
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         ),
         ImageState::Present => (
             vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
