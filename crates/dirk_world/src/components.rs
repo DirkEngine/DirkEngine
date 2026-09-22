@@ -12,7 +12,7 @@ use dirk_universe::{
     systems::{RemovedComponents, System},
 };
 use glam::{Mat4, Quat, Vec3};
-use tracing::{error, warn};
+use tracing::error;
 
 /// Marks an entity as having a renderable mesh.
 ///
@@ -235,19 +235,10 @@ impl Transform {
 
     /// Builds a **left-handed** view matrix for a camera placed at this
     /// transform, looking in the [`forward`](Self::forward) direction.
+    #[must_use]
     pub fn view(&self) -> Mat4 {
-        let forward = self.forward();
-        if forward.cross(dirk_utils::UP_DIRECTION).length() < 1e-4 {
-            warn!(
-                "camera forward {:?} is parallel to UP — view matrix will be NaN",
-                forward
-            );
-        }
-        glam::camera::lh::view::look_at_mat4(
-            self.location,
-            self.location + forward,
-            dirk_utils::UP_DIRECTION,
-        )
+        // The inverse rigid transform preserves camera roll and ignores model scale.
+        Mat4::from_rotation_translation(self.rotation, self.location).inverse()
     }
 }
 
@@ -267,5 +258,26 @@ mod tests {
         let movement = Transform::default().movement_direction(Vec3::Z);
 
         assert_eq!(movement, -dirk_utils::FORWARD_DIRECTION);
+    }
+    #[test]
+    fn camera_view_preserves_roll_and_ignores_scale() {
+        let transform = Transform {
+            location: Vec3::new(3.0, -2.0, 5.0),
+            rotation: Quat::from_rotation_z(0.7) * Quat::from_rotation_y(0.3),
+            scale: Vec3::new(2.0, 3.0, 0.0),
+        };
+        let view = transform.view();
+        assert!(
+            view.transform_point3(transform.location)
+                .abs_diff_eq(Vec3::ZERO, 1e-5)
+        );
+        assert!(
+            view.transform_vector3(transform.rotation * Vec3::Y)
+                .abs_diff_eq(Vec3::Y, 1e-5)
+        );
+        assert!(
+            view.transform_vector3(transform.rotation * Vec3::Z)
+                .abs_diff_eq(Vec3::Z, 1e-5)
+        );
     }
 }

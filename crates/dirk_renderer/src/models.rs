@@ -13,19 +13,18 @@ use std::{
     ops::Deref,
 };
 
-use ash::vk;
+use dirk_rhi::IndexFormat;
 
 use crate::{
     Error, Result,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipelineRenderingContext},
     resources::{
-        buffer::{IndexBuffer, VertexBuffer},
-        command_pool::CommandBuffer,
+        Rhi, Sampler,
+        buffer::VertexBuffer,
         descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
+            BindingLayout, DescriptorSet,
             sets::{MaterialSet, ObjectSet, SceneSet},
         },
-        device::{Garbage, RenderDevice},
         image::Image,
     },
     utils::Vertex,
@@ -80,20 +79,13 @@ impl<T> Deref for Handle<T> {
 }
 
 pub struct Texture {
-    pub device: RenderDevice,
     pub image: Image,
-    pub sampler: vk::Sampler,
-}
-
-impl Drop for Texture {
-    fn drop(&mut self) {
-        self.device.destroy(Garbage::Sampler(self.sampler));
-    }
+    pub sampler: Sampler,
 }
 
 struct Primitive {
     pub vertex_buffer: VertexBuffer<Vertex>,
-    pub index_buffer: IndexBuffer,
+    pub index_buffer: dirk_rhi::Buffer,
     pub index_count: u32,
     pub material_handle: Option<Handle<Material>>,
 }
@@ -114,8 +106,6 @@ struct Model {
 }
 
 pub struct ModelRegistry {
-    device: RenderDevice,
-
     textures: slotmap::SlotMap<slotmap::DefaultKey, Texture>,
     meshes: slotmap::SlotMap<slotmap::DefaultKey, Mesh>,
     materials: slotmap::SlotMap<slotmap::DefaultKey, Material>,
@@ -124,20 +114,21 @@ pub struct ModelRegistry {
     fallback_material: Material,
     #[allow(unused)]
     fallback_texture: Texture,
-    material_alloc: DescriptorAllocator<MaterialSet>,
+    material_alloc: BindingLayout<MaterialSet>,
 
     asset_load_consumer: dirk_events::Consumer<::dirk_assets::AssetLoaded<::dirk_assets::Model>>,
     asset_unload_consumer: dirk_events::Consumer<::dirk_assets::AssetUnloaded>,
 }
 
 impl ModelRegistry {
-    pub fn new(device: &RenderDevice, events: &dirk_events::EventManager) -> Result<Self> {
-        let mut material_alloc = DescriptorAllocator::<MaterialSet>::new(device, 64)?;
+    pub fn new(device: &mut Rhi, events: &dirk_events::EventManager) -> Result<Self> {
+        let mut material_alloc = BindingLayout::<MaterialSet>::new(device)?;
+        let mut uploads = dirk_render_utils::upload::UploadBatch::new(device)?;
         let (fallback_material, fallback_texture) =
-            Self::create_fallback_material(device, &mut material_alloc)?;
+            Self::create_fallback_material(device, &mut uploads, &mut material_alloc)?;
+        uploads.finish(device)?;
 
         Ok(Self {
-            device: device.clone(),
             textures: slotmap::SlotMap::new(),
             meshes: slotmap::SlotMap::new(),
             materials: slotmap::SlotMap::new(),
@@ -150,10 +141,14 @@ impl ModelRegistry {
             asset_unload_consumer: events.subscribe(),
         })
     }
-    pub fn tick(&mut self) -> Result<()> {
+    pub fn tick(
+        &mut self,
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
+    ) -> Result<()> {
         let events = self.asset_load_consumer.consume_all().collect::<Vec<_>>();
         for event in events {
-            self.load_model(&event.handle)?;
+            self.load_model(device, uploads, &event.handle)?;
         }
 
         let events = self.asset_unload_consumer.consume_all().collect::<Vec<_>>();
@@ -168,44 +163,47 @@ impl ModelRegistry {
         }
         Ok(())
     }
-    pub fn render_model(
+    pub unsafe fn render_model(
         &self,
         handle: &dirk_assets::AssetHandle,
-        cmd: &CommandBuffer,
         scene_set: &DescriptorSet<SceneSet>,
         proxy_set: &DescriptorSet<ObjectSet>,
-        ctx: &GraphicsPipelineRenderingContext<'_, MainPipelineSpec>,
-    ) -> dirk_assets::Result<()> {
-        if handle.asset_type() != dirk_assets::AssetType::Model {
-            return Err(dirk_assets::Error::TypeMismatch(handle.to_string()));
+        ctx: &mut GraphicsPipelineRenderingContext<'_, '_, MainPipelineSpec>,
+    ) -> Result<()> {
+        unsafe {
+            if handle.asset_type() != dirk_assets::AssetType::Model {
+                return Err(dirk_assets::Error::TypeMismatch(handle.to_string()).into());
+            }
+
+            let model = self
+                .models
+                .get(handle)
+                .ok_or_else(|| dirk_assets::Error::NotFound(handle.to_string()))?;
+
+            let primitives = model
+                .meshes
+                .iter()
+                .flat_map(|&mesh| self.meshes[*mesh].primitives.iter());
+
+            for prim in primitives {
+                let material_set = prim
+                    .material_handle
+                    .map_or(&self.fallback_material.set, |mat| &self.materials[*mat].set);
+
+                ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set))?;
+                ctx.bind_vertex_buffer(&prim.vertex_buffer)?;
+                ctx.command()
+                    .bind_index_buffer(&prim.index_buffer, 0, IndexFormat::Uint32)?;
+                ctx.command().draw_indexed(prim.index_count, 1, 0, 0, 0)?;
+            }
+            Ok(())
         }
-
-        let model = self
-            .models
-            .get(handle)
-            .ok_or(dirk_assets::Error::NotFound(handle.to_string()))?;
-
-        let primitives = model
-            .meshes
-            .iter()
-            .flat_map(|&mesh| self.meshes[*mesh].primitives.iter());
-
-        for prim in primitives {
-            let material_set = prim
-                .material_handle
-                .map_or(&self.fallback_material.set, |mat| &self.materials[*mat].set);
-
-            ctx.bind_descriptor_sets(&(scene_set, proxy_set, material_set));
-            ctx.bind_vertex_buffer(&prim.vertex_buffer);
-            cmd.bind_index_buffer(prim.index_buffer.buffer(), 0, vk::IndexType::UINT32);
-            cmd.draw_indexed(prim.index_count, 1, 0, 0, 0);
-        }
-        Ok(())
     }
 
     fn create_fallback_material(
-        device: &RenderDevice,
-        material_alloc: &mut DescriptorAllocator<MaterialSet>,
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
+        material_alloc: &mut BindingLayout<MaterialSet>,
     ) -> Result<(Material, Texture)> {
         let white = gltf::image::Data {
             pixels: vec![255, 255, 255, 255],
@@ -213,12 +211,9 @@ impl ModelRegistry {
             width: 1,
             height: 1,
         };
-        let texture = Image::upload_texture(device, &white)?;
-        let set = material_alloc.allocate()?;
-
-        DescriptorWriter::new(&device.device)
-            .combined_image_sampler(&set, 0, texture.image.view(), texture.sampler)
-            .flush();
+        let texture = Image::upload_texture(device, uploads, &white)?;
+        let set =
+            material_alloc.sampled_image(device, 0, texture.image.rhi_view(), &texture.sampler)?;
 
         Ok((
             Material {
@@ -229,7 +224,12 @@ impl ModelRegistry {
         ))
     }
 
-    fn load_model(&mut self, handle: &dirk_assets::Handle<dirk_assets::Model>) -> Result<()> {
+    fn load_model(
+        &mut self,
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
+        handle: &dirk_assets::Handle<dirk_assets::Model>,
+    ) -> Result<()> {
         let dirk_assets::Model {
             gltf,
             buffers,
@@ -239,7 +239,7 @@ impl ModelRegistry {
 
         let mut texture_handles = Vec::with_capacity(images.len());
         for image in &images {
-            match Image::upload_texture(&self.device, image) {
+            match Image::upload_texture(device, uploads, image) {
                 Ok(tex) => texture_handles.push(Handle::new(self.textures.insert(tex))),
                 Err(error) => {
                     self.remove_model_parts(&[], &[], &texture_handles);
@@ -253,12 +253,14 @@ impl ModelRegistry {
 
         let result = (|| -> Result<()> {
             material_handles =
-                self.create_materials(gltf.materials().collect(), &texture_handles)?;
+                self.create_materials(device, gltf.materials().collect(), &texture_handles)?;
 
             for mesh in gltf.meshes() {
                 let primitives = mesh
                     .primitives()
-                    .map(|prim| self.upload_primitive(&prim, &buffers, &material_handles))
+                    .map(|prim| {
+                        Self::upload_primitive(device, uploads, &prim, &buffers, &material_handles)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 mesh_handles.push(Handle::new(self.meshes.insert(Mesh { primitives })));
             }
@@ -283,13 +285,13 @@ impl ModelRegistry {
 
     fn create_materials(
         &mut self,
+        device: &Rhi,
         materials: Vec<gltf::Material>,
         texture_refs: &[Handle<Texture>],
     ) -> Result<Vec<Handle<Material>>> {
         let mut pending = Vec::with_capacity(materials.len());
 
         for mat in materials {
-            let set = self.material_alloc.allocate()?;
             let base_color = mat
                 .pbr_metallic_roughness()
                 .base_color_texture()
@@ -302,37 +304,28 @@ impl ModelRegistry {
                 })
                 .transpose()?;
 
-            let (view, sampler) = base_color.map_or_else(
-                || {
-                    (
-                        self.fallback_texture.image.view(),
-                        self.fallback_texture.sampler,
-                    )
-                },
-                |tex_handle| {
-                    let tex = &self.textures[*tex_handle];
-                    (tex.image.view(), tex.sampler)
-                },
-            );
-            pending.push((base_color, set, view, sampler));
+            let texture =
+                base_color.map_or(&self.fallback_texture, |handle| &self.textures[*handle]);
+            let set = self.material_alloc.sampled_image(
+                device,
+                0,
+                texture.image.rhi_view(),
+                &texture.sampler,
+            )?;
+            pending.push((base_color, set));
         }
-
-        let mut writer = DescriptorWriter::new(&self.device.device);
-        for (_, set, view, sampler) in &pending {
-            writer = writer.combined_image_sampler(set, 0, *view, *sampler);
-        }
-        writer.flush();
 
         Ok(pending
             .into_iter()
-            .map(|(base_color, set, _, _)| {
+            .map(|(base_color, set)| {
                 Handle::new(self.materials.insert(Material { base_color, set }))
             })
             .collect())
     }
 
     fn upload_primitive(
-        &self,
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
         primitive: &gltf::Primitive,
         buffers: &[gltf::buffer::Data],
         mat_refs: &[Handle<Material>],
@@ -366,8 +359,13 @@ impl ModelRegistry {
             })
             .collect();
 
-        let vertex_buffer = VertexBuffer::upload_slice(&self.device, &vertices)?;
-        let index_buffer = IndexBuffer::upload_slice(&self.device, &indices)?;
+        let vertex_buffer = VertexBuffer::upload(device, uploads, &vertices)?;
+        let index_buffer = uploads.buffer(
+            device,
+            bytemuck::cast_slice(&indices),
+            dirk_rhi::BufferUsages::INDEX,
+            dirk_rhi::ResourceAccess::Index,
+        )?;
 
         // indices.len() will not surpass u32::MAX
         #[allow(clippy::cast_possible_truncation)]

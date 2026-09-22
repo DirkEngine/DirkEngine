@@ -1,68 +1,87 @@
-use ash::vk;
+use crate::resources::{
+    buffer::UniformBuffer,
+    descriptors::{BindingLayout, DescriptorSet, sets::SceneSet},
+};
 use dirk_player::PlayerId;
+use dirk_rhi::{Extent3d, ImageUsages, SampleCount, TextureFormat};
+use dirk_shaders::types::SceneUbo;
 use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
     Result,
-    frame_graph::{ImportedTexture, TextureStateDesc},
+    frame_graph::ImportedTexture,
     resources::{
-        device::RenderDevice,
+        Rhi,
         image::{Image, ImageCreateInfo},
-        sync::TimelineSemaphore,
     },
 };
 
-#[derive(Clone, Copy)]
-pub(crate) struct TextureState {
-    layout: vk::ImageLayout,
-    stage: vk::PipelineStageFlags2,
-    access: vk::AccessFlags2,
-}
-
-impl From<TextureState> for TextureStateDesc {
-    fn from(state: TextureState) -> Self {
-        Self {
-            layout: state.layout,
-            stage: state.stage,
-            access: state.access,
-        }
-    }
-}
-
 pub(crate) struct Viewport {
     player: PlayerId,
+    camera_ubo: [UniformBuffer<SceneUbo>; crate::MAX_FRAMES_IN_FLIGHT],
+    camera_sets: [DescriptorSet<SceneSet>; crate::MAX_FRAMES_IN_FLIGHT],
     pub camera: Option<Entity>,
     pub world: Option<WorldId>,
     settings: ViewportSettings,
     output: Image,
-    output_state: TextureState,
-    render_semaphore: TimelineSemaphore,
-    last_render_value: u64,
+    output_state: dirk_rhi::ImageState,
     output_has_rendered: bool,
 }
 
 impl Viewport {
-    pub fn new(
-        device: &RenderDevice,
-        player: PlayerId,
-        settings: ViewportSettings,
-    ) -> Result<Self> {
+    pub fn new(device: &Rhi, player: PlayerId, settings: ViewportSettings) -> Result<Self> {
         let settings = settings.clamped();
 
+        let camera_ubo = [UniformBuffer::new(device)?, UniformBuffer::new(device)?];
+        let allocator = BindingLayout::<SceneSet>::new(device)?;
+        let camera_sets = [
+            allocator.uniform_buffer(
+                device,
+                0,
+                camera_ubo[0].buffer(),
+                size_of::<SceneUbo>() as u64,
+            )?,
+            allocator.uniform_buffer(
+                device,
+                0,
+                camera_ubo[1].buffer(),
+                size_of::<SceneUbo>() as u64,
+            )?,
+        ];
         Ok(Self {
+            camera_ubo,
+            camera_sets,
             player,
             camera: None,
             world: None,
             settings,
             output: Self::create_output(device, &settings)?,
             output_state: Viewport::undefined_state(),
-            render_semaphore: TimelineSemaphore::create(device, 0)?,
-            last_render_value: 0,
             output_has_rendered: false,
         })
     }
 
+    pub fn camera_buffer(&self, frame: usize) -> &dirk_rhi::Buffer {
+        self.camera_ubo[frame].buffer()
+    }
+    pub fn camera_set(&self, frame: usize) -> &DescriptorSet<SceneSet> {
+        &self.camera_sets[frame]
+    }
+    pub fn prepare_camera(&mut self, frame: usize, view: glam::Mat4) -> Result<()> {
+        #[allow(clippy::cast_precision_loss)]
+        let aspect = self.settings.extent.width as f32 / self.settings.extent.height as f32;
+        let proj = glam::camera::lh::proj::vulkan::perspective(
+            self.settings.fov_y_radians,
+            aspect,
+            self.settings.near,
+            self.settings.far,
+        );
+        // SAFETY: the renderer waited for this frame slot before preparing any view.
+        unsafe {
+            self.camera_ubo[frame].write(&SceneUbo { view, proj })?;
+        }
+        Ok(())
+    }
     pub fn player(&self) -> PlayerId {
         self.player
     }
@@ -70,9 +89,9 @@ impl Viewport {
         &self.settings
     }
 
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
-    pub fn output_view(&self) -> vk::ImageView {
-        self.output.view()
+    #[cfg(feature = "editor")]
+    pub fn output_rhi_view(&self) -> &crate::resources::ImageView {
+        self.output.rhi_view()
     }
     pub fn is_renderable(&self) -> bool {
         self.world.is_some() && self.camera.is_some()
@@ -81,7 +100,7 @@ impl Viewport {
         self.output_has_rendered
     }
 
-    pub fn resize(&mut self, device: &RenderDevice, extent: vk::Extent2D) -> Result<()> {
+    pub fn resize(&mut self, device: &Rhi, extent: Extent3d) -> Result<()> {
         self.reconfigure(
             device,
             ViewportSettings {
@@ -90,7 +109,7 @@ impl Viewport {
             },
         )
     }
-    pub fn reconfigure(&mut self, device: &RenderDevice, settings: ViewportSettings) -> Result<()> {
+    pub fn reconfigure(&mut self, device: &Rhi, settings: ViewportSettings) -> Result<()> {
         let settings = settings.clamped();
         if self.settings == settings {
             return Ok(());
@@ -103,67 +122,44 @@ impl Viewport {
         Ok(())
     }
 
-    pub fn import(&self) -> ImportedTexture {
+    pub fn import(&self) -> ImportedTexture<'_> {
         ImportedTexture {
-            image: self.output.image(),
-            view: self.output.view(),
-            aspect_flags: self.output.aspect_flags(),
-            initial_state: self.output_state.into(),
-            final_state: Self::shader_read_state().into(),
+            image: self.output.rhi_image(),
+            view: self.output.rhi_view(),
+            initial_state: self.output_state,
+            final_state: Self::shader_read_state(),
         }
     }
 
-    #[cfg(not(feature = "editor"))]
-    pub fn import_after_render(&self) -> ImportedTexture {
+    pub fn import_after_render(&self) -> ImportedTexture<'_> {
         let mut import = self.import();
-        import.initial_state = Self::shader_read_state().into();
+        import.initial_state = Self::shader_read_state();
         import
     }
 
-    pub fn next_render_value(&self) -> u64 {
-        self.last_render_value + 1
-    }
-
-    pub fn render_semaphore(&self) -> vk::Semaphore {
-        self.render_semaphore.raw()
-    }
-
-    pub fn mark_render_submitted(&mut self, value: u64) {
-        self.last_render_value = value;
+    pub fn mark_render_submitted(&mut self) {
         self.output_state = Self::shader_read_state();
         self.output_has_rendered = true;
     }
-
-    fn undefined_state() -> TextureState {
-        TextureState {
-            layout: vk::ImageLayout::UNDEFINED,
-            stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
-            access: vk::AccessFlags2::empty(),
-        }
+    pub fn invalidate(&mut self) {
+        self.output_has_rendered = false;
+    }
+    fn undefined_state() -> dirk_rhi::ImageState {
+        dirk_rhi::ImageState::Undefined
+    }
+    fn shader_read_state() -> dirk_rhi::ImageState {
+        dirk_rhi::ImageState::ShaderRead(dirk_rhi::ShaderStages::FRAGMENT)
     }
 
-    fn shader_read_state() -> TextureState {
-        TextureState {
-            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
-            access: vk::AccessFlags2::SHADER_READ,
-        }
-    }
-
-    fn create_output(device: &RenderDevice, settings: &ViewportSettings) -> Result<Image> {
+    fn create_output(device: &Rhi, settings: &ViewportSettings) -> Result<Image> {
         Image::create_image(
             device,
             &ImageCreateInfo {
-                size: settings.extent,
+                extent: settings.extent,
                 format: settings.format,
-                tiling: vk::ImageTiling::OPTIMAL,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-                location: MemoryLocation::GpuOnly,
+                usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED | ImageUsages::COPY_SRC,
                 mip_levels: 1,
-                num_samples: vk::SampleCountFlags::TYPE_1,
-                aspect_flags: vk::ImageAspectFlags::COLOR,
+                samples: SampleCount::One,
             },
         )
     }
@@ -171,8 +167,8 @@ impl Viewport {
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ViewportSettings {
-    pub extent: vk::Extent2D,
-    pub format: vk::Format,
+    pub extent: Extent3d,
+    pub format: TextureFormat,
     pub clear_color: [f32; 4],
     pub fov_y_radians: f32,
     pub near: f32,
@@ -180,7 +176,7 @@ pub(crate) struct ViewportSettings {
 }
 
 impl ViewportSettings {
-    pub(crate) fn new(extent: vk::Extent2D, format: vk::Format) -> Self {
+    pub(crate) fn new(extent: Extent3d, format: TextureFormat) -> Self {
         Self {
             extent,
             format,
@@ -193,10 +189,7 @@ impl ViewportSettings {
 
     fn clamped(self) -> Self {
         Self {
-            extent: vk::Extent2D {
-                width: self.extent.width.max(1),
-                height: self.extent.height.max(1),
-            },
+            extent: Extent3d::new_2d(self.extent.width.max(1), self.extent.height.max(1)),
             ..self
         }
     }
