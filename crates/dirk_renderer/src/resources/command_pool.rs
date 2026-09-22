@@ -15,9 +15,6 @@ use crate::{
 pub struct Graphics;
 #[derive(Debug)]
 pub struct Transfer;
-#[derive(Debug)]
-#[allow(unused)]
-pub struct Compute;
 
 /// Wrapper for [`vk::CommandPool`].
 pub struct CommandPool<Type: Pool> {
@@ -32,15 +29,6 @@ pub struct CommandPool<Type: Pool> {
 pub trait Pool {
     fn get_index(families: &QueueFamilyIndices) -> u32;
     fn get_queue_type() -> QueueType;
-}
-
-impl Pool for Compute {
-    fn get_index(families: &QueueFamilyIndices) -> u32 {
-        families.compute
-    }
-    fn get_queue_type() -> QueueType {
-        QueueType::Compute
-    }
 }
 
 impl Pool for Transfer {

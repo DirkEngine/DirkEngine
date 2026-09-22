@@ -1,0 +1,36 @@
+[package]
+name = "dirk_rhi"
+description = "Backend-neutral render hardware interface for DirkEngine"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+raw-window-handle.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+ash.workspace = true
+ash-window.workspace = true
+gpu-allocator.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+core-graphics-types = { version = "0.2", default-features = false }
+metal = "0.33"
+raw-window-metal = "1.1"
+
+# This crate contains the audited boundary between safe wrappers and native operations.
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"
