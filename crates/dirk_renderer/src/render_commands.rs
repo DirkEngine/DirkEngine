@@ -34,9 +34,11 @@ impl RenderChanges {
         previous: impl Iterator<Item = (Entity, WorldId)>,
     ) -> Vec<RenderDelta> {
         let mut dirty = std::mem::take(&mut *self.0.lock());
-        for (entity, world) in previous.chain(universe.entities()) {
-            if dirty.worlds.contains(&world) {
-                dirty.entities.insert(entity);
+        if !dirty.worlds.is_empty() {
+            for (entity, world) in previous.chain(universe.entities()) {
+                if dirty.worlds.contains(&world) {
+                    dirty.entities.insert(entity);
+                }
             }
         }
         dirty

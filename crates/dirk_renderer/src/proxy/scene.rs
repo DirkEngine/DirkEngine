@@ -47,7 +47,10 @@ impl SceneManager {
     }
     pub fn apply(&mut self, deltas: Vec<RenderDelta>) {
         for delta in deltas {
-            let Some(data) = delta.state else {
+            let Some(data) = delta
+                .state
+                .filter(|data| data.model.is_some() || data.player.is_some())
+            else {
                 self.proxies.remove(&delta.entity);
                 continue;
             };
