@@ -3,14 +3,14 @@
 use std::any::TypeId;
 
 use crate::{
-    Entity, EntityBuilder, Universe, World, WorldId,
+    CommandBuffer, Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
     query::{
         Query,
         experimental::{QueryItem, Read},
-        filter::{Not, With},
+        filter::{With, Without},
     },
-    systems::experimental::{StandaloneSystem, filtered_system, system as default_system},
+    systems::experimental::{FuncSystem, StandaloneSystem},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -271,7 +271,7 @@ fn query_item_iter_applies_filters() {
         Entity::builder().with_component(Mana(15)),
     );
 
-    let matched: Vec<_> = QueryItem::<Read<Health>, Not<Mana>>::iter(&universe)
+    let matched: Vec<_> = QueryItem::<Read<Health>, Without<Mana>>::iter(&universe)
         .map(|query| (query.entity().raw(), query.params().0))
         .collect();
 
@@ -400,7 +400,7 @@ fn query_item_excludes_despawned_entities() {
 }
 
 #[test]
-fn with_and_not_filters_compose() {
+fn with_and_without_filters_compose() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
     let world = crate::WorldId::default();
@@ -422,6 +422,7 @@ fn with_and_not_filters_compose() {
         world,
         Entity::builder().with_component(Mana(15)),
     );
+    let neither = spawn_entity(&mut universe, world, Entity::builder());
 
     let mut with_health: Vec<_> = QueryItem::<(), With<Health>>::iter(&universe)
         .map(|query| query.entity().raw())
@@ -429,11 +430,20 @@ fn with_and_not_filters_compose() {
     with_health.sort_unstable();
     assert_eq!(with_health, vec![health_only.raw(), both.raw()]);
 
-    let mut not_health: Vec<_> = QueryItem::<(), (Not<Health>,)>::iter(&universe)
+    let mut without_health: Vec<_> = QueryItem::<(), (Without<Health>,)>::iter(&universe)
         .map(|query| query.entity().raw())
         .collect();
-    not_health.sort_unstable();
-    assert_eq!(not_health, vec![mana_only.raw(),]);
+    without_health.sort_unstable();
+    assert_eq!(without_health, vec![mana_only.raw(), neither.raw()]);
+
+    let combined: Vec<_> = QueryItem::<(), (With<Health>, Without<Mana>)>::iter(&universe)
+        .map(|query| query.entity())
+        .collect();
+    assert_eq!(combined, vec![health_only]);
+    assert_eq!(
+        QueryItem::<(), (With<Health>, Without<Health>)>::iter(&universe).count(),
+        0
+    );
 
     let mut everything: Vec<_> = QueryItem::<(), ()>::iter(&universe)
         .map(|query| query.entity().raw())
@@ -441,13 +451,18 @@ fn with_and_not_filters_compose() {
     everything.sort_unstable();
     assert_eq!(
         everything,
-        vec![health_only.raw(), both.raw(), mana_only.raw()]
+        vec![
+            health_only.raw(),
+            both.raw(),
+            mana_only.raw(),
+            neither.raw()
+        ]
     );
 }
 
 #[test]
 fn func_system_runs_for_matching_queries_only() {
-    use std::sync::{Arc, Mutex};
+    use std::{cell::RefCell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
@@ -466,27 +481,22 @@ fn func_system_runs_for_matching_queries_only() {
             .with_component(Mana(5)),
     );
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let system_seen = Arc::clone(&seen);
-    let system = filtered_system(move |query: QueryItem<'_, Read<Health>, Not<Mana>>| {
-        system_seen
-            .lock()
-            .expect("seen mutex poisoned")
-            .push(query.params().0);
-    });
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let system_seen = Rc::clone(&seen);
+    let mut system = FuncSystem::new(
+        move |_: &mut CommandBuffer, query: QueryItem<'_, Read<Health>, Without<Mana>>, _| {
+            system_seen.borrow_mut().push(query.params().0);
+        },
+    );
 
-    system.run(&universe);
+    system.run(&mut universe.handle().command_buffer(), &universe, 0.016);
 
-    let seen = seen.lock().expect("seen mutex poisoned");
-    assert_eq!(*seen, vec![10]);
+    assert_eq!(*seen.borrow(), vec![10]);
 }
 
 #[test]
-fn default_system_helper_runs_for_every_matching_entity() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+fn func_system_default_filter_runs_for_every_matching_entity() {
+    use std::{cell::Cell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
@@ -505,13 +515,15 @@ fn default_system_helper_runs_for_every_matching_entity() {
         Entity::builder().with_component(Mana(4)),
     );
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let system_calls = Arc::clone(&calls);
-    let sys = default_system(move |query: QueryItem<'_, Read<Health>>| {
-        system_calls.fetch_add(query.params().0 as usize, Ordering::SeqCst);
-    });
+    let total = Rc::new(Cell::new(0));
+    let system_total = Rc::clone(&total);
+    let mut system = FuncSystem::new(
+        move |_: &mut CommandBuffer, query: QueryItem<'_, Read<Health>>, _| {
+            system_total.set(system_total.get() + query.params().0);
+        },
+    );
 
-    sys.run(&universe);
+    system.run(&mut universe.handle().command_buffer(), &universe, 0.016);
 
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert_eq!(total.get(), 6);
 }

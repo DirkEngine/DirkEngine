@@ -1,17 +1,45 @@
 //! Experimental query API, planned to eventually replace [`super::Query`].
 //!
 //! This module is temporary; its API is subject to change.
+//!
+//! Queries read live entities across all worlds. A tuple of parameters fetches
+//! every requested component, skipping entities missing any of them. Filter
+//! tuples also use AND semantics; the default filter `()` matches every entity.
+//! Component references borrow the universe, so mutation remains deferred through
+//! command buffers.
+//!
+//! ```rust
+//! use dirk_universe::{
+//!     Universe, components::Component,
+//!     query::{experimental::{QueryItem, Read}, filter::Without},
+//! };
+//!
+//! #[derive(Component, Debug)]
+//! struct Position(f32);
+//! #[derive(Component, Debug)]
+//! struct Velocity(f32);
+//! #[derive(Component, Debug)]
+//! struct Frozen;
+//!
+//! fn inspect_moving_entities(universe: &Universe) {
+//!     for query in QueryItem::<(Read<Position>, Read<Velocity>), Without<Frozen>>::iter(universe) {
+//!         let entity = query.entity();
+//!         let (position, velocity) = query.into_params();
+//!         println!("{entity:?}: position {}, velocity {}", position.0, velocity.0);
+//!     }
+//! }
+//! ```
 
 use std::marker::PhantomData;
 
-use super::filter::{DefaultFilter, Filter};
+use super::filter::Filter;
 use crate::{Entity, Universe, components::Component};
 
 /// A matched entity and the data fetched for it by an experimental query.
-pub struct QueryItem<'u, P: QueryParameter, F: Filter = DefaultFilter> {
+pub struct QueryItem<'u, P: QueryParameter, F: Filter = ()> {
     entity: Entity,
     params: P::Item<'u>,
-    _filter: PhantomData<(&'u Universe, P, F)>,
+    _filter: PhantomData<fn() -> (P, F)>,
 }
 
 impl<'u, P: QueryParameter, F: Filter> QueryItem<'u, P, F> {
@@ -44,9 +72,9 @@ impl<'u, P: QueryParameter, F: Filter> QueryItem<'u, P, F> {
 
     /// Iterates over every live entity for which `F` matches and every
     /// parameter of `P` fetches successfully — e.g. `Read<C>` already skips
-    /// entities without `C`, even when `F` is [`DefaultFilter`].
+    /// entities without `C`, even when `F` is the default `()` filter.
     ///
-    /// The iteration order is unspecified.
+    /// Entities from every world are included. The iteration order is unspecified.
     pub fn iter(universe: &'u Universe) -> impl Iterator<Item = Self> + 'u {
         universe
             .entities
