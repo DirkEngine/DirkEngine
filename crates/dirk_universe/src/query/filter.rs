@@ -7,7 +7,7 @@ use crate::{Entity, Universe, components::Component};
 /// A predicate that decides whether an entity is included in a query.
 ///
 /// Filters are combined with tuples (AND semantics) and composed from
-/// [`With`], [`Not`] and [`DefaultFilter`].
+/// [`With`] and [`Without`]. The empty tuple `()` matches every entity.
 pub trait Filter {
     /// Returns `true` when `entity` satisfies this filter in `universe`.
     fn matches(entity: Entity, universe: &Universe) -> bool;
@@ -41,14 +41,6 @@ impl Filter for () {
     }
 }
 
-/// The default filter, which matches every entity.
-pub struct DefaultFilter;
-impl Filter for DefaultFilter {
-    fn matches(_: Entity, _: &Universe) -> bool {
-        true
-    }
-}
-
 /// Matches entities that have component `C`.
 pub struct With<C: Component>(PhantomData<C>);
 impl<C: Component> Filter for With<C> {
@@ -58,8 +50,8 @@ impl<C: Component> Filter for With<C> {
 }
 
 /// Matches entities that do **not** have component `C`.
-pub struct Not<C: Component>(PhantomData<C>);
-impl<C: Component> Filter for Not<C> {
+pub struct Without<C: Component>(PhantomData<C>);
+impl<C: Component> Filter for Without<C> {
     fn matches(entity: Entity, universe: &Universe) -> bool {
         !universe.components.contains(entity, TypeId::of::<C>())
     }
