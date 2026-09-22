@@ -27,3 +27,18 @@ mod test {
         MainPipelineSpec::validate().expect("main pipeline spec should match shader reflection");
     }
 }
+
+impl MainPipelineSpec {
+    pub fn settings(properties: crate::RendererProperties) -> super::graphics::PipelineSettings {
+        super::graphics::PipelineSettings {
+            color_format: properties.surface_format,
+            depth: Some(dirk_rhi::DepthState {
+                format: properties.depth_format,
+                write_enabled: true,
+                compare: dirk_rhi::CompareOp::Less,
+                stencil: None,
+            }),
+            samples: properties.msaa_samples,
+        }
+    }
+}

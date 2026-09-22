@@ -1,51 +1,131 @@
-//! This crate has the render commands system. It allows threads
-//! to submit functions that will be run on the renderer. This
-//! notable allows systems to interact with the renderer.
-//!
-//! These types are private as they are for internal renderer use
-//! only. They should not be used by other engine systems.
-use std::sync::mpsc::{self, Receiver, Sender};
+//! Dirty notifications collapse into final-state deltas after the universe tick.
+use dirk_universe::{Entity, Universe, WorldId};
+use dirk_world::components::{Renderable, Transform};
+use parking_lot::Mutex;
+use std::{collections::HashSet, sync::Arc};
 
-use crate::{Renderer, Result};
-
-type RenderCommand = Box<dyn FnOnce(&mut Renderer) -> Result<()> + Send + 'static>;
-
-pub struct RenderCommandSender {
-    tx: Sender<RenderCommand>,
+#[derive(Default)]
+struct Dirty {
+    entities: HashSet<Entity>,
+    worlds: HashSet<WorldId>,
 }
-
-impl RenderCommandSender {
-    pub fn enqueue_command<F>(&self, command: F)
-    where
-        F: FnOnce(&mut Renderer) -> Result<()> + Send + 'static,
-    {
-        // The only real failure here is a disconnected channel (receiver was
-        // dropped), which generally means the render thread has shut down.
-        // Silently dropping the command is the safest thing to do.
-        let _ = self.tx.send(Box::new(command));
+#[derive(Clone, Default)]
+pub struct RenderChanges(Arc<Mutex<Dirty>>);
+pub struct EntityData {
+    pub world: WorldId,
+    pub model: Option<dirk_assets::AssetHandle>,
+    pub transform: Option<Transform>,
+    pub player: Option<dirk_player::PlayerId>,
+}
+pub struct RenderDelta {
+    pub entity: Entity,
+    pub state: Option<EntityData>,
+}
+impl RenderChanges {
+    pub fn entity(&self, entity: Entity) {
+        self.0.lock().entities.insert(entity);
     }
-}
-
-// RenderCommandSender is cheap to clone — each clone shares the same channel.
-impl Clone for RenderCommandSender {
-    fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
+    pub fn world(&self, world: WorldId) {
+        self.0.lock().worlds.insert(world);
+    }
+    pub fn extract(
+        &self,
+        universe: &Universe,
+        previous: impl Iterator<Item = (Entity, WorldId)>,
+    ) -> Vec<RenderDelta> {
+        let mut dirty = std::mem::take(&mut *self.0.lock());
+        for (entity, world) in previous.chain(universe.entities()) {
+            if dirty.worlds.contains(&world) {
+                dirty.entities.insert(entity);
+            }
         }
+        dirty
+            .entities
+            .into_iter()
+            .map(|entity| RenderDelta {
+                entity,
+                state: universe.get_world(entity).map(|world| EntityData {
+                    world,
+                    model: universe
+                        .component::<Renderable>(entity)
+                        .map(|r| r.model.clone()),
+                    transform: universe.component::<Transform>(entity).cloned(),
+                    player: universe.component::<dirk_player::PlayerId>(entity).copied(),
+                }),
+            })
+            .collect()
     }
 }
 
-pub struct RenderCommandReceiver {
-    rx: Receiver<RenderCommand>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::systems::RendererSystem;
+    use dirk_universe::World;
 
-impl RenderCommandReceiver {
-    pub fn collect(&self) -> Vec<RenderCommand> {
-        self.rx.try_iter().collect()
+    #[test]
+    fn extraction_coalesces_component_changes_moves_and_despawn() {
+        let changes = RenderChanges::default();
+        let mut universe = Universe::builder()
+            .with_system(RendererSystem::new(changes.clone()))
+            .build();
+        let mut commands = universe.handle().command_buffer();
+        let first = commands.create_world(World::builder("first"));
+        let second = commands.create_world(World::builder("second"));
+        let entity = commands.spawn(
+            first,
+            Entity::builder().with_component(Transform::default()),
+        );
+        commands.set_component(
+            entity,
+            Transform {
+                location: glam::Vec3::X,
+                ..Transform::default()
+            },
+        );
+        commands.set_component(
+            entity,
+            Transform {
+                location: glam::Vec3::Y,
+                ..Transform::default()
+            },
+        );
+        commands.send(entity, second);
+        commands.submit();
+        universe.tick(0.0);
+        let deltas = changes.extract(&universe, std::iter::empty());
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].entity, entity);
+        let final_state = deltas[0].state.as_ref().expect("live entity");
+        assert_eq!(final_state.world, second);
+        assert_eq!(
+            final_state
+                .transform
+                .as_ref()
+                .expect("final transform")
+                .location,
+            glam::Vec3::Y
+        );
+        assert!(changes.extract(&universe, std::iter::empty()).is_empty());
+        let mut commands = universe.handle().command_buffer();
+        commands.remove_component::<Transform>(entity);
+        commands.submit();
+        universe.tick(0.0);
+        let deltas = changes.extract(&universe, [(entity, second)].into_iter());
+        assert!(
+            deltas[0]
+                .state
+                .as_ref()
+                .expect("still alive")
+                .transform
+                .is_none()
+        );
+        let mut commands = universe.handle().command_buffer();
+        commands.despawn(entity);
+        commands.submit();
+        universe.tick(0.0);
+        let deltas = changes.extract(&universe, [(entity, second)].into_iter());
+        assert_eq!(deltas.len(), 1);
+        assert!(deltas[0].state.is_none());
     }
-}
-
-pub fn channel() -> (RenderCommandSender, RenderCommandReceiver) {
-    let (tx, rx) = mpsc::channel();
-    (RenderCommandSender { tx }, RenderCommandReceiver { rx })
 }

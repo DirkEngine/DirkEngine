@@ -1,10 +1,13 @@
 #![allow(unsafe_code)]
 
 pub mod buffer;
-pub mod command_pool;
 pub mod descriptors;
-pub mod device;
 pub mod image;
-pub mod queues;
-pub mod swapchain;
-pub mod sync;
+pub mod upload;
+
+pub(crate) use dirk_rhi::{
+    Completion, Image as RhiImage, ImageView, RecordedCommands, Rhi, Sampler, SurfaceFrame,
+};
+
+#[cfg(feature = "editor")]
+pub(crate) use dirk_rhi::{CommandEncoder, RenderPass};
