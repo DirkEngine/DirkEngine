@@ -1,6 +1,11 @@
 //! Integration tests for the `universe` crate.
 
-use dirk_universe::{Entity, EntityBuilder, Universe, World, WorldId, components::Component};
+use dirk_universe::{
+    CommandBuffer, Entity, EntityBuilder, Universe, World, WorldId,
+    components::Component,
+    query::experimental::{QueryItem, Read},
+    systems::experimental::FuncSystem,
+};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
 struct Position(i32, i32);
@@ -129,4 +134,82 @@ fn public_command_buffers_allocate_unique_handles() {
             .map(|p| (p.0, p.1)),
         Some((16, 32))
     );
+}
+
+#[test]
+fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
+    use std::{cell::RefCell, rc::Rc};
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let system_seen = Rc::clone(&seen);
+    let mut calls = 0;
+    let system = FuncSystem::new(
+        move |cmd: &mut CommandBuffer, query: QueryItem<'_, Read<Position>>, delta_time| {
+            calls += 1;
+            let position = query.params();
+            system_seen
+                .borrow_mut()
+                .push((calls, query.entity(), position.0, delta_time));
+            cmd.set_component(query.entity(), Position(position.0 + calls, position.1));
+        },
+    );
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .with_system(system)
+        .build();
+    universe.tick(0.0);
+    assert!(seen.borrow().is_empty());
+
+    let mut cmd = universe.handle().command_buffer();
+    let entity = cmd.spawn(
+        WorldId::default(),
+        Entity::builder().with_component(Position(2, 3)),
+    );
+    cmd.submit();
+
+    universe.tick(0.25);
+    assert_eq!(universe.component::<Position>(entity).map(|p| p.0), Some(2));
+    universe.tick(0.5);
+    assert_eq!(universe.component::<Position>(entity).map(|p| p.0), Some(3));
+    assert_eq!(
+        *seen.borrow(),
+        vec![(1, entity, 2, 0.25), (2, entity, 3, 0.5)]
+    );
+
+    let mut cmd = universe.handle().command_buffer();
+    cmd.despawn(entity);
+    cmd.submit();
+    universe.tick(1.0);
+    assert!(!universe.is_alive(entity));
+    assert_eq!(seen.borrow().len(), 2);
+}
+
+#[test]
+fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
+    use std::{cell::RefCell, rc::Rc};
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let make_system = |index| {
+        let seen = Rc::clone(&seen);
+        FuncSystem::new(
+            move |cmd: &mut CommandBuffer, query: QueryItem<'_, Read<Position>>, _| {
+                seen.borrow_mut().push((index, query.params().0));
+                cmd.set_component(query.entity(), Position(index, 0));
+            },
+        )
+    };
+    let other = Universe::builder().with_system(make_system(2));
+    let mut universe = Universe::builder()
+        .with_world(
+            World::builder("w").with_entity(Entity::builder().with_component(Position(0, 0))),
+        )
+        .with_system(make_system(1))
+        .with_other(other)
+        .build();
+
+    universe.tick(0.0);
+    assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0)]);
+
+    universe.tick(0.0);
+    assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0), (1, 2), (2, 2)]);
 }

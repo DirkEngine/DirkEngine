@@ -2,6 +2,7 @@
 
 use std::{
     any::TypeId,
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Debug,
     sync::mpsc::{self, Receiver, Sender},
@@ -16,7 +17,7 @@ pub mod query;
 pub mod systems;
 use systems::{
     ComponentSystem, ComponentSystemStorage, EntitySystem, EntitySystemStorage, TickingSystem,
-    TickingSystemStorage, UniverseSystem, UniverseSystemStorage,
+    TickingSystemStorage, UniverseSystem, UniverseSystemStorage, experimental::StandaloneSystem,
 };
 
 mod command_buffer;
@@ -76,6 +77,10 @@ pub struct Universe {
     entity_systems: EntitySystemStorage,
     component_systems: ComponentSystemStorage,
 
+    // Systems mutate their own state while borrowing the universe's component
+    // data. Only tick borrows this private list, so callbacks cannot reborrow it.
+    systems: RefCell<Vec<Box<dyn StandaloneSystem>>>,
+
     components: Components,
 }
 
@@ -97,6 +102,7 @@ impl Universe {
             ticking_systems: builder.ticking_systems,
             entity_systems: builder.entity_systems,
             component_systems: builder.component_systems,
+            systems: RefCell::new(builder.systems),
             components: Components::default(),
         };
 
@@ -114,13 +120,17 @@ impl Universe {
         self.handle.clone()
     }
 
-    /// Ticks every the entire [`Universe`].
+    /// Applies queued commands, then runs systems against the resulting universe.
+    ///
+    /// Experimental systems run after the legacy universe and ticking systems,
+    /// in registration order. Commands produced by any system become visible
+    /// on the next tick. `delta_time` is measured in seconds.
     ///
     /// # Panics
     ///
     /// Will panic in certain internal conditions like if a [`World`] that
     /// was just created is not found in the [`Universe`].
-    /// No panic should be caused by user error.
+    /// Panics from system callbacks propagate to the caller.
     pub fn tick(&mut self, delta_time: f64) {
         let mut cmd = self.handle.command_buffer();
 
@@ -138,6 +148,10 @@ impl Universe {
         self.ticking_systems.iter().for_each(|system| {
             system.tick(&mut cmd, self, delta_time, &mut system.query().query(self));
         });
+
+        for system in self.systems.borrow_mut().iter_mut() {
+            system.run(&mut cmd, self, delta_time);
+        }
 
         cmd.submit();
     }
@@ -454,6 +468,7 @@ pub struct UniverseBuilder {
     ticking_systems: TickingSystemStorage,
     entity_systems: EntitySystemStorage,
     component_systems: ComponentSystemStorage,
+    systems: Vec<Box<dyn StandaloneSystem>>,
 }
 
 impl UniverseBuilder {
@@ -471,6 +486,7 @@ impl UniverseBuilder {
             ticking_systems: TickingSystemStorage::default(),
             entity_systems: EntitySystemStorage::default(),
             component_systems: ComponentSystemStorage::default(),
+            systems: Vec::new(),
         }
     }
 
@@ -514,6 +530,17 @@ impl UniverseBuilder {
         self
     }
 
+    /// Adds an experimental system to run on each tick, in registration order.
+    ///
+    /// Use [`systems::experimental::FuncSystem::new`] to wrap a function or
+    /// stateful closure. Systems run after legacy ticking systems and share
+    /// their command buffer; writes are applied on the following tick.
+    #[must_use]
+    pub fn with_system(mut self, system: impl StandaloneSystem) -> Self {
+        self.systems.push(Box::new(system));
+        self
+    }
+
     /// Adds a [`ComponentSystem`] that will be added to the [`Universe`].
     #[must_use]
     pub fn with_component_system(mut self, system: impl ComponentSystem) -> Self {
@@ -545,6 +572,8 @@ impl UniverseBuilder {
                 self.component_systems.push_any(type_id, system);
             }
         }
+
+        self.systems.extend(other.systems);
 
         self
     }
