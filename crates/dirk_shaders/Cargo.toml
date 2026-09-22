@@ -9,5 +9,9 @@ version.workspace = true
 [dependencies]
 glam.workspace = true
 
+[target.'cfg(not(target_arch = "spirv"))'.dependencies]
+bytemuck.workspace = true
+glam = { workspace = true, features = ["bytemuck"] }
+
 [lints]
 workspace = true

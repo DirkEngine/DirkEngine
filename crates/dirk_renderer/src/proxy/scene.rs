@@ -1,373 +1,295 @@
-use std::collections::{HashMap, HashSet};
-
-use ash::vk;
-use dirk_shaders::types::{ProxyUbo, SceneUbo};
-use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
-
+//! CPU scene proxies and frame-slot GPU preparation.
 use crate::{
-    Error, MAX_FRAMES_IN_FLIGHT, Result,
+    MAX_FRAMES_IN_FLIGHT, RendererProperties, Result,
     frame_graph::{AttachmentInfo, RenderGraph, TextureDesc, TextureHandle},
     models::ModelRegistry,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipeline},
+    render_commands::RenderDelta,
     resources::{
         buffer::UniformBuffer,
-        command_pool::CommandBuffer,
-        descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
-            sets::{ObjectSet, SceneSet},
-        },
-        device::RenderDevice,
+        descriptors::{BindingLayout, DescriptorSet, sets::ObjectSet},
     },
+    viewport::Viewport,
 };
+use dirk_player::PlayerId;
+use dirk_rhi::{Extent3d, Rect, Rhi, SampleCount, TextureFormat};
+use dirk_shaders::types::ProxyUbo;
+use dirk_universe::{Entity, WorldId};
+use std::collections::{HashMap, HashSet};
 
 pub(crate) struct SceneRenderSettings {
-    pub extent: vk::Extent2D,
-    pub format: vk::Format,
+    pub extent: Extent3d,
+    pub format: TextureFormat,
     pub clear_color: [f32; 4],
-    pub fov_y_radians: f32,
-    pub near: f32,
-    pub far: f32,
 }
-
-/// This is the renderer proxy for the [`Universe`]. It also has
-/// most of the rendering state needed to render each scene.
 pub struct SceneManager {
-    device: RenderDevice,
-
-    scenes: HashMap<WorldId, Scene>,
-    entities: HashMap<Entity, WorldId>,
     proxies: HashMap<Entity, SceneProxy>,
-
-    // TODO: see about centralising the different pipelines
     graphics_pipeline: GraphicsPipeline<MainPipelineSpec>,
-
-    scene_alloc: DescriptorAllocator<SceneSet>,
-    proxy_alloc: DescriptorAllocator<ObjectSet>,
+    proxy_alloc: BindingLayout<ObjectSet>,
+    properties: RendererProperties,
+    ambiguous: HashMap<PlayerId, HashSet<Entity>>,
 }
-
 impl SceneManager {
-    pub fn init(device: &RenderDevice) -> Result<Self> {
-        let scene_alloc = DescriptorAllocator::<SceneSet>::new(device, 16)?;
-        let proxy_alloc = DescriptorAllocator::<ObjectSet>::new(device, 256)?;
-        let graphics_pipeline = GraphicsPipeline::build(device)?;
-
+    pub fn init(rhi: &Rhi, properties: RendererProperties) -> Result<Self> {
         Ok(Self {
-            device: device.clone(),
-            entities: HashMap::new(),
-            scenes: HashMap::new(),
             proxies: HashMap::new(),
-            graphics_pipeline,
-            scene_alloc,
-            proxy_alloc,
+            graphics_pipeline: GraphicsPipeline::build(
+                rhi,
+                MainPipelineSpec::settings(properties),
+            )?,
+            proxy_alloc: BindingLayout::new(rhi)?,
+            properties,
+            ambiguous: HashMap::new(),
         })
+    }
+    pub fn entities(&self) -> impl Iterator<Item = (Entity, WorldId)> + '_ {
+        self.proxies.iter().map(|(e, p)| (*e, p.world))
+    }
+    pub fn apply(&mut self, deltas: Vec<RenderDelta>) {
+        for delta in deltas {
+            let Some(data) = delta.state else {
+                self.proxies.remove(&delta.entity);
+                continue;
+            };
+            let matrix = data
+                .transform
+                .as_ref()
+                .map(dirk_world::components::Transform::matrix)
+                .filter(glam::Mat4::is_finite);
+            let view = data
+                .transform
+                .as_ref()
+                .filter(|t| {
+                    t.location.is_finite() && t.rotation.is_finite() && t.rotation.is_normalized()
+                })
+                .map(dirk_world::components::Transform::view);
+            let proxy = self
+                .proxies
+                .entry(delta.entity)
+                .or_insert_with(|| SceneProxy {
+                    world: data.world,
+                    model: None,
+                    model_matrix: None,
+                    view: None,
+                    player: None,
+                    gpu: None,
+                });
+            if data.model.is_some()
+                && matrix.is_none()
+                && (proxy.model.is_none() || proxy.model_matrix.is_some())
+            {
+                tracing::warn!(entity = ?delta.entity, "renderable has no valid transform; skipping it");
+            }
+            if data.player.is_some()
+                && view.is_none()
+                && (proxy.player.is_none() || proxy.view.is_some())
+            {
+                tracing::warn!(entity = ?delta.entity, "camera has no valid transform; viewport unavailable");
+            }
+            proxy.world = data.world;
+            proxy.model = data.model;
+            proxy.model_matrix = matrix;
+            proxy.view = view;
+            proxy.player = data.player;
+        }
+    }
+    pub fn reconcile_views(&mut self, viewports: &mut HashMap<PlayerId, Viewport>) {
+        let mut cameras: HashMap<PlayerId, HashSet<Entity>> = HashMap::new();
+        for (entity, proxy) in &self.proxies {
+            if let Some(player) = proxy.player {
+                cameras.entry(player).or_default().insert(*entity);
+            }
+        }
+        let mut ambiguous = HashMap::new();
+        for (player, viewport) in viewports {
+            let candidates = cameras.get(player);
+            let camera = candidates
+                .filter(|c| c.len() == 1)
+                .and_then(|c| c.iter().next())
+                .copied();
+            if let Some(candidates) = candidates.filter(|c| c.len() > 1) {
+                if self.ambiguous.get(player) != Some(candidates) {
+                    tracing::warn!(
+                        ?player,
+                        ?candidates,
+                        "multiple cameras assigned to one player; viewport unavailable"
+                    );
+                }
+                ambiguous.insert(*player, candidates.clone());
+            }
+            let valid = camera.and_then(|e| {
+                self.proxies
+                    .get(&e)
+                    .filter(|p| p.view.is_some())
+                    .map(|p| (e, p.world))
+            });
+            let previous = (viewport.camera, viewport.world);
+            viewport.camera = valid.map(|(e, _)| e);
+            viewport.world = valid.map(|(_, w)| w);
+            if previous != (viewport.camera, viewport.world) || valid.is_none() {
+                viewport.invalidate();
+            }
+        }
+        self.ambiguous = ambiguous;
+    }
+    /// Called only after the renderer has waited for this frame slot.
+    pub fn prepare(
+        &mut self,
+        rhi: &Rhi,
+        frame: usize,
+        viewports: &mut HashMap<PlayerId, Viewport>,
+    ) -> Result<()> {
+        for proxy in self.proxies.values_mut() {
+            let Some(model) = proxy.model_matrix.filter(|_| proxy.model.is_some()) else {
+                continue;
+            };
+            if proxy.gpu.is_none() {
+                proxy.gpu = Some(ProxyGpu::new(rhi, &self.proxy_alloc)?);
+            }
+            // SAFETY: this frame slot's previous submission has completed.
+            if let Some(gpu) = &mut proxy.gpu {
+                unsafe {
+                    gpu.ubo[frame].write(&ProxyUbo { model })?;
+                }
+            }
+        }
+        for viewport in viewports.values_mut() {
+            if let Some(view) = viewport
+                .camera
+                .and_then(|e| self.proxies.get(&e))
+                .and_then(|p| p.view)
+            {
+                viewport.prepare_camera(frame, view)?;
+            }
+        }
+        Ok(())
     }
     pub fn render<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
         models: &'a ModelRegistry,
-        world: WorldId,
-        camera: Entity,
-        settings: SceneRenderSettings,
+        viewport: &'a Viewport,
         target: TextureHandle,
-    ) {
+        frame: usize,
+    ) -> Result<()> {
+        let Some(world) = viewport.world else {
+            return Ok(());
+        };
+        let scene_set = viewport.camera_set(frame);
+        let settings = SceneRenderSettings {
+            extent: viewport.settings().extent,
+            format: viewport.settings().format,
+            clear_color: viewport.settings().clear_color,
+        };
+        let uniform_state = dirk_rhi::ImageState::Uniform(dirk_rhi::ShaderStages::VERTEX);
+        let mut uniforms = vec![graph.import_buffer(crate::frame_graph::ImportedBuffer {
+            buffer: viewport.camera_buffer(frame),
+            initial_state: uniform_state,
+            final_state: uniform_state,
+        })?];
+        for proxy in self
+            .proxies
+            .values()
+            .filter(|p| p.world == world && p.model_matrix.is_some())
+        {
+            if let Some(gpu) = &proxy.gpu {
+                uniforms.push(graph.import_buffer(crate::frame_graph::ImportedBuffer {
+                    buffer: gpu.ubo[frame].buffer(),
+                    initial_state: uniform_state,
+                    final_state: uniform_state,
+                })?);
+            }
+        }
         let depth = graph.create_texture(TextureDesc {
             width: settings.extent.width,
             height: settings.extent.height,
-            format: self.device.properties.depth_format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            samples: self.device.properties.msaa_samples,
+            format: self.properties.depth_format,
+            samples: self.properties.msaa_samples,
             imported: None,
         });
-
-        let msaa_color = (self.device.properties.msaa_samples != vk::SampleCountFlags::TYPE_1)
-            .then(|| {
-                graph.create_texture(TextureDesc {
-                    width: settings.extent.width,
-                    height: settings.extent.height,
-                    format: settings.format,
-                    usage: vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    samples: self.device.properties.msaa_samples,
-                    imported: None,
-                })
-            });
-
+        let color = (self.properties.msaa_samples != SampleCount::One).then(|| {
+            graph.create_texture(TextureDesc {
+                width: settings.extent.width,
+                height: settings.extent.height,
+                format: settings.format,
+                samples: self.properties.msaa_samples,
+                imported: None,
+            })
+        });
         let mut pass = graph.add_pass("scene");
+        for uniform in uniforms {
+            pass.read_buffer(uniform, uniform_state);
+        }
         let [r, g, b, a] = settings.clear_color;
-        if let Some(msaa_color) = msaa_color {
+        if let Some(color) = color {
             pass.write_color_attachment_with_resolve(
-                msaa_color,
+                color,
                 target,
                 AttachmentInfo::clear_color(r, g, b, a),
             );
         } else {
             pass.write_color_attachment(target, AttachmentInfo::clear_color(r, g, b, a));
         }
-        pass.write_depth_attachment(depth, AttachmentInfo::clear_discard_depth(1., 0));
-        pass.execute(Box::new(move |_, cmd, _| {
-            self.record_scene_draws(models, cmd, world, &settings, camera)
-        }));
-    }
-    fn record_scene_draws(
-        &self,
-        models: &ModelRegistry,
-        cmd: &CommandBuffer,
-        world: WorldId,
-        settings: &SceneRenderSettings,
-        camera: Entity,
-    ) -> Result<()> {
-        let frame = self.device.current_frame();
-        let scene = self
-            .scenes
-            .get(&world)
-            .ok_or(Error::WorldDoesNotExist(world))?;
-
-        let proxies = scene
-            .entities
-            .iter()
-            .filter_map(|e| self.proxies.get(e))
-            .collect::<Vec<_>>();
-
-        // CAMERA
-        {
-            let proxy = &self
-                .proxies
-                .get(&camera)
-                .ok_or(Error::CameraDoesNotExist(camera))?;
-
-            let view = proxy.view.ok_or(Error::CameraDoesNotExist(camera))?;
-
-            // TODO: proper viewport & camera system
-            let proj = {
-                // `width` & `height` aren't large enough for this to matter
+        pass.write_depth_attachment(depth, AttachmentInfo::clear_discard_depth(1.0, 0));
+        // SAFETY: model vertices, indices and textures are immutable after the upload acquisition.
+        unsafe {
+            pass.external_reads(Box::new(move |cmd, _| {
+                // SAFETY: renderer owns the immutable pipeline and model resources through GPU use;
+                // uploads acquire their resources before this graph and uniforms belong to the waited slot.
+                let mut ctx = self.graphics_pipeline.bind(cmd)?;
                 #[allow(clippy::cast_precision_loss)]
-                let aspect = settings.extent.width as f32 / settings.extent.height.max(1) as f32;
-                glam::camera::rh::proj::vulkan::perspective(
-                    settings.fov_y_radians,
-                    aspect,
-                    settings.near,
-                    settings.far,
-                )
-            };
-
-            let scene_ubo = SceneUbo { view, proj };
-            unsafe { scene.ubo[frame].write(&scene_ubo) };
-        };
-
-        for proxy in &proxies {
-            proxy.write_ubo(frame);
+                ctx.command().set_viewport(dirk_rhi::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: settings.extent.width as f32,
+                    height: settings.extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                })?;
+                ctx.command().set_scissor(Rect {
+                    x: 0,
+                    y: 0,
+                    width: settings.extent.width,
+                    height: settings.extent.height,
+                })?;
+                for proxy in self
+                    .proxies
+                    .values()
+                    .filter(|p| p.world == world && p.model_matrix.is_some())
+                {
+                    if let (Some(model), Some(gpu)) = (&proxy.model, &proxy.gpu) {
+                        match models.render_model(model, scene_set, &gpu.sets[frame], &mut ctx) {
+                            Ok(())
+                            | Err(crate::Error::AssetError(dirk_assets::Error::NotFound(_))) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+                Ok(())
+            }));
         }
-
-        let ctx = self.graphics_pipeline.bind(cmd);
-
-        // the window size never gets anywhere near 2^23
-        #[allow(clippy::cast_precision_loss)]
-        let viewport = vk::Viewport::default()
-            .width(settings.extent.width as f32)
-            .height(settings.extent.height as f32)
-            .min_depth(0.)
-            .max_depth(1.);
-        cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D::default())
-            .extent(settings.extent);
-        cmd.set_scissor(0, &[scissor]);
-
-        for proxy in &proxies {
-            let Some(ref model) = proxy.model else {
-                continue;
-            };
-
-            match models.render_model(model, cmd, &scene.sets[frame], &proxy.sets[frame], &ctx) {
-                Ok(()) | Err(dirk_assets::Error::NotFound(_)) => (),
-                Err(err) => return Err(err.into()),
-            }
-        }
-
-        Ok(())
-    }
-    pub fn create_scene(&mut self, world: WorldId) -> Result<()> {
-        let scene = Scene::build(self)?;
-        self.scenes.insert(world, scene);
-        Ok(())
-    }
-    pub fn destroy_scene(&mut self, world: WorldId) {
-        self.scenes.remove(&world);
-    }
-    pub fn entity_world(&self, entity: Entity) -> Option<WorldId> {
-        self.entities.get(&entity).copied()
-    }
-    pub fn create_proxy(&mut self, entity: Entity, world: WorldId) -> Result<()> {
-        let proxy = SceneProxy::build(self)?;
-        self.proxies.insert(entity, proxy);
-
-        self.entities.insert(entity, world);
-        self.scenes
-            .get_mut(&world)
-            .ok_or(Error::WorldDoesNotExist(world))?
-            .entities
-            .insert(entity);
-        Ok(())
-    }
-    pub fn get_proxy_mut(&mut self, entity: Entity) -> Option<&mut SceneProxy> {
-        self.proxies.get_mut(&entity)
-    }
-    pub fn send_proxy(&mut self, entity: Entity, to: WorldId) -> Result<()> {
-        let world = self
-            .entities
-            .get(&entity)
-            .copied()
-            .ok_or(Error::EntityDoesNotExist(entity))?;
-
-        if !self.scenes.contains_key(&to) {
-            return Err(Error::WorldDoesNotExist(to));
-        }
-
-        let old = self
-            .scenes
-            .get_mut(&world)
-            .ok_or(Error::WorldDoesNotExist(world))?;
-
-        old.entities.remove(&entity);
-
-        let new = self
-            .scenes
-            .get_mut(&to)
-            .ok_or(Error::WorldDoesNotExist(to))?;
-        new.entities.insert(entity);
-
-        self.entities.insert(entity, to);
-        Ok(())
-    }
-    pub fn destroy_proxy(&mut self, entity: Entity) -> Result<()> {
-        let world = self
-            .entities
-            .get(&entity)
-            .ok_or(Error::EntityDoesNotExist(entity))?;
-
-        self.scenes
-            .get_mut(world)
-            .ok_or(Error::WorldDoesNotExist(*world))?
-            .entities
-            .remove(&entity);
-        self.proxies.remove(&entity);
-        self.entities.remove(&entity);
         Ok(())
     }
 }
-
-impl Drop for SceneManager {
-    fn drop(&mut self) {
-        // Clear collections before allocators are dropped. Scene and
-        // SceneProxy hold DescriptorSet values whose Drop impls enqueue descriptor
-        // set frees; the allocators enqueue descriptor pool destroys.
-        self.scenes.clear();
-        self.entities.clear();
-        self.proxies.clear();
-    }
-}
-
-/// Renderer representation of a [`World`].
-struct Scene {
-    entities: HashSet<Entity>,
-
-    ubo: [UniformBuffer; MAX_FRAMES_IN_FLIGHT],
-    sets: [DescriptorSet<SceneSet>; MAX_FRAMES_IN_FLIGHT],
-}
-
-impl Scene {
-    /// Builds a [Scene].
-    /// Constructs the renderer stuff like command pools, descriptor sets, ... from
-    /// the [Renderer].
-    pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .scene_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let ubo_size = size_of::<SceneUbo>() as u64;
-        let build_ubo =
-            || UniformBuffer::create(&manager.device, ubo_size, MemoryLocation::CpuToGpu);
-        let ubo = [build_ubo()?, build_ubo()?];
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), ubo_size);
-        }
-        writer.flush();
-
-        Ok(Self {
-            entities: HashSet::new(),
-            ubo,
-            sets,
-        })
-    }
-}
-
-pub struct SceneProxy {
-    /// The model matrix used for rendering. Constructed from the
-    /// [`world::components::Transform`] of the entity.
-    model_matrix: Option<glam::Mat4>,
-    /// The view matrix used for rendering as camera
-    view: Option<glam::Mat4>,
-    /// The name of the model. Used to request a [`crate::model::Model`] from the
-    /// renderer at render time.
+struct SceneProxy {
+    world: WorldId,
     model: Option<dirk_assets::AssetHandle>,
-
-    // Per frame render stuff
-    ubo: [UniformBuffer; MAX_FRAMES_IN_FLIGHT],
+    model_matrix: Option<glam::Mat4>,
+    view: Option<glam::Mat4>,
+    player: Option<PlayerId>,
+    gpu: Option<ProxyGpu>,
+}
+struct ProxyGpu {
+    ubo: [UniformBuffer<ProxyUbo>; MAX_FRAMES_IN_FLIGHT],
     sets: [DescriptorSet<ObjectSet>; MAX_FRAMES_IN_FLIGHT],
 }
-
-impl SceneProxy {
-    pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        let size = size_of::<ProxyUbo>() as u64;
-        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryLocation::CpuToGpu);
-        let ubo = [build_ubo()?, build_ubo()?];
-
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .proxy_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), size);
-        }
-        writer.flush();
-
-        Ok(Self {
-            model: None,
-            model_matrix: None,
-            view: None,
-            ubo,
-            sets,
-        })
-    }
-    pub fn set_model(&mut self, model: Option<dirk_assets::AssetHandle>) {
-        self.model = model;
-    }
-    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) {
-        self.model_matrix = mat;
-
-        if let Some(mat) = mat {
-            let proxy_ubo = ProxyUbo { model: mat };
-            for ubo in &self.ubo {
-                unsafe { ubo.write(&proxy_ubo) };
-            }
-        }
-    }
-    pub fn set_view(&mut self, view: Option<glam::Mat4>) {
-        self.view = view;
-    }
-    pub fn write_ubo(&self, frame: usize) {
-        let Some(model) = self.model_matrix else {
-            return;
-        };
-
-        let data = ProxyUbo { model };
-        unsafe { self.ubo[frame].write(&data) };
+impl ProxyGpu {
+    fn new(rhi: &Rhi, allocator: &BindingLayout<ObjectSet>) -> Result<Self> {
+        let ubo = [UniformBuffer::new(rhi)?, UniformBuffer::new(rhi)?];
+        let sets = [
+            allocator.uniform_buffer(rhi, 0, ubo[0].buffer(), size_of::<ProxyUbo>() as u64)?,
+            allocator.uniform_buffer(rhi, 0, ubo[1].buffer(), size_of::<ProxyUbo>() as u64)?,
+        ];
+        Ok(Self { ubo, sets })
     }
 }

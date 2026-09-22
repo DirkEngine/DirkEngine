@@ -1,56 +1,92 @@
-use std::time::Instant;
+use dirk_render_utils::upload::ImageUpload;
+use std::{collections::HashMap, mem::size_of, time::Instant};
 
-use ash::vk;
 use dirk_input::{ButtonState, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
-use egui::{ClippedPrimitive, Context, TextureId, TexturesDelta, ViewportId, ViewportInfo};
-use egui_ash_renderer::{DynamicRendering, Options};
+use dirk_rhi::{
+    AddressMode, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor, BlendOp,
+    BlendState, BufferUsages, CullMode, Extent3d, FilterMode, FrontFace, ImageState, ImageUsages,
+    IndexFormat, InvalidResourceKind as Ir, MemoryDomain, Origin3d, PrimitiveTopology, RasterState,
+    Rect, SampleCount, SamplerDesc, ShaderStages, Viewport,
+};
+use dirk_shaders::types::EguiUbo;
+use egui::{
+    ClippedPrimitive, Context, TextureFilter, TextureId, TextureOptions, TextureWrapMode,
+    TexturesDelta, ViewportId, ViewportInfo,
+    epaint::{ImageData, Primitive},
+};
+use tracing::warn;
 
 use crate::{
     MAX_FRAMES_IN_FLIGHT, Result,
-    resources::{command_pool::CommandBuffer, device::RenderDevice, queues::QueueType},
+    pipeline::graphics::{GraphicsPipeline, GraphicsPipelineSpec},
+    resources::{
+        CommandEncoder as CommandBuffer, ImageView, RenderPass, Rhi,
+        buffer::UniformBuffer,
+        descriptors::{BindingLayout, DescriptorSet, layouts::SetLayout},
+        image::{Image, ImageCreateInfo},
+    },
+    shaders::{EguiFS, EguiVS},
 };
 
 pub struct EguiState {
     ctx: Context,
-    renderer: egui_ash_renderer::Renderer,
+    output_is_srgb: bool,
+    pipeline: GraphicsPipeline<EguiPipelineSpec>,
+    texture_allocator: BindingLayout<EguiTextureSet>,
+    user_sampler: crate::resources::Sampler,
+    textures: HashMap<TextureId, EguiTexture>,
+    frames: [EguiFrameResources; MAX_FRAMES_IN_FLIGHT],
+    next_user_texture: u64,
     start_time: Instant,
     pending: Option<EguiPaintData>,
+    prepared: Option<PreparedFrame>,
     textures_to_free: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
 }
 
 pub struct EguiFrameInput {
     pub window_id: WindowId,
-    pub extent: vk::Extent2D,
+    pub extent: Extent3d,
     pub native_pixels_per_point: f32,
     pub focused: bool,
     pub theme: Option<Theme>,
     pub events: Vec<WindowInputEvent>,
 }
 
+/// Builds a typed invalid-resource error for egui bookkeeping violations.
+fn invalid_resource(kind: Ir) -> dirk_rhi::Error {
+    kind.into()
+}
+
 impl EguiState {
-    pub fn new(device: &RenderDevice) -> Result<Self> {
-        let surface_format = device.properties.surface_format.format;
-        let renderer = egui_ash_renderer::Renderer::with_default_allocator(
-            &device.instance,
-            device.physical_device,
-            device.device.clone(),
-            DynamicRendering {
-                color_attachment_format: surface_format,
-                depth_attachment_format: None,
-            },
-            Options {
-                in_flight_frames: MAX_FRAMES_IN_FLIGHT,
-                srgb_framebuffer: is_srgb_format(surface_format),
-                ..Options::default()
-            },
-        )?;
+    pub fn new(device: &Rhi, properties: crate::RendererProperties) -> Result<Self> {
+        let frame_allocator = BindingLayout::new(device)?;
+        let texture_allocator = BindingLayout::new(device)?;
+        let user_sampler = create_sampler(device, TextureOptions::LINEAR)?;
+        let frames = [
+            EguiFrameResources::new(device, &frame_allocator)?,
+            EguiFrameResources::new(device, &frame_allocator)?,
+        ];
 
         Ok(Self {
             ctx: Context::default(),
-            renderer,
+            output_is_srgb: is_srgb_format(properties.surface_format),
+            pipeline: GraphicsPipeline::build(
+                device,
+                crate::pipeline::graphics::PipelineSettings {
+                    color_format: properties.surface_format,
+                    depth: None,
+                    samples: SampleCount::One,
+                },
+            )?,
+            texture_allocator,
+            user_sampler,
+            textures: HashMap::new(),
+            frames,
+            next_user_texture: 0,
             start_time: Instant::now(),
             pending: None,
+            prepared: None,
             textures_to_free: std::array::from_fn(|_| Vec::new()),
         })
     }
@@ -103,52 +139,324 @@ impl EguiState {
     pub fn end_frame(&mut self) {
         let output = self.ctx.end_pass();
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+        let mut textures_delta = self
+            .pending
+            .take()
+            .map_or_else(TexturesDelta::default, |p| p.textures_delta);
+        textures_delta.append(output.textures_delta);
         self.pending = Some(EguiPaintData {
-            textures_delta: output.textures_delta,
+            textures_delta,
             primitives,
             pixels_per_point: output.pixels_per_point,
         });
     }
 
-    pub fn free_textures_for_frame(&mut self, frame: usize) -> Result<()> {
-        let textures = std::mem::take(&mut self.textures_to_free[frame]);
-        self.renderer.free_textures(&textures)?;
-        Ok(())
+    pub fn free_textures_for_frame(&mut self, frame: usize) {
+        for texture in std::mem::take(&mut self.textures_to_free[frame]) {
+            self.textures.remove(&texture);
+        }
     }
 
-    pub fn add_user_texture(&mut self, set: vk::DescriptorSet) -> TextureId {
-        self.renderer.add_user_texture(set)
+    pub fn add_user_texture(&mut self, device: &Rhi, view: &ImageView) -> Result<TextureId> {
+        let id = loop {
+            let id = TextureId::User(self.next_user_texture);
+            self.next_user_texture = self
+                .next_user_texture
+                .checked_add(1)
+                .ok_or(invalid_resource(Ir::OutOfRange))?;
+            if !self.textures.contains_key(&id) {
+                break id;
+            }
+        };
+        let binding = self
+            .texture_allocator
+            .sampled_image(device, 0, view, &self.user_sampler)?;
+        self.textures.insert(id, EguiTexture::User { binding });
+        Ok(id)
     }
 
     pub fn remove_user_texture(&mut self, id: TextureId) {
-        self.renderer.remove_user_texture(id);
+        self.textures.remove(&id);
     }
 
-    pub fn render(
+    #[allow(clippy::cast_precision_loss)]
+    pub unsafe fn prepare(
         &mut self,
-        device: &RenderDevice,
-        cmd: &CommandBuffer,
-        extent: vk::Extent2D,
+        device: &Rhi,
+        cmd: &mut CommandBuffer,
+        extent: Extent3d,
         frame: usize,
     ) -> Result<()> {
-        let Some(pending) = self.pending.take() else {
-            return Ok(());
+        unsafe {
+            let Some(pending) = self.pending.take() else {
+                return Ok(());
+            };
+
+            for (id, delta) in &pending.textures_delta.set {
+                self.set_texture(device, cmd, *id, delta)?;
+            }
+
+            let mesh = flatten_meshes(&pending.primitives)?;
+            self.frames[frame].prepare(device, &mesh)?;
+            let screen_size = glam::vec2(
+                extent.width as f32 / pending.pixels_per_point,
+                extent.height as f32 / pending.pixels_per_point,
+            );
+            self.frames[frame].uniform.write(&EguiUbo {
+                screen_size,
+                output_is_srgb: f32::from(self.output_is_srgb),
+                padding: 0.0,
+            })?;
+            self.textures_to_free[frame].extend(pending.textures_delta.free);
+            self.prepared = Some(PreparedFrame {
+                frame,
+                pixels_per_point: pending.pixels_per_point,
+            });
+            Ok(())
+        }
+    }
+
+    pub fn add_pass<'a>(
+        &'a self,
+        graph: &mut crate::frame_graph::RenderGraph<'a>,
+        target: crate::frame_graph::TextureHandle,
+        extent: Extent3d,
+        frame: usize,
+        viewport_textures: &[crate::frame_graph::TextureHandle],
+    ) -> Result<()> {
+        use crate::frame_graph::{AttachmentInfo, ImportedBuffer, ImportedTexture};
+        let mut images = viewport_textures.to_vec();
+        let sampled = ImageState::ShaderRead(ShaderStages::FRAGMENT);
+        for texture in self.textures.values() {
+            if let EguiTexture::Managed { image, .. } = texture {
+                images.push(graph.import_texture(ImportedTexture {
+                    image: image.rhi_image(),
+                    view: image.rhi_view(),
+                    initial_state: sampled,
+                    final_state: sampled,
+                })?);
+            }
+        }
+        let resources = &self.frames[frame];
+        let mut buffers = Vec::new();
+        for (buffer, access) in [
+            (
+                Some(resources.uniform.buffer()),
+                ImageState::Uniform(ShaderStages::VERTEX),
+            ),
+            (resources.vertices.as_ref(), ImageState::Vertex),
+            (resources.indices.as_ref(), ImageState::Index),
+        ] {
+            if let Some(buffer) = buffer {
+                buffers.push((
+                    graph.import_buffer(ImportedBuffer {
+                        buffer,
+                        initial_state: access,
+                        final_state: access,
+                    })?,
+                    access,
+                ));
+            }
+        }
+        let mut pass = graph.add_pass("egui");
+        pass.write_color_attachment(target, AttachmentInfo::load_store());
+        for image in images {
+            pass.read_sampled(image, ShaderStages::FRAGMENT);
+        }
+        for (buffer, access) in buffers {
+            pass.read_buffer(buffer, access);
+        }
+        // SAFETY: retired viewport registrations are read-only and their native owners remain in the current retirement cycle.
+        unsafe {
+            pass.external_reads(Box::new(move |cmd, _| {
+                self.render(cmd, extent, frame)?;
+                Ok(())
+            }));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub unsafe fn render(
+        &self,
+        cmd: &mut RenderPass<'_>,
+        extent: Extent3d,
+        frame: usize,
+    ) -> Result<()> {
+        unsafe {
+            let Some(prepared) = self.prepared.as_ref() else {
+                return Ok(());
+            };
+            if prepared.frame != frame {
+                return Err(invalid_resource(Ir::BadState).into());
+            }
+
+            let resources = &self.frames[frame];
+            let (Some(vertices), Some(indices)) = (&resources.vertices, &resources.indices) else {
+                return Ok(());
+            };
+            let mut rendering = self.pipeline.bind(cmd)?;
+            rendering.command().set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            })?;
+            rendering.command().bind_vertex_buffer(0, vertices, 0)?;
+            rendering
+                .command()
+                .bind_index_buffer(indices, 0, IndexFormat::Uint32)?;
+
+            for draw in &resources.draws {
+                let Some(scissor) = clip_scissor(draw.clip_rect, prepared.pixels_per_point, extent)
+                else {
+                    continue;
+                };
+                let texture = self
+                    .textures
+                    .get(&draw.texture)
+                    .ok_or(invalid_resource(Ir::BadState))?;
+                rendering.bind_descriptor_sets(&(&resources.set, texture.binding()))?;
+                rendering.command().set_scissor(scissor)?;
+                rendering.command().draw_indexed(
+                    draw.index_count,
+                    1,
+                    draw.first_index,
+                    draw.vertex_offset,
+                    0,
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    fn set_texture(
+        &mut self,
+        device: &Rhi,
+        cmd: &mut CommandBuffer,
+        id: TextureId,
+        delta: &egui::epaint::ImageDelta,
+    ) -> Result<()> {
+        let [width, height] = delta.image.size();
+        let extent = Extent3d::new_2d(
+            u32::try_from(width).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+            u32::try_from(height).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+        );
+        let origin = if let Some([x, y]) = delta.pos {
+            Origin3d {
+                x: u32::try_from(x).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+                y: u32::try_from(y).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+                z: 0,
+            }
+        } else {
+            let image = Image::create_image(
+                device,
+                &ImageCreateInfo {
+                    extent,
+                    format: dirk_rhi::TextureFormat::Rgba8Srgb,
+                    usage: ImageUsages::COPY_DST | ImageUsages::SAMPLED,
+                    mip_levels: 1,
+                    samples: SampleCount::One,
+                },
+            )?;
+            let sampler = create_sampler(device, delta.options)?;
+            let binding =
+                self.texture_allocator
+                    .sampled_image(device, 0, image.rhi_view(), &sampler)?;
+            self.textures.insert(
+                id,
+                EguiTexture::Managed {
+                    image: Box::new(image),
+                    binding,
+                    options: delta.options,
+                    sampler,
+                },
+            );
+            Origin3d::default()
         };
-
-        self.renderer.set_textures(
-            device.queues.raw(QueueType::Graphics),
-            device.graphics_pool.raw(),
-            pending.textures_delta.set.as_slice(),
-        )?;
-
-        self.renderer.cmd_draw(
-            **cmd,
-            extent,
-            pending.pixels_per_point,
-            pending.primitives.as_slice(),
-        )?;
-
-        self.textures_to_free[frame].extend(pending.textures_delta.free);
+        let texture = self
+            .textures
+            .get_mut(&id)
+            .ok_or(invalid_resource(Ir::BadState))?;
+        let EguiTexture::Managed {
+            image,
+            binding,
+            options,
+            sampler,
+        } = texture
+        else {
+            return Err(invalid_resource(Ir::BadState).into());
+        };
+        let pixels = match &delta.image {
+            ImageData::Color(image) => image
+                .pixels
+                .iter()
+                .flat_map(egui::Color32::to_array)
+                .collect::<Vec<_>>(),
+        };
+        let old_state = if delta.pos.is_some() {
+            ImageState::ShaderRead(ShaderStages::FRAGMENT)
+        } else {
+            ImageState::Undefined
+        };
+        // SAFETY: graphics queue ordering covers prior reads, and managed textures are renderer-owned.
+        unsafe {
+            Self::texture_barrier(
+                cmd,
+                image.rhi_image(),
+                old_state,
+                ImageState::CopyDestination,
+            )?;
+            ImageUpload {
+                image: image.rhi_image(),
+                mip: 0,
+                origin,
+                extent,
+                pixels: &pixels,
+            }
+            .record(device, cmd)?;
+            Self::texture_barrier(
+                cmd,
+                image.rhi_image(),
+                ImageState::CopyDestination,
+                ImageState::ShaderRead(ShaderStages::FRAGMENT),
+            )?;
+        }
+        if *options != delta.options {
+            let replacement = create_sampler(device, delta.options)?;
+            *binding =
+                self.texture_allocator
+                    .sampled_image(device, 0, image.rhi_view(), &replacement)?;
+            *sampler = replacement;
+            *options = delta.options;
+        }
+        Ok(())
+    }
+    unsafe fn texture_barrier(
+        cmd: &mut CommandBuffer,
+        image: &dirk_rhi::Image,
+        old_state: ImageState,
+        new_state: ImageState,
+    ) -> Result<()> {
+        unsafe {
+            cmd.barrier(&dirk_rhi::DependencyInfo {
+                memory_barriers: &[],
+                buffer_barriers: &[],
+                image_barriers: &[dirk_rhi::ImageBarrier {
+                    image,
+                    old_state,
+                    new_state,
+                    aspects: dirk_rhi::ImageAspects::COLOR,
+                    base_mip_level: 0,
+                    mip_level_count: 1,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                    queue_transfer: None,
+                }],
+            })?;
+        }
         Ok(())
     }
 }
@@ -159,10 +467,295 @@ struct EguiPaintData {
     pixels_per_point: f32,
 }
 
-fn is_srgb_format(format: vk::Format) -> bool {
+struct PreparedFrame {
+    frame: usize,
+    pixels_per_point: f32,
+}
+
+struct EguiFrameResources {
+    uniform: UniformBuffer<EguiUbo>,
+    set: DescriptorSet<EguiFrameSet>,
+    vertices: Option<dirk_rhi::Buffer>,
+    indices: Option<dirk_rhi::Buffer>,
+    vertex_capacity: usize,
+    index_capacity: usize,
+    draws: Vec<EguiDraw>,
+}
+
+impl EguiFrameResources {
+    fn new(device: &Rhi, allocator: &BindingLayout<EguiFrameSet>) -> Result<Self> {
+        let uniform_size =
+            u64::try_from(size_of::<EguiUbo>()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        let uniform = UniformBuffer::new(device)?;
+        let set = allocator.uniform_buffer(device, 0, uniform.buffer(), uniform_size)?;
+        Ok(Self {
+            uniform,
+            set,
+            vertices: None,
+            indices: None,
+            vertex_capacity: 0,
+            index_capacity: 0,
+            draws: Vec::new(),
+        })
+    }
+
+    unsafe fn prepare(&mut self, device: &Rhi, mesh: &FlattenedMesh) -> Result<()> {
+        unsafe {
+            ensure_buffer(
+                device,
+                &mut self.vertices,
+                &mut self.vertex_capacity,
+                std::mem::size_of_val(mesh.vertices.as_slice()),
+                BufferUsages::VERTEX,
+            )?;
+            ensure_buffer(
+                device,
+                &mut self.indices,
+                &mut self.index_capacity,
+                std::mem::size_of_val(mesh.indices.as_slice()),
+                BufferUsages::INDEX,
+            )?;
+            if let Some(vertices) = &mut self.vertices {
+                vertices.write(0, bytemuck::cast_slice(&mesh.vertices))?;
+            }
+            if let Some(indices) = &mut self.indices {
+                indices.write(0, bytemuck::cast_slice(&mesh.indices))?;
+            }
+            self.draws.clone_from(&mesh.draws);
+            Ok(())
+        }
+    }
+}
+
+enum EguiTexture {
+    Managed {
+        image: Box<Image>,
+        binding: DescriptorSet<EguiTextureSet>,
+        options: TextureOptions,
+        sampler: crate::resources::Sampler,
+    },
+    User {
+        binding: DescriptorSet<EguiTextureSet>,
+    },
+}
+
+impl EguiTexture {
+    fn binding(&self) -> &DescriptorSet<EguiTextureSet> {
+        match self {
+            Self::Managed { binding, .. } | Self::User { binding } => binding,
+        }
+    }
+}
+
+struct EguiFrameSet;
+
+impl SetLayout for EguiFrameSet {
+    const BINDINGS: &'static [BindGroupLayoutEntry] = &[BindGroupLayoutEntry {
+        binding: 0,
+        ty: BindingType::UniformBuffer {
+            dynamic_offset: false,
+        },
+        visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+    }];
+}
+
+struct EguiTextureSet;
+
+impl SetLayout for EguiTextureSet {
+    const BINDINGS: &'static [BindGroupLayoutEntry] = &[BindGroupLayoutEntry {
+        binding: 0,
+        ty: BindingType::SampledImage,
+        visibility: ShaderStages::FRAGMENT,
+    }];
+}
+
+struct EguiPipelineSpec;
+
+impl GraphicsPipelineSpec for EguiPipelineSpec {
+    type VertexShader = EguiVS;
+    type FragmentShader = EguiFS;
+    type Input = EguiVertex;
+    type DescriptorSets = (EguiFrameSet, EguiTextureSet);
+
+    const NAME: &'static str = "egui";
+
+    fn raster() -> RasterState {
+        RasterState {
+            topology: PrimitiveTopology::TriangleList,
+            front_face: FrontFace::Clockwise,
+            cull_mode: CullMode::None,
+        }
+    }
+
+    fn blend() -> Option<BlendState> {
+        Some(BlendState {
+            color: BlendComponent {
+                source: BlendFactor::One,
+                destination: BlendFactor::OneMinusSourceAlpha,
+                operation: BlendOp::Add,
+            },
+            alpha: BlendComponent {
+                source: BlendFactor::OneMinusDestinationAlpha,
+                destination: BlendFactor::One,
+                operation: BlendOp::Add,
+            },
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EguiVertex {
+    position: [f32; 2],
+    tex_coord: [f32; 2],
+    color: [f32; 4],
+}
+
+impl crate::shaders::metadata::VertexInput for EguiVertex {
+    #[allow(clippy::cast_possible_truncation)]
+    const ATTRIBUTES: &'static [dirk_rhi::VertexAttribute] = &[
+        dirk_rhi::VertexAttribute {
+            location: 0,
+            format: dirk_rhi::VertexFormat::Float32x2,
+            offset: std::mem::offset_of!(Self, position) as u32,
+        },
+        dirk_rhi::VertexAttribute {
+            location: 1,
+            format: dirk_rhi::VertexFormat::Float32x2,
+            offset: std::mem::offset_of!(Self, tex_coord) as u32,
+        },
+        dirk_rhi::VertexAttribute {
+            location: 2,
+            format: dirk_rhi::VertexFormat::Float32x4,
+            offset: std::mem::offset_of!(Self, color) as u32,
+        },
+    ];
+}
+
+struct FlattenedMesh {
+    vertices: Vec<EguiVertex>,
+    indices: Vec<u32>,
+    draws: Vec<EguiDraw>,
+}
+
+#[derive(Clone)]
+struct EguiDraw {
+    clip_rect: egui::Rect,
+    texture: TextureId,
+    first_index: u32,
+    index_count: u32,
+    vertex_offset: i32,
+}
+
+fn flatten_meshes(primitives: &[ClippedPrimitive]) -> Result<FlattenedMesh> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut draws = Vec::new();
+    for primitive in primitives {
+        let Primitive::Mesh(mesh) = &primitive.primitive else {
+            warn!("egui callback primitives are not supported");
+            continue;
+        };
+        let first_index =
+            u32::try_from(indices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        let index_count =
+            u32::try_from(mesh.indices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        let vertex_offset =
+            i32::try_from(vertices.len()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
+        vertices.extend(mesh.vertices.iter().map(|vertex| {
+            let color = vertex.color.to_array();
+            EguiVertex {
+                position: [vertex.pos.x, vertex.pos.y],
+                tex_coord: [vertex.uv.x, vertex.uv.y],
+                color: color.map(|channel| f32::from(channel) / 255.0),
+            }
+        }));
+        indices.extend_from_slice(&mesh.indices);
+        draws.push(EguiDraw {
+            clip_rect: primitive.clip_rect,
+            texture: mesh.texture_id,
+            first_index,
+            index_count,
+            vertex_offset,
+        });
+    }
+    Ok(FlattenedMesh {
+        vertices,
+        indices,
+        draws,
+    })
+}
+
+fn ensure_buffer(
+    device: &Rhi,
+    buffer: &mut Option<dirk_rhi::Buffer>,
+    capacity: &mut usize,
+    required: usize,
+    usage: BufferUsages,
+) -> Result<()> {
+    if required == 0 || required <= *capacity {
+        return Ok(());
+    }
+    let new_capacity = required.next_power_of_two();
+    *buffer = Some(device.create_buffer(&dirk_rhi::BufferDesc {
+        label: "egui frame buffer",
+        size: u64::try_from(new_capacity).map_err(|_| invalid_resource(Ir::OutOfRange))?,
+        usage,
+        memory: MemoryDomain::Upload,
+    })?);
+    *capacity = new_capacity;
+    Ok(())
+}
+
+fn create_sampler(device: &Rhi, options: TextureOptions) -> Result<crate::resources::Sampler> {
+    let filter = |filter| match filter {
+        TextureFilter::Nearest => FilterMode::Nearest,
+        TextureFilter::Linear => FilterMode::Linear,
+    };
+    let address = match options.wrap_mode {
+        TextureWrapMode::ClampToEdge => AddressMode::ClampToEdge,
+        TextureWrapMode::Repeat => AddressMode::Repeat,
+        TextureWrapMode::MirroredRepeat => AddressMode::MirrorRepeat,
+    };
+    Ok(device.create_sampler(&SamplerDesc {
+        label: "egui texture sampler",
+        mag_filter: filter(options.magnification),
+        min_filter: filter(options.minification),
+        mip_filter: filter(options.mipmap_mode.unwrap_or(options.minification)),
+        address_u: address,
+        address_v: address,
+        address_w: address,
+        max_anisotropy: 1,
+        lod_min: 0.0,
+        lod_max: 1.0,
+    })?)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn clip_scissor(clip: egui::Rect, pixels_per_point: f32, extent: Extent3d) -> Option<Rect> {
+    let width = extent.width as f32;
+    let height = extent.height as f32;
+    let min_x = (clip.min.x * pixels_per_point).floor().clamp(0.0, width);
+    let min_y = (clip.min.y * pixels_per_point).floor().clamp(0.0, height);
+    let max_x = (clip.max.x * pixels_per_point).ceil().clamp(min_x, width);
+    let max_y = (clip.max.y * pixels_per_point).ceil().clamp(min_y, height);
+    let scissor = Rect {
+        x: min_x as i32,
+        y: min_y as i32,
+        width: (max_x - min_x) as u32,
+        height: (max_y - min_y) as u32,
+    };
+    (scissor.width > 0 && scissor.height > 0).then_some(scissor)
+}
+
+fn is_srgb_format(format: dirk_rhi::TextureFormat) -> bool {
     matches!(
         format,
-        vk::Format::R8G8B8A8_SRGB | vk::Format::B8G8R8A8_SRGB | vk::Format::A8B8G8R8_SRGB_PACK32
+        dirk_rhi::TextureFormat::Rgba8Srgb | dirk_rhi::TextureFormat::Bgra8Srgb
     )
 }
 
@@ -270,9 +863,31 @@ mod tests {
 
     #[test]
     fn detects_common_srgb_formats() {
-        assert!(is_srgb_format(vk::Format::R8G8B8A8_SRGB));
-        assert!(is_srgb_format(vk::Format::B8G8R8A8_SRGB));
-        assert!(is_srgb_format(vk::Format::A8B8G8R8_SRGB_PACK32));
+        assert!(is_srgb_format(dirk_rhi::TextureFormat::Rgba8Srgb));
+        assert!(is_srgb_format(dirk_rhi::TextureFormat::Bgra8Srgb));
+        assert!(!is_srgb_format(dirk_rhi::TextureFormat::Rgba8Unorm));
+    }
+
+    #[test]
+    fn pipeline_matches_reflected_shaders() {
+        EguiPipelineSpec::validate().expect("egui pipeline metadata should match its shaders");
+    }
+
+    #[test]
+    fn clips_scissors_to_the_render_target() {
+        assert_eq!(
+            clip_scissor(
+                egui::Rect::from_min_max(egui::pos2(-5.0, 2.0), egui::pos2(80.0, 40.0)),
+                2.0,
+                Extent3d::new_2d(100, 50),
+            ),
+            Some(Rect {
+                x: 0,
+                y: 4,
+                width: 100,
+                height: 46,
+            })
+        );
     }
 
     #[test]

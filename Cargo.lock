@@ -696,8 +696,7 @@ name = "dirk_renderer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ash",
- "ash-window",
+ "bytemuck",
  "cargo-gpu-install",
  "dirk_assets",
  "dirk_build",
@@ -706,15 +705,15 @@ dependencies = [
  "dirk_input",
  "dirk_platform",
  "dirk_player",
+ "dirk_render_utils",
+ "dirk_rhi",
  "dirk_shaders",
  "dirk_universe",
  "dirk_utils",
  "dirk_world",
  "egui",
- "egui-ash-renderer",
  "glam",
  "gltf",
- "gpu-allocator",
  "parking_lot",
  "pastey",
  "proc-macro2",
@@ -722,6 +721,7 @@ dependencies = [
  "raw-window-handle",
  "rspirv-reflect",
  "slotmap",
+ "spirv-cross2",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -747,6 +747,7 @@ dependencies = [
 name = "dirk_shaders"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glam",
 ]
 
@@ -914,18 +915,6 @@ dependencies = [
  "profiling",
  "smallvec",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "egui-ash-renderer"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "598d16e7691705baf20e797a377890a16db80806b30648c0c002f6d6cbd0a28d"
-dependencies = [
- "ash",
- "egui",
- "log",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1136,6 +1125,7 @@ version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 dependencies = [
+ "bytemuck",
  "libm",
 ]
 
@@ -1623,6 +1613,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2104,7 +2105,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cf3a93856b6e5946537278df0d3075596371b1950ccff012f02b0f7eafec8d"
 dependencies = [
  "rustc-hash",
- "spirv",
+ "spirv 0.3.0+sdk-1.3.268.0",
 ]
 
 [[package]]
@@ -2133,7 +2134,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "spirv",
+ "spirv 0.3.0+sdk-1.3.268.0",
  "thiserror 2.0.18",
 ]
 
@@ -2419,6 +2420,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spirv"
+version = "0.4.0+sdk-1.4.341.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9571ea910ebd84c86af4b3ed27f9dbdc6ad06f17c5f96146b2b671e2976744f"
+dependencies = [
+ "bitflags 2.13.0",
+]
+
+[[package]]
 name = "spirv-builder"
 version = "0.10.0-alpha.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2433,6 +2443,44 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "spirv-cross-sys"
+version = "0.7.2+38681a3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9291b270f65ee1e61842d0a4dadc707d3b1669d8001e0900433e341c897d5d1b"
+dependencies = [
+ "bytemuck",
+ "cc",
+ "num-derive",
+ "num-traits",
+]
+
+[[package]]
+name = "spirv-cross2"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e01f93f6f1637a1a72b43d2ca50ebbcd94c3f4c4e94eda8e27144834671f008"
+dependencies = [
+ "bitflags 2.13.0",
+ "bytemuck",
+ "memchr",
+ "spirv 0.4.0+sdk-1.4.341.0",
+ "spirv-cross-sys",
+ "spirv-cross2-derive",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "spirv-cross2-derive"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18017a288e6ce64dd5d56510166baeabb01849483555c031f573c091b6934a64"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
