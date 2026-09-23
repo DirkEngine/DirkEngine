@@ -1,6 +1,5 @@
 use super::{
     Arc, AtomicUsize, Backend, GpuImage, GpuImageView, Mutex, Object, Ordering, Rhi, ViewMetadata,
-    lock,
 };
 use crate::{
     Extent3d, ImageDimension, ImageInfo, ImageUsages, InvalidResourceKind as Ir,
@@ -41,7 +40,7 @@ pub struct GpuSurfaceFrame<B: Backend> {
 impl<B: Backend> Rhi<B> {
     /// Creates a presentation chain, retaining its platform target through the native surface.
     pub fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<GpuSwapchain<B>> {
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         let raw = unsafe {
             self.device.backend.create_swapchain(&SwapchainDesc::<B> {
                 label: desc.label,
@@ -86,8 +85,8 @@ impl<B: Backend> GpuSwapchain<B> {
         if self.chain.invalid.load(Ordering::Acquire) {
             return Err(crate::Error::SwapchainOutOfDate);
         }
-        let _gate = lock(&self.device.gate)?;
-        let mut chain = lock(&self.chain.raw)?;
+        let _gate = self.device.gate.lock();
+        let mut chain = self.chain.raw.lock();
         let mut raw = unsafe { chain.acquire(timeout_ns)? };
         let format = raw.format();
         let extent = raw.extent();
@@ -162,11 +161,11 @@ impl<B: Backend> GpuSwapchain<B> {
                 .into());
         }
         self.device.wait_idle()?;
-        let _gate = lock(&self.device.gate)?;
-        let result = unsafe { lock(&self.chain.raw)?.resize(width, height) };
+        let _gate = self.device.gate.lock();
+        let result = unsafe { self.chain.raw.lock().resize(width, height) };
         self.chain.invalid.store(result.is_err(), Ordering::Release);
         result?;
-        let raw = lock(&self.chain.raw)?;
+        let raw = self.chain.raw.lock();
         self.format = raw.format();
         self.extent = raw.extent();
         self.image_count = raw.image_count();
@@ -219,13 +218,13 @@ impl<B: Backend> GpuSurfaceFrame<B> {
         self.chain.invalid.store(true, Ordering::Release);
     }
     fn release(&self, present: bool) -> Result<SurfaceStatus> {
-        let _gate = lock(&self.gate)?;
-        let mut native = lock(&self.native)?;
+        let _gate = self.gate.lock();
+        let mut native = self.native.lock();
         let frame = native.take().ok_or(Ir::BadState)?;
         let result = if present {
-            unsafe { lock(&self.chain.raw)?.present(frame) }
+            unsafe { self.chain.raw.lock().present(frame) }
         } else {
-            unsafe { lock(&self.chain.raw)?.discard(frame) }.map(|()| SurfaceStatus::Optimal)
+            unsafe { self.chain.raw.lock().discard(frame) }.map(|()| SurfaceStatus::Optimal)
         };
         self.phase.store(2, Ordering::Release);
         self.chain.acquired.fetch_sub(1, Ordering::Release);

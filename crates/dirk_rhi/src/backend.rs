@@ -179,7 +179,8 @@ pub struct Submission<'a, B: Api> {
     pub fence: Option<&'a B::Fence>,
 }
 
-/// Resource family used by borrowed portable descriptors.
+/// Resource family used by borrowed portable descriptors. Each backend supplies
+/// its own native types; public aliases select the active backend's safe types.
 pub trait Api: Sized + Send + Sync + 'static {
     /// Buffer resource.
     type Buffer: Debug + Send + Sync + 'static;
