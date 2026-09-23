@@ -1,6 +1,6 @@
 use super::{
     Arc, Backend, Completion, GpuBindGroup, GpuBuffer, GpuGraphicsPipeline, GpuImage, GpuImageView,
-    GpuPipelineLayout, GpuSurfaceFrame, Mutex, Object, Ordering, Payload, Rhi, Work, lock,
+    GpuPipelineLayout, GpuSurfaceFrame, Mutex, Object, Ordering, Payload, Rhi, Work,
 };
 use crate::{
     BufferUsages, ImageSubresourceRange, InvalidResourceKind as Ir, NativeCommandBuffer as _,
@@ -105,8 +105,8 @@ impl<B: Backend> Rhi<B> {
     }
     /// Begins a new exclusive recording. Native pools are owned by the recording through completion.
     pub fn create_encoder<Q: QueueKind>(&self, label: &str) -> Result<CommandEncoder<B, Q>> {
-        let _gate = lock(&self.device.gate)?;
-        let cached = lock(&self.device.pools)?.entry(Q::KIND).or_default().pop();
+        let _gate = self.device.gate.lock();
+        let cached = self.device.pools.lock().entry(Q::KIND).or_default().pop();
         let (mut raw, pool) = if let Some(pair) = cached {
             pair
         } else {
@@ -118,7 +118,7 @@ impl<B: Backend> Rhi<B> {
             raw.begin(label, true)?;
         }
         Ok(CommandEncoder {
-            cycle: lock(&self.device.state)?.cycle,
+            cycle: self.device.state.lock().cycle,
             device: self.device.clone(),
             raw,
             pool,
@@ -993,8 +993,8 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         info: &SubmitInfo<'_, B>,
     ) -> Result<Completion<B>> {
         let device = &self.device;
-        let _gate = lock(&device.gate)?;
-        let mut state = lock(&device.state)?;
+        let _gate = device.gate.lock();
+        let mut state = device.state.lock();
         if state.lost {
             return Err(crate::Error::DeviceLost);
         }
@@ -1010,14 +1010,14 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
             fence,
             payload: Mutex::new(Some(Payload { commands: native })),
         });
-        let payload = lock(&work.payload)?;
+        let payload = work.payload.lock();
         let batch = payload.as_ref().ok_or(Ir::BadState)?;
         let native_commands: Vec<_> = batch.commands.iter().map(|(command, _)| command).collect();
         let mut frames = info
             .surface_frames
             .iter()
-            .map(|f| lock(&f.native))
-            .collect::<Result<Vec<_>>>()?;
+            .map(|f| f.native.lock())
+            .collect::<Vec<_>>();
         let native_frames = frames
             .iter()
             .map(|f| f.as_ref().ok_or_else(|| crate::Error::from(Ir::BadState)))
