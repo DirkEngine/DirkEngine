@@ -219,7 +219,8 @@ mod tests {
     #[test]
     fn rewrite_replaces_all_positional_placeholders() {
         let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, idents) = rewrite_unnamed_placeholders("{0} and {1}", &fields).unwrap();
+        let (fmt, idents) =
+            rewrite_unnamed_placeholders("{0} and {1}", &fields).expect("valid tuple event format");
         assert_eq!(fmt, "{_0} and {_1}");
         assert_eq!(idents.len(), 2);
         assert_eq!(idents[0], quote::format_ident!("_0"));
@@ -229,7 +230,8 @@ mod tests {
     #[test]
     fn rewrite_leaves_non_positional_format_intact() {
         let fields = unnamed_fields_from("struct Foo(u32);");
-        let (fmt, idents) = rewrite_unnamed_placeholders("no placeholders", &fields).unwrap();
+        let (fmt, idents) = rewrite_unnamed_placeholders("no placeholders", &fields)
+            .expect("valid tuple event format");
         assert_eq!(fmt, "no placeholders");
         assert_eq!(idents.len(), 1);
     }
@@ -237,22 +239,24 @@ mod tests {
     #[test]
     fn rewrite_handles_partial_placeholder_use() {
         let fields = unnamed_fields_from("struct Foo(u32, String, bool);");
-        let (fmt, _) = rewrite_unnamed_placeholders("only {1} matters", &fields).unwrap();
+        let (fmt, _) = rewrite_unnamed_placeholders("only {1} matters", &fields)
+            .expect("valid tuple event format");
         assert_eq!(fmt, "only {_1} matters");
     }
 
     #[test]
     fn rewrite_handles_repeated_placeholder() {
         let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, _) = rewrite_unnamed_placeholders("{0} then {0} again", &fields).unwrap();
+        let (fmt, _) = rewrite_unnamed_placeholders("{0} then {0} again", &fields)
+            .expect("valid tuple event format");
         assert_eq!(fmt, "{_0} then {_0} again");
     }
 
     #[test]
     fn rewrite_preserves_escaped_braces_and_format_specs() {
         let fields = unnamed_fields_from("struct Foo(f32);");
-        let (fmt, _) =
-            rewrite_unnamed_placeholders("literal {{0}}, value {0:.2?}", &fields).unwrap();
+        let (fmt, _) = rewrite_unnamed_placeholders("literal {{0}}, value {0:.2?}", &fields)
+            .expect("valid tuple event format");
         assert_eq!(fmt, "literal {{0}}, value {_0:.2?}");
     }
 
