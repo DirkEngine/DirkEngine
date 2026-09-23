@@ -30,12 +30,13 @@ impl Renderer {
         instance: &ash::Instance,
         window: &dirk_platform::Window,
     ) -> Result<(surface::Instance, vk::SurfaceKHR)> {
+        let target = window.surface_target();
         let surface = unsafe {
             ash_window::create_surface(
                 entry,
                 instance,
-                window.display_handle()?.as_raw(),
-                window.window_handle()?.as_raw(),
+                target.display_handle()?.as_raw(),
+                target.window_handle()?.as_raw(),
                 None,
             )?
         };

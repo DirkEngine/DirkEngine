@@ -21,7 +21,7 @@ pub use winit::{
 pub use {
     errors::Error,
     event::*,
-    window::{MainWindow, PlatformWindows, Window, Windows},
+    window::{MainWindow, PlatformWindows, Window, WindowSurfaceTarget, Windows},
 };
 
 use errors::Result;
