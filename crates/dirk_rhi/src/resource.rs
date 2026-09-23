@@ -141,7 +141,7 @@ pub struct SamplerDesc<'a> {
 /// languages, add specialization, and derive bind-group layouts from
 /// reflection rather than hand-maintained descriptors. The refactor must also
 /// establish one authoritative shader/backend binding map and explicit
-/// coordinate conventions; see `docs/rhi/shaders.md` in the repository.
+/// coordinate conventions.
 /// Until then, backends accept only the representations they consume natively
 /// and reject others
 /// with [`crate::Error::Unsupported`] and the received
