@@ -1,80 +1,73 @@
 //! This crate contains `DirkEngine`'s async threading primitives.
 
-use std::{
-    future::Future,
-    num::NonZeroUsize,
-    sync::Arc,
-    thread::{self, JoinHandle},
-};
+use std::{future::Future, num::NonZeroUsize, sync::Arc, thread, time::Duration};
 
 use tokio::{
-    runtime::{Builder, Handle},
-    sync::{Mutex, oneshot},
+    runtime::{Builder, Handle, Runtime},
     task::JoinHandle as TaskJoinHandle,
 };
 use tracing::info;
 
+/// How long dropping the last [`WorkerPool`] handle off-runtime waits for
+/// running blocking tasks before detaching them.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A cheap clonable handle to a pool of background worker threads.
 ///
-/// The pool owns a dedicated Tokio runtime hosted on a non-game thread. Tasks
-/// spawned through this handle are therefore executed away from the primary
-/// engine thread.
+/// The pool owns a dedicated multi-threaded Tokio runtime. Tasks spawned
+/// through this handle run on the pool's worker threads, away from the
+/// primary engine thread.
+///
+/// # Shutdown
+///
+/// The runtime shuts down when the last handle is dropped. Pending async
+/// tasks are cancelled at their next `.await`. What happens to running
+/// [`spawn_blocking`] tasks depends on where the last handle is dropped:
+///
+/// - **Outside any Tokio runtime** (e.g. the engine main thread): the drop
+///   blocks for at most five seconds waiting for blocking tasks to finish,
+///   then detaches any that are still running.
+/// - **Inside a Tokio runtime** (a task of this pool, a task of another pool,
+///   or code under `block_on`): the drop never blocks. Blocking tasks are
+///   detached and run to completion in the background. Blocking there could
+///   wait on the dropping task itself or stall another runtime's worker.
+///
+/// [`spawn_blocking`]: WorkerPool::spawn_blocking
 #[derive(Clone)]
 pub struct WorkerPool {
     inner: Arc<Inner>,
 }
 
 struct Inner {
+    name: String,
     handle: Handle,
-    /// Stored as an [`Option`] as the sender is consumed when sending
-    /// shutdown message.
-    shutdown: Mutex<Option<oneshot::Sender<()>>>,
-    coordinator: Mutex<Option<JoinHandle<()>>>,
+    /// Taken on drop to choose the shutdown strategy.
+    runtime: Option<Runtime>,
 }
 
 impl WorkerPool {
-    /// Creates a pool with the specified thread name.
+    /// Creates a pool whose worker threads use the specified name.
+    ///
+    /// This may be called from inside another Tokio runtime.
     ///
     /// # Panics
     ///
     /// Panics if the runtime cannot be built.
     #[must_use]
     pub fn new(name: &str) -> Self {
-        let (handle_tx, handle_rx) = oneshot::channel::<Handle>();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let thread_name = name.to_owned();
-
-        let coordinator = thread::Builder::new()
-            .name(thread_name.clone())
-            .spawn(move || {
-                let runtime = Builder::new_multi_thread()
-                    .worker_threads(default_worker_count().get())
-                    .thread_name(thread_name.clone())
-                    .enable_all()
-                    .build()
-                    .expect("failed to build worker runtime");
-
-                runtime.block_on(async move {
-                    info!("starting worker pool: {thread_name}");
-                    let handle = Handle::current();
-                    handle_tx
-                        .send(handle)
-                        .expect("worker pool handle receiver should be open");
-                    let _ = shutdown_rx.await;
-                    info!("shutdown worker pool {thread_name}");
-                });
-            })
-            .expect("failed to spawn worker coordinator thread");
-
-        let handle = handle_rx
-            .blocking_recv()
-            .expect("worker pool runtime should initialize");
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(default_worker_count().get())
+            .thread_name(name)
+            .enable_all()
+            .build()
+            .expect("failed to build worker runtime");
+        info!("starting worker pool: {name}");
 
         Self {
             inner: Arc::new(Inner {
-                handle,
-                shutdown: Mutex::new(Some(shutdown_tx)),
-                coordinator: Mutex::new(Some(coordinator)),
+                name: name.to_owned(),
+                handle: runtime.handle().clone(),
+                runtime: Some(runtime),
             }),
         }
     }
@@ -106,12 +99,15 @@ impl WorkerPool {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.get_mut().take() {
-            let _ = shutdown.send(());
-        }
-
-        if let Some(coordinator) = self.coordinator.get_mut().take() {
-            let _ = coordinator.join();
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        if Handle::try_current().is_ok() {
+            runtime.shutdown_background();
+            info!("worker pool {} shutting down in background", self.name);
+        } else {
+            runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
+            info!("worker pool {} shut down", self.name);
         }
     }
 }
@@ -130,7 +126,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::WorkerPool;
@@ -173,5 +169,100 @@ mod tests {
         }
 
         assert_eq!(counter.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn constructor_works_inside_async_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(async {
+            let pool = WorkerPool::new("nested");
+            pool.spawn(async {}).await.expect("worker should run");
+        });
+    }
+
+    #[test]
+    fn last_handle_can_drop_inside_async_task() {
+        let pool = WorkerPool::new("async-drop");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task_pool = pool.clone();
+        pool.spawn(async move {
+            let _ = release_rx.await;
+            drop(task_pool);
+            done_tx.send(()).expect("test receiver should remain open");
+        });
+        drop(pool);
+        release_tx.send(()).expect("task should remain alive");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker-side drop should not deadlock");
+    }
+
+    #[test]
+    fn drop_outside_runtime_waits_for_blocking_tasks() {
+        let pool = WorkerPool::new("graceful-drop");
+        let finished = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let task_finished = Arc::clone(&finished);
+        pool.spawn_blocking(move || {
+            started_tx
+                .send(())
+                .expect("test receiver should remain open");
+            std::thread::sleep(Duration::from_millis(50));
+            task_finished.fetch_add(1, Ordering::SeqCst);
+        });
+        started_rx.recv().expect("blocking task should start");
+        drop(pool);
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn drop_inside_other_runtime_does_not_block_its_worker() {
+        let host = WorkerPool::new("host");
+        let busy = WorkerPool::new("busy");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        busy.spawn_blocking(move || {
+            started_tx
+                .send(())
+                .expect("test receiver should remain open");
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().expect("blocking task should start");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        host.spawn(async move {
+            let start = Instant::now();
+            drop(busy);
+            done_tx
+                .send(start.elapsed())
+                .expect("test receiver should remain open");
+        });
+        let elapsed = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("drop on another runtime should not wait for blocking tasks");
+        release_tx.send(()).expect("detached task should still run");
+        assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn last_handle_can_drop_inside_blocking_task() {
+        let pool = WorkerPool::new("blocking-drop");
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task_pool = pool.clone();
+        pool.spawn_blocking(move || {
+            release_rx.recv().expect("test sender should remain open");
+            drop(task_pool);
+            done_tx.send(()).expect("test receiver should remain open");
+        });
+        drop(pool);
+        release_tx.send(()).expect("task should remain alive");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker-side drop should not deadlock");
     }
 }
