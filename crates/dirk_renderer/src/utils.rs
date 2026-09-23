@@ -8,6 +8,7 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub texcoord: [f32; 2],
+    pub color: [f32; 4],
 }
 
 impl VertexInput for Vertex {
@@ -28,6 +29,11 @@ impl VertexInput for Vertex {
             location: 2,
             format: VertexFormat::Float32x2,
             offset: std::mem::offset_of!(Self, texcoord) as u32,
+        },
+        VertexAttribute {
+            location: 3,
+            format: VertexFormat::Float32x4,
+            offset: std::mem::offset_of!(Self, color) as u32,
         },
     ];
 }

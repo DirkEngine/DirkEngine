@@ -58,7 +58,10 @@ impl SceneManager {
                 .transform
                 .as_ref()
                 .map(dirk_world::components::Transform::matrix)
-                .filter(glam::Mat4::is_finite);
+                .filter(|m| {
+                    let determinant = m.determinant();
+                    m.is_finite() && determinant.is_finite() && determinant != 0.0
+                });
             let view = data
                 .transform
                 .as_ref()
@@ -152,7 +155,10 @@ impl SceneManager {
             // SAFETY: this frame slot's previous submission has completed.
             if let Some(gpu) = &mut proxy.gpu {
                 unsafe {
-                    gpu.ubo[frame].write(&ProxyUbo { model })?;
+                    gpu.ubo[frame].write(&ProxyUbo {
+                        model,
+                        normal: model.inverse().transpose(),
+                    })?;
                 }
             }
         }

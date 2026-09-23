@@ -18,6 +18,8 @@ pub struct SceneUbo {
 pub struct ProxyUbo {
     /// The model matrix of the proxy
     pub model: glam::Mat4,
+    /// Inverse-transpose model matrix for world-space normals.
+    pub normal: glam::Mat4,
 }
 
 /// Per-frame parameters used to place egui vertices in clip space.
@@ -35,6 +37,6 @@ pub struct EguiUbo {
 
 const _: () = {
     assert!(size_of::<SceneUbo>() == 128);
-    assert!(size_of::<ProxyUbo>() == 64);
+    assert!(size_of::<ProxyUbo>() == 128);
     assert!(size_of::<EguiUbo>() == 16);
 };
