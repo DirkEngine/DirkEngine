@@ -62,7 +62,7 @@ pub use dirk_proc::Event;
 /// # Cloning
 ///
 /// `EventManager` is **cheaply cloneable** — all clones share the same
-/// underlying state through an `Arc<Mutex<…>>`. Clone it freely and pass it
+/// underlying state through an `Arc<RwLock<…>>`. Clone it freely and pass it
 /// into every system that needs to produce or consume events.
 ///
 /// ```rust
@@ -74,8 +74,19 @@ pub use dirk_proc::Event;
 /// ```
 #[derive(Clone)]
 pub struct EventManager {
-    subscribers: Arc<RwLock<HashMap<TypeId, Vec<Subscriber>>>>, // TODO: see about better HashMap where we can lock just the value instead of entire thing
+    subscribers: Arc<RwLock<HashMap<TypeId, EventTypeState>>>,
     workers: WorkerPool,
+}
+
+#[derive(Default)]
+struct EventTypeState {
+    dispatchers: usize,
+    subscribers: Vec<Subscriber>,
+}
+
+struct RoutedEvent<T: Event> {
+    event: T,
+    subscribers: Vec<UnboundedSender<T>>,
 }
 
 impl EventManager {
@@ -94,10 +105,14 @@ impl EventManager {
     /// a matching background routing task. Multiple dispatchers for the same
     /// event type are fully supported.
     ///
-    /// [`dispatch_all`]: EventManager::dispatch_all
     #[must_use]
     pub fn register<T: Event>(&self) -> Dispatcher<T> {
-        let (sender, receiver) = mpsc::unbounded_channel::<T>();
+        let (sender, receiver) = mpsc::unbounded_channel::<RoutedEvent<T>>();
+        self.subscribers
+            .write()
+            .entry(TypeId::of::<T>())
+            .or_default()
+            .dispatchers += 1;
         self.spawn_router(receiver);
         Dispatcher {
             sender,
@@ -113,42 +128,47 @@ impl EventManager {
     ///
     /// A consumer can be created before or after a dispatcher is registered for
     /// the same type.
-    /// ```
     #[must_use]
     pub fn subscribe<T: Event>(&self) -> Consumer<T> {
         let (sender, receiver) = mpsc::unbounded_channel::<T>();
         let type_id = TypeId::of::<T>();
+        let id = Arc::new(());
         self.subscribers
             .write()
             .entry(type_id)
             .or_default()
+            .subscribers
             .push(Subscriber {
+                id: Arc::clone(&id),
                 sender: Box::new(sender),
             });
         Consumer {
             receiver,
             manager: self.clone(),
+            id,
         }
     }
 
-    fn spawn_router<T: Event>(&self, mut receiver: UnboundedReceiver<T>) {
-        let subscribers = Arc::clone(&self.subscribers);
+    fn spawn_router<T: Event>(&self, mut receiver: UnboundedReceiver<RoutedEvent<T>>) {
         self.workers.spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                let mut subscribers = subscribers.write();
-                let Some(listeners) = subscribers.get_mut(&TypeId::of::<T>()) else {
-                    continue;
-                };
-
-                listeners.retain(|sub| {
-                    let Some(sender) = sub.sender.downcast_ref::<UnboundedSender<T>>() else {
-                        // TODO: do we really want to keep what isn't being downcasted?
-                        return true;
-                    };
-                    sender.send(event.clone()).is_ok()
-                });
+            while let Some(routed) = receiver.recv().await {
+                for sender in routed.subscribers {
+                    let _ = sender.send(routed.event.clone());
+                }
             }
         });
+    }
+
+    fn unregister<T: Event>(&self) {
+        let mut types = self.subscribers.write();
+        let type_id = TypeId::of::<T>();
+        if let Some(state) = types.get_mut(&type_id) {
+            state.dispatchers -= 1;
+            if state.dispatchers == 0 {
+                // Pending routed events retain their own senders until delivered.
+                types.remove(&type_id);
+            }
+        }
     }
 }
 
@@ -156,6 +176,7 @@ impl EventManager {
 /// On event dispatching, will send the events through the
 /// channels of every subscriber.
 struct Subscriber {
+    id: Arc<()>,
     sender: Box<dyn Any + Send + Sync>,
 }
 
@@ -171,7 +192,7 @@ struct Subscriber {
 /// own internal routing channel, but both sets of events are delivered to all
 /// subscribers.
 pub struct Dispatcher<T: Event> {
-    sender: UnboundedSender<T>,
+    sender: UnboundedSender<RoutedEvent<T>>,
     manager: EventManager,
 }
 
@@ -183,7 +204,28 @@ impl<T: Event> Dispatcher<T> {
     /// routed on the caller thread.
     pub fn dispatch(&self, event: T) {
         trace!("dispatching event {}", event.debug());
-        let _ = self.sender.send(event);
+        let subscribers: Vec<_> = self
+            .manager
+            .subscribers
+            .read()
+            .get(&TypeId::of::<T>())
+            .map(|state| {
+                state
+                    .subscribers
+                    .iter()
+                    .filter_map(|sub| sub.sender.downcast_ref::<UnboundedSender<T>>().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !subscribers.is_empty() {
+            let _ = self.sender.send(RoutedEvent { event, subscribers });
+        }
+    }
+}
+
+impl<T: Event> Drop for Dispatcher<T> {
+    fn drop(&mut self) {
+        self.manager.unregister::<T>();
     }
 }
 
@@ -215,17 +257,16 @@ impl<T: Event> std::fmt::Debug for Dispatcher<T> {
 ///
 /// # Dropping
 ///
-/// When a `Consumer` is dropped its subscription is automatically removed the
-/// next time a worker attempts to route an event to it. No explicit
-/// unsubscribe call is needed.
+/// When a `Consumer` is dropped its subscription is removed immediately.
 pub struct Consumer<T: Event> {
     receiver: UnboundedReceiver<T>,
     manager: EventManager,
+    id: Arc<()>,
 }
 
 impl<T: Event> Consumer<T> {
     /// Returns the **next** pending event, or `None` if the queue is currently
-    /// empty.
+    /// empty or closed.
     ///
     /// This is non-blocking. Use [`consume_all`] if you want to drain every
     /// event that arrived so far.
@@ -233,17 +274,17 @@ impl<T: Event> Consumer<T> {
     /// [`consume_all`]: Consumer::consume_all
     pub fn try_consume(&mut self) -> Option<T> {
         let res = self.receiver.try_recv().ok();
-        if let Some(event) = res.clone() {
+        if let Some(event) = res.as_ref() {
             trace!("consuming {}", event.debug());
         }
         res
     }
 
-    /// Async consumption function. Returns a future that resolved to the next
-    /// event that is dispatched to this [`Consumer`].
+    /// Waits for the next event, or returns `None` once the final dispatcher
+    /// has been dropped and all queued events have been delivered.
     pub async fn consume(&mut self) -> Option<T> {
         let res = self.receiver.recv().await;
-        if let Some(event) = res.clone() {
+        if let Some(event) = res.as_ref() {
             trace!("consuming {}", event.debug());
         }
         res
@@ -253,7 +294,7 @@ impl<T: Event> Consumer<T> {
     /// dispatchers for this subscription are dropped.
     pub fn consume_blocking(&mut self) -> Option<T> {
         let res = self.receiver.blocking_recv();
-        if let Some(event) = res.clone() {
+        if let Some(event) = res.as_ref() {
             trace!("consuming {}", event.debug());
         }
         res
@@ -275,6 +316,21 @@ impl<T: Event> Clone for Consumer<T> {
     /// [`EventManager`]. See the [type-level docs](Consumer) for details.
     fn clone(&self) -> Self {
         self.manager.subscribe()
+    }
+}
+
+impl<T: Event> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        let mut types = self.manager.subscribers.write();
+        let type_id = TypeId::of::<T>();
+        if let Some(state) = types.get_mut(&type_id) {
+            state
+                .subscribers
+                .retain(|sub| !Arc::ptr_eq(&sub.id, &self.id));
+            if state.subscribers.is_empty() && state.dispatchers == 0 {
+                types.remove(&type_id);
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Unit tests for the `events` crate.
 //!
 //! Covers:
-//!   • `EventManager`: register, subscribe, `dispatch_all`, multi-type, multi-subscriber,
+//!   • `EventManager`: register, subscribe, multi-type, multi-subscriber,
 //!     dropped-consumer pruning, buffering, zero-subscriber robustness.
 //!   • `#[derive(Event)]` macro: every combination of struct / enum × unit / named / unnamed
 //!     fields, with and without `#[event("…")]` format strings, partial field references,
@@ -15,16 +15,29 @@ use crate::{Consumer, Dispatcher, Event, EventManager};
 // Helper: drain every pending event from a Consumer into a Vec.
 // =========================================================================
 
-fn collect<T: Event>(consumer: &mut Consumer<T>) -> Vec<T> {
-    // wait for the event to be dispatched
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    consumer.consume_all().collect()
+fn collect<T: Event>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut events = Vec::with_capacity(count);
+    while events.len() < count {
+        if let Some(event) = consumer.try_consume() {
+            events.push(event);
+        } else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for event"
+            );
+            std::thread::yield_now();
+        }
+    }
+    assert!(
+        consumer.try_consume().is_none(),
+        "received more than {count} events"
+    );
+    events
 }
 
 fn wait_for<T: Event>(consumer: &mut Consumer<T>) -> T {
-    consumer
-        .consume_blocking()
-        .expect("dispatcher should still be alive")
+    collect(consumer, 1).pop().expect("one event was collected")
 }
 
 // =========================================================================
@@ -369,6 +382,12 @@ mod macro_debug_output {
 
 mod event_manager {
     use dirk_threads::WorkerPool;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
 
     use super::*;
 
@@ -393,7 +412,7 @@ mod event_manager {
 
         dispatcher.dispatch(CounterEvent(1));
 
-        let events = collect(&mut consumer);
+        let events = collect(&mut consumer, 1);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 1);
     }
@@ -409,14 +428,14 @@ mod event_manager {
             dispatcher.dispatch(CounterEvent(i));
         }
 
-        let values: Vec<u32> = collect(&mut consumer).into_iter().map(|e| e.0).collect();
+        let values: Vec<u32> = collect(&mut consumer, 5).into_iter().map(|e| e.0).collect();
         assert_eq!(values, vec![0, 1, 2, 3, 4]);
     }
 
     // ── 3.2  Async routing ────────────────────────────────────────────────
 
     #[test]
-    fn events_are_delivered_without_dispatch_all() {
+    fn events_are_delivered_without_explicit_flush() {
         let workers = WorkerPool::new("test");
         let mgr = EventManager::new(workers);
         let dispatcher = mgr.register::<CounterEvent>();
@@ -427,22 +446,22 @@ mod event_manager {
     }
 
     #[test]
-    fn dispatch_all_can_be_called_multiple_times() {
+    fn successive_dispatches_reach_consumer() {
         let workers = WorkerPool::new("test");
         let mgr = EventManager::new(workers);
         let dispatcher = mgr.register::<CounterEvent>();
         let mut consumer = mgr.subscribe::<CounterEvent>();
 
-        // Each barrier waits for the event routed so far.
+        // Each receive waits for the event dispatched so far.
         dispatcher.dispatch(CounterEvent(1));
 
-        let first = collect(&mut consumer);
+        let first = collect(&mut consumer, 1);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].0, 1);
 
         dispatcher.dispatch(CounterEvent(2));
 
-        let second = collect(&mut consumer);
+        let second = collect(&mut consumer, 1);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].0, 2);
     }
@@ -454,7 +473,7 @@ mod event_manager {
         let _dispatcher = mgr.register::<CounterEvent>();
         let mut consumer = mgr.subscribe::<CounterEvent>();
 
-        assert!(collect(&mut consumer).is_empty());
+        assert!(collect(&mut consumer, 0).is_empty());
     }
 
     // ── 3.3  Fan-out: multiple subscribers ────────────────────────────────
@@ -471,7 +490,7 @@ mod event_manager {
         dispatcher.dispatch(CounterEvent(99));
 
         for consumer in [&mut c1, &mut c2, &mut c3] {
-            let events = collect(consumer);
+            let events = collect(consumer, 1);
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].0, 99);
         }
@@ -490,7 +509,7 @@ mod event_manager {
         }
 
         for consumer in [&mut c1, &mut c2] {
-            let values: Vec<u32> = collect(consumer).into_iter().map(|e| e.0).collect();
+            let values: Vec<u32> = collect(consumer, 3).into_iter().map(|e| e.0).collect();
             assert_eq!(values, vec![0, 1, 2]);
         }
     }
@@ -510,11 +529,11 @@ mod event_manager {
         counter_dispatcher.dispatch(CounterEvent(7));
         label_dispatcher.dispatch(LabelEvent("hello".into()));
 
-        let counters = collect(&mut counter_consumer);
+        let counters = collect(&mut counter_consumer, 1);
         assert_eq!(counters.len(), 1);
         assert_eq!(counters[0].0, 7);
 
-        let labels = collect(&mut label_consumer);
+        let labels = collect(&mut label_consumer, 1);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].0, "hello");
     }
@@ -532,8 +551,8 @@ mod event_manager {
         // Only fire a CounterEvent.
         counter_dispatcher.dispatch(CounterEvent(1));
 
-        assert_eq!(collect(&mut counter_consumer).len(), 1);
-        assert!(collect(&mut label_consumer).is_empty()); // Must not receive anything.
+        assert_eq!(collect(&mut counter_consumer, 1).len(), 1);
+        assert!(collect(&mut label_consumer, 0).is_empty()); // Must not receive anything.
     }
 
     // ── 3.5  No subscribers registered ───────────────────────────────────
@@ -565,7 +584,7 @@ mod event_manager {
         // Subsequent dispatches must not panic.
         dispatcher.dispatch(CounterEvent(5));
 
-        let events = collect(&mut alive);
+        let events = collect(&mut alive, 1);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 5);
     }
@@ -596,7 +615,7 @@ mod event_manager {
         let _dispatcher = mgr.register::<CounterEvent>();
         // No events dispatched.
 
-        assert!(collect(&mut consumer).is_empty());
+        assert!(collect(&mut consumer, 0).is_empty());
     }
 
     // ── 3.8  High-volume stress ───────────────────────────────────────────
@@ -614,9 +633,7 @@ mod event_manager {
             dispatcher.dispatch(CounterEvent(i));
         }
 
-        // threre are a lot of events so we wait extra long
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let events = collect(&mut consumer);
+        let events = collect(&mut consumer, N as usize);
         assert_eq!(
             u32::try_from(events.len()).expect("event count should fit in u32"),
             N
@@ -648,7 +665,10 @@ mod event_manager {
         }
 
         // Drain everything accumulated.
-        let all: Vec<u32> = collect(&mut consumer).into_iter().map(|e| e.0).collect();
+        let all: Vec<u32> = collect(&mut consumer, (ticks * per_tick) as usize)
+            .into_iter()
+            .map(|e| e.0)
+            .collect();
         let expected: Vec<u32> = (0..ticks * per_tick).collect();
         assert_eq!(all, expected);
     }
@@ -662,8 +682,6 @@ mod event_manager {
         let _dispatcher = mgr.register::<CounterEvent>();
         let mut consumer = mgr.subscribe::<CounterEvent>();
 
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
         assert!(consumer.try_consume().is_none());
     }
 
@@ -673,12 +691,13 @@ mod event_manager {
         let mgr = EventManager::new(workers);
         let dispatcher = mgr.register::<CounterEvent>();
         let mut consumer = mgr.subscribe::<CounterEvent>();
+        let mut barrier = consumer.clone();
 
         dispatcher.dispatch(CounterEvent(1));
         dispatcher.dispatch(CounterEvent(2));
 
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Both events use one producer queue; the second receipt is a routing barrier.
+        collect(&mut barrier, 2);
 
         assert_eq!(
             consumer
@@ -710,8 +729,118 @@ mod event_manager {
         d1.dispatch(CounterEvent(1));
         d2.dispatch(CounterEvent(2));
 
-        let mut values: Vec<u32> = collect(&mut consumer).into_iter().map(|e| e.0).collect();
+        let mut values: Vec<u32> = collect(&mut consumer, 2).into_iter().map(|e| e.0).collect();
         values.sort_unstable(); // Order across producers is not guaranteed.
         assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn final_dispatcher_closes_consumer_after_queued_events() {
+        let mgr = EventManager::new(WorkerPool::new("test"));
+        let first = mgr.register::<CounterEvent>();
+        let second = mgr.register::<CounterEvent>();
+        let mut consumer = mgr.subscribe::<CounterEvent>();
+        first.dispatch(CounterEvent(1));
+        second.dispatch(CounterEvent(2));
+        drop(first);
+        drop(second);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut events = Vec::new();
+            while let Some(event) = consumer.consume_blocking() {
+                events.push(event.0);
+            }
+            done_tx
+                .send(events)
+                .expect("test receiver should remain open");
+        });
+        let mut values = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("consumer should close after pending events");
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn async_consumer_observes_final_dispatcher_closure() {
+        let mgr = EventManager::new(WorkerPool::new("test"));
+        let dispatcher = mgr.register::<CounterEvent>();
+        let mut consumer = mgr.subscribe::<CounterEvent>();
+        dispatcher.dispatch(CounterEvent(9));
+        drop(dispatcher);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(async {
+            let event = tokio::time::timeout(Duration::from_secs(2), consumer.consume())
+                .await
+                .expect("queued event should arrive")
+                .expect("queued event should remain available");
+            assert_eq!(event.0, 9);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), consumer.consume())
+                    .await
+                    .expect("consumer should close")
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn new_subscriber_is_excluded_from_already_dispatched_event() {
+        let mgr = EventManager::new(WorkerPool::new("test"));
+        let mut dispatcher = mgr.register::<CounterEvent>();
+        let mut early = mgr.subscribe::<CounterEvent>();
+        // Intercept the producer queue so routing cannot race with subscription.
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        dispatcher.sender = sender;
+        dispatcher.dispatch(CounterEvent(7));
+        let mut late = mgr.subscribe::<CounterEvent>();
+
+        let routed = receiver.try_recv().expect("event should be queued");
+        assert_eq!(routed.subscribers.len(), 1);
+        for subscriber in routed.subscribers {
+            subscriber
+                .send(routed.event.clone())
+                .expect("early subscriber should remain open");
+        }
+        assert_eq!(
+            early
+                .try_consume()
+                .expect("early subscriber should receive")
+                .0,
+            7
+        );
+        assert!(late.try_consume().is_none());
+    }
+
+    #[test]
+    fn consuming_does_not_clone_event_for_tracing() {
+        #[derive(Debug)]
+        struct TrackedEvent(Arc<AtomicUsize>);
+
+        impl Clone for TrackedEvent {
+            fn clone(&self) -> Self {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Self(Arc::clone(&self.0))
+            }
+        }
+
+        impl Event for TrackedEvent {
+            fn debug(&self) -> String {
+                "tracked".into()
+            }
+        }
+
+        let mgr = EventManager::new(WorkerPool::new("test"));
+        let dispatcher = mgr.register::<TrackedEvent>();
+        let mut consumer = mgr.subscribe::<TrackedEvent>();
+        let clones = Arc::new(AtomicUsize::new(0));
+        dispatcher.dispatch(TrackedEvent(Arc::clone(&clones)));
+        consumer.consume_blocking().expect("event should arrive");
+        assert_eq!(clones.load(Ordering::Relaxed), 1);
     }
 }

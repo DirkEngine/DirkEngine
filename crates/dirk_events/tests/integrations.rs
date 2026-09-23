@@ -12,16 +12,31 @@ use std::thread;
 // Helper
 // =============================================================================
 
-fn collect_all<T: Event>(consumer: &mut Consumer<T>) -> Vec<T> {
-    // wait for the event to be dispatched
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    consumer.consume_all().collect()
+fn collect_all<T: Event>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut events = Vec::with_capacity(count);
+    while events.len() < count {
+        if let Some(event) = consumer.try_consume() {
+            events.push(event);
+        } else {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for event"
+            );
+            std::thread::yield_now();
+        }
+    }
+    assert!(
+        consumer.try_consume().is_none(),
+        "received more than {count} events"
+    );
+    events
 }
 
 fn wait_for<T: Event>(consumer: &mut Consumer<T>) -> T {
-    consumer
-        .consume_blocking()
-        .expect("dispatcher should still be alive")
+    collect_all(consumer, 1)
+        .pop()
+        .expect("one event was collected")
 }
 
 // =============================================================================
@@ -193,13 +208,13 @@ fn realistic_multi_system_engine_loop() {
     }
 
     // Drain and verify.
-    let keys: Vec<u32> = collect_all(&mut key_consumer)
+    let keys: Vec<u32> = collect_all(&mut key_consumer, 3)
         .into_iter()
         .map(|e| e.0)
         .collect();
     assert_eq!(keys, vec![65, 66, 67]);
 
-    let wins = collect_all(&mut win_consumer);
+    let wins = collect_all(&mut win_consumer, 1);
     assert_eq!(wins.len(), 1);
     assert_eq!(wins[0].width, 800);
 }
@@ -220,7 +235,7 @@ fn fan_out_to_many_consumers() {
     }
 
     for consumer in &mut consumers {
-        let events = collect_all(consumer);
+        let events = collect_all(consumer, N);
         assert_eq!(events.len(), N, "consumer did not receive all events");
         for (i, event) in events.iter().enumerate() {
             assert_eq!(
@@ -248,7 +263,7 @@ fn dispatcher_is_send_and_can_be_moved_to_thread() {
 
     handle.join().expect("thread panicked");
 
-    let events = collect_all(&mut consumer);
+    let events = collect_all(&mut consumer, 10);
     assert_eq!(events.len(), 10);
 }
 
@@ -264,15 +279,15 @@ fn unit_event_reaches_all_consumers() {
 
     dispatcher.dispatch(ShutdownRequested);
 
-    assert_eq!(collect_all(&mut c1).len(), 1);
-    assert_eq!(collect_all(&mut c2).len(), 1);
+    assert_eq!(collect_all(&mut c1, 1).len(), 1);
+    assert_eq!(collect_all(&mut c2, 1).len(), 1);
 }
 
 // =============================================================================
 // Section D – Edge cases on the public API
 // =============================================================================
 
-/// Registering but never subscribing: must not panic on `dispatch_all`.
+/// Registering but never subscribing must not panic on dispatch.
 #[test]
 fn register_without_subscribe_is_safe() {
     let workers = WorkerPool::new("test");
@@ -288,7 +303,7 @@ fn subscribe_without_register_yields_empty_consumer() {
     let workers = WorkerPool::new("test");
     let mgr = EventManager::new(workers);
     let mut consumer = mgr.subscribe::<KeyPressed>();
-    assert!(collect_all(&mut consumer).is_empty());
+    assert!(collect_all(&mut consumer, 0).is_empty());
 }
 
 /// Consumers that are dropped mid-simulation are silently pruned; remaining
@@ -309,14 +324,17 @@ fn mid_simulation_consumer_drop_is_handled() {
     // After the dropped consumer is pruned, further dispatches must work fine.
     dispatcher.dispatch(KeyPressed(2));
 
-    let events: Vec<u32> = collect_all(&mut alive).into_iter().map(|e| e.0).collect();
+    let events: Vec<u32> = collect_all(&mut alive, 2)
+        .into_iter()
+        .map(|e| e.0)
+        .collect();
     // Both events delivered to `alive` (which was never dropped).
     assert_eq!(events, vec![1, 2]);
 }
 
-/// Events are routed without waiting for `dispatch_all`.
+/// Events are routed without an explicit flush.
 #[test]
-fn events_are_visible_before_dispatch_all() {
+fn events_are_visible_without_explicit_flush() {
     let workers = WorkerPool::new("test");
     let mgr = EventManager::new(workers);
     let dispatcher = mgr.register::<KeyPressed>();
@@ -341,9 +359,7 @@ fn enum_event_round_trips_through_manager() {
     dispatcher.dispatch(NetworkEvent::PacketReceived(1024));
     dispatcher.dispatch(NetworkEvent::Disconnected);
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
-
-    let events = collect_all(&mut consumer);
+    let events = collect_all(&mut consumer, 3);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].debug(), "connected to example.com:443");
     assert_eq!(events[1].debug(), "packet received: 1024 bytes");
