@@ -18,13 +18,16 @@ pub fn main_vs(
     #[spirv(location = 0)] in_position: Vec3,
     #[spirv(location = 1)] in_normal: Vec3,
     #[spirv(location = 2)] in_tex_coord: Vec2,
+    #[spirv(location = 3)] in_color: Vec4,
     #[spirv(position)] out_position: &mut Vec4,
     #[spirv(location = 0)] frag_tex_coord: &mut Vec2,
     #[spirv(location = 1)] frag_normal: &mut Vec3,
+    #[spirv(location = 2)] frag_color: &mut Vec4,
 ) {
     *out_position = scene.proj * scene.view * proxy.model * in_position.extend(1.0);
     *frag_tex_coord = in_tex_coord;
-    *frag_normal = in_normal;
+    *frag_normal = (proxy.normal * in_normal.extend(0.0)).truncate();
+    *frag_color = in_color;
 }
 
 #[spirv(fragment)]
@@ -32,10 +35,12 @@ pub fn main_fs(
     #[spirv(descriptor_set = 2, binding = 0)] tex_sampler: &SampledImage<Image2d>,
     #[spirv(location = 0)] frag_tex_coord: Vec2,
     #[spirv(location = 1)] frag_normal: Vec3,
+    #[spirv(location = 2)] frag_color: Vec4,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    let diffuse = 0.35 + 0.65 * frag_normal.z.abs();
-    *out_color = tex_sampler.sample(frag_tex_coord) * Vec4::new(diffuse, diffuse, diffuse, 1.0);
+    let diffuse = 0.35 + 0.65 * frag_normal.normalize_or_zero().z.abs();
+    let color = tex_sampler.sample(frag_tex_coord) * frag_color;
+    *out_color = Vec4::new(color.x * diffuse, color.y * diffuse, color.z * diffuse, 1.0);
 }
 
 #[spirv(vertex)]
