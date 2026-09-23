@@ -226,6 +226,7 @@ pub fn input_events_from_egui_response(
     let size = rect.size();
     let mut out = Vec::new();
     let mut request_focus = response.clicked();
+    let mut previous_pointer = previous_pointer;
 
     ui.input(|input| {
         for event in &input.events {
@@ -235,6 +236,7 @@ pub fn input_events_from_egui_response(
                         position: NormalizedPosition::from_egui(rect, *pos),
                         delta: NormalizedDelta(normalized_delta(size, previous_pointer, *pos)),
                     });
+                    previous_pointer = Some(*pos);
                 }
                 egui::Event::PointerButton {
                     pos,
@@ -252,6 +254,7 @@ pub fn input_events_from_egui_response(
                         position: NormalizedPosition::from_egui(rect, *pos),
                         modifiers: Modifiers::from(*modifiers),
                     });
+                    previous_pointer = Some(*pos);
                 }
                 egui::Event::MouseWheel {
                     unit,
@@ -283,6 +286,7 @@ pub fn input_events_from_egui_response(
                 }
                 egui::Event::PointerGone if pointer_routes => {
                     out.push(InputEvent::PointerLeft);
+                    previous_pointer = None;
                 }
                 egui::Event::WindowFocused(false) if keyboard_routes => {
                     out.push(InputEvent::PointerLeft);
@@ -394,4 +398,38 @@ fn logical_key(key: egui::Key) -> Option<LogicalKey> {
         egui::Key::F12 => LogicalKey::Named(NamedKey::Function(12)),
         _ => return None, // TODO: other keys
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_moves_in_one_frame_use_successive_positions() {
+        let context = egui::Context::default();
+        let mut deltas = Vec::new();
+        let raw = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(10.0, 10.0)),
+                egui::Event::PointerMoved(egui::pos2(20.0, 20.0)),
+            ],
+            ..Default::default()
+        };
+        let _ = context.run(raw, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
+                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                deltas = input_events_from_egui_response(ui, &response, Some(egui::Pos2::ZERO))
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        InputEvent::PointerMoved { delta, .. } => Some(delta.0),
+                        _ => None,
+                    })
+                    .collect();
+            });
+        });
+        assert_eq!(deltas.len(), 2);
+        assert!((deltas[0].x - 0.1).abs() < f32::EPSILON);
+        assert!((deltas[1].x - 0.1).abs() < f32::EPSILON);
+    }
 }
