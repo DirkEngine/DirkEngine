@@ -76,11 +76,20 @@ jobs:
       - name: Build debug
         run: cargo build --workspace --locked
 
+      - name: Bundle debug build and runtime assets
+        run: |
+          mkdir -p dist/dirkengine
+          cp target/debug/dirkengine scripts/run-bundle.sh dist/dirkengine/
+          mv dist/dirkengine/run-bundle.sh dist/dirkengine/run.sh
+          cp -R assets dist/dirkengine/assets
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/dist/dirkengine/run.sh" --help >/dev/null)
+          tar -C dist -czf dist/dirkengine-debug.tar.gz dirkengine
+
       - name: Upload Debug Artifact
         uses: actions/upload-artifact@v6
         with:
           name: dirkengine-debug-${{ matrix.os }}
-          path: target/debug/dirkengine
+          path: dist/dirkengine-debug.tar.gz
 
           # This isn't cached properly, runs take 7min.
           # When we fix caching, uncomment
