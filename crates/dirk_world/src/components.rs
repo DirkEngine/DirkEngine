@@ -1,14 +1,13 @@
 //! This module has a bunch of frequently used and central [`Component`]s
 //!
-//! [`Component`]: universe::components::Component
+//! [`Component`]: dirk_universe::components::Component
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use dirk_assets::{AssetLoad, AssetRegistry, Model};
 use dirk_universe::{
-    CommandBuffer, Entity,
-    components::Component,
-    systems::{ComponentSystem, System},
+    CommandBuffer, Entity, Universe, changes::ComponentChange, components::Component,
+    systems::System,
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::warn;
@@ -41,7 +40,7 @@ pub struct Renderable {
 impl Renderable {
     /// Creates a new [`Renderable`] component from an [`AssetHandle`].
     ///
-    /// [`AssetHandle`]: assets::AssetHandle
+    /// [`AssetHandle`]: dirk_assets::AssetHandle
     #[must_use]
     pub fn new(model: dirk_assets::AssetHandle) -> Self {
         Self {
@@ -51,9 +50,7 @@ impl Renderable {
     }
 }
 
-/// A [`universe`] system that will automatically load a model
-/// when a [`Renderable`] is added to an [`universe::Entity`].
-#[derive(System)]
+/// Loads models referenced by added or updated [`Renderable`] components.
 pub struct ModelUploadSystem {
     assets: AssetRegistry,
 }
@@ -66,13 +63,30 @@ impl ModelUploadSystem {
     }
 }
 
-impl ComponentSystem for ModelUploadSystem {
-    type Component = Renderable;
-    fn added(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Self::Component) {
+impl System for ModelUploadSystem {
+    fn run(&mut self, cmd: &mut CommandBuffer, universe: &Universe, _: f64) {
+        let mut changed = HashSet::new();
+        for change in universe.component_changes::<Renderable>() {
+            let (ComponentChange::Added { entity, .. } | ComponentChange::Updated { entity, .. }) =
+                change
+            else {
+                continue;
+            };
+            // Load only the final live value, once, even after several updates.
+            if changed.insert(entity)
+                && let Some(component) = universe.component::<Renderable>(entity)
+            {
+                self.load(cmd, entity, component);
+            }
+        }
+    }
+}
+
+impl ModelUploadSystem {
+    fn load(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Renderable) {
         if component.handle.is_some() {
             return;
         }
-
         let handle = self.assets.load_asset::<Model>(&component.model);
         cmd.set_component(
             entity,
@@ -82,18 +96,6 @@ impl ComponentSystem for ModelUploadSystem {
             },
         );
     }
-    fn updated(
-        &self,
-        cmd: &mut CommandBuffer,
-        entity: Entity,
-        _: &Self::Component,
-        new: &Self::Component,
-    ) {
-        self.added(cmd, entity, new);
-    }
-    /// Nothing happens when this component is removed. The asset will be unloaded
-    /// automatically when it is no longer used.
-    fn removed(&self, _: &mut CommandBuffer, _: Entity, _: &Self::Component) {}
 }
 
 /// Spatial transform for an entity: position, orientation, and scale.

@@ -3,8 +3,8 @@
 use dirk_universe::{
     CommandBuffer, Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
-    query::experimental::{QueryItem, Read},
-    systems::experimental::FuncSystem,
+    query::{QueryItem, Read},
+    systems::FuncSystem,
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -144,13 +144,15 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
     let system_seen = Rc::clone(&seen);
     let mut calls = 0;
     let system = FuncSystem::new(
-        move |cmd: &mut CommandBuffer, query: QueryItem<'_, Read<Position>>, delta_time| {
-            calls += 1;
-            let position = query.params();
-            system_seen
-                .borrow_mut()
-                .push((calls, query.entity(), position.0, delta_time));
-            cmd.set_component(query.entity(), Position(position.0 + calls, position.1));
+        move |cmd: &mut CommandBuffer, universe: &Universe, delta_time| {
+            for query in QueryItem::<Read<Position>>::iter(universe) {
+                calls += 1;
+                let position = query.params();
+                system_seen
+                    .borrow_mut()
+                    .push((calls, query.entity(), position.0, delta_time));
+                cmd.set_component(query.entity(), Position(position.0 + calls, position.1));
+            }
         },
     );
     let mut universe = Universe::builder()
@@ -191,12 +193,12 @@ fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let make_system = |index| {
         let seen = Rc::clone(&seen);
-        FuncSystem::new(
-            move |cmd: &mut CommandBuffer, query: QueryItem<'_, Read<Position>>, _| {
+        FuncSystem::new(move |cmd: &mut CommandBuffer, universe: &Universe, _| {
+            for query in QueryItem::<Read<Position>>::iter(universe) {
                 seen.borrow_mut().push((index, query.params().0));
                 cmd.set_component(query.entity(), Position(index, 0));
-            },
-        )
+            }
+        })
     };
     let other = Universe::builder().with_system(make_system(2));
     let mut universe = Universe::builder()
@@ -212,4 +214,166 @@ fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
 
     universe.tick(0.0);
     assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0), (1, 2), (2, 2)]);
+}
+
+#[test]
+fn systems_run_once_per_tick_even_without_entities_and_share_changes() {
+    use std::{cell::RefCell, rc::Rc};
+    let observed = Rc::new(RefCell::new(Vec::new()));
+    let mut builder = Universe::builder();
+    for id in [1, 2] {
+        let observed = Rc::clone(&observed);
+        let mut calls = 0;
+        builder = builder.with_system(FuncSystem::new(move |_, universe, delta_time| {
+            calls += 1;
+            observed
+                .borrow_mut()
+                .push((id, calls, universe.changes().count(), delta_time));
+        }));
+    }
+    let mut universe = builder.build();
+    universe.tick(0.25);
+    let mut cmd = universe.handle().command_buffer();
+    cmd.create_world(World::builder("empty"));
+    cmd.submit();
+    universe.tick(0.5);
+    universe.tick(1.0);
+    assert_eq!(
+        *observed.borrow(),
+        vec![
+            (1, 1, 0, 0.25),
+            (2, 1, 0, 0.25),
+            (1, 2, 1, 0.5),
+            (2, 2, 1, 0.5),
+            (1, 3, 0, 1.0),
+            (2, 3, 0, 1.0),
+        ]
+    );
+}
+
+#[test]
+fn change_log_retains_intermediate_values_and_orders_transient_lifecycles() {
+    use dirk_universe::changes::{Change, ComponentChange};
+    let mut universe = Universe::builder().build();
+    let mut cmd = universe.handle().command_buffer();
+    let first = cmd.create_world(World::builder("first"));
+    let second = cmd.create_world(World::builder("second"));
+    let entity = cmd.spawn(first, Entity::builder().with_component(Position(1, 0)));
+    cmd.set_component(entity, Position(2, 0));
+    cmd.set_component(entity, Position(3, 0));
+    cmd.remove_component::<Position>(entity);
+    cmd.remove_component::<Position>(entity); // No duplicate removal event.
+    cmd.set_component(entity, Position(4, 0));
+    cmd.send(entity, second);
+    cmd.destroy_world(second);
+    cmd.despawn(entity); // Already removed by world destruction.
+    cmd.set_component(entity, Position(5, 0)); // Must not revive it.
+    cmd.destroy_world(first);
+    cmd.submit();
+    universe.tick(0.0);
+
+    let values: Vec<_> = universe
+        .component_changes::<Position>()
+        .map(|change| match change {
+            ComponentChange::Added { component, .. } => ("added", None, Some(component.0)),
+            ComponentChange::Updated { old, new, .. } => ("updated", Some(old.0), Some(new.0)),
+            ComponentChange::Removed { component, .. } => ("removed", Some(component.0), None),
+        })
+        .collect();
+    assert_eq!(
+        values,
+        vec![
+            ("added", None, Some(1)),
+            ("updated", Some(1), Some(2)),
+            ("updated", Some(2), Some(3)),
+            ("removed", Some(3), None),
+            ("added", None, Some(4)),
+            ("removed", Some(4), None),
+        ]
+    );
+    let lifecycle: Vec<_> = universe
+        .changes()
+        .map(|change| match change {
+            Change::WorldCreated { .. } => "world-created",
+            Change::EntitySpawned {
+                entity: changed,
+                world,
+            } => {
+                assert_eq!((*changed, *world), (entity, first));
+                "spawned"
+            }
+            Change::ComponentAdded { .. } => "added",
+            Change::ComponentUpdated { .. } => "updated",
+            Change::ComponentRemoved { .. } => "removed",
+            Change::EntityMoved {
+                entity: changed,
+                from,
+                to,
+            } => {
+                assert_eq!((*changed, *from, *to), (entity, first, second));
+                "moved"
+            }
+            Change::EntityDespawned {
+                entity: changed,
+                world,
+            } => {
+                assert_eq!((*changed, *world), (entity, second));
+                "despawned"
+            }
+            Change::WorldDestroyed { .. } => "world-destroyed",
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        vec![
+            "world-created",
+            "world-created",
+            "spawned",
+            "added",
+            "updated",
+            "updated",
+            "removed",
+            "added",
+            "moved",
+            "removed",
+            "despawned",
+            "world-destroyed",
+            "world-destroyed"
+        ]
+    );
+    assert_eq!(universe.alive_count(), 0);
+    assert_eq!(universe.worlds().count(), 0);
+    assert_eq!(QueryItem::<Read<Position>>::iter(&universe).count(), 0);
+    universe.tick(0.0);
+    assert_eq!(universe.changes().count(), 0);
+}
+
+#[test]
+fn removed_non_clone_components_are_released_when_the_log_expires() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[derive(Debug, Component)]
+    struct Tracked(Arc<AtomicUsize>);
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut universe = Universe::builder().build();
+    let mut cmd = universe.handle().command_buffer();
+    let world = cmd.create_world(World::builder("w"));
+    let entity = cmd.spawn(
+        world,
+        Entity::builder().with_component(Tracked(Arc::clone(&dropped))),
+    );
+    cmd.despawn(entity);
+    cmd.submit();
+    universe.tick(0.0);
+    assert_eq!(universe.component_changes::<Tracked>().count(), 2);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    universe.tick(0.0);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }

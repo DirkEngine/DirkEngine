@@ -1,4 +1,4 @@
-//! Filters for the experimental query API.
+//! Filters for the typed query API.
 
 use std::{any::TypeId, marker::PhantomData};
 

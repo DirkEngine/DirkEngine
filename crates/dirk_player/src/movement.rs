@@ -1,9 +1,9 @@
 //! Player movement systems.
 
 use dirk_universe::{
-    CommandBuffer, Entity, Universe,
-    query::Query,
-    systems::{System, TickingSystem},
+    CommandBuffer, Universe,
+    query::{QueryItem, Read},
+    systems::System,
 };
 
 use crate::{PlayerId, PlayerInputState};
@@ -15,7 +15,6 @@ pub const DEFAULT_PLAYER_LOOK_SENSITIVITY: f32 = 0.5;
 
 /// Applies player movement input to entities that have a [`PlayerId`] and
 /// [`dirk_world::components::Transform`].
-#[derive(System)]
 pub struct PlayerMovementSystem {
     input_state: PlayerInputState,
     speed: f64,
@@ -34,27 +33,18 @@ impl PlayerMovementSystem {
     }
 }
 
-impl TickingSystem for PlayerMovementSystem {
-    fn tick(
-        &self,
-        cmd: &mut CommandBuffer,
-        universe: &Universe,
-        delta_time: f64,
-        entities: &mut dyn Iterator<Item = Entity>,
-    ) {
-        for entity in entities {
-            let Some(player) = universe.component::<PlayerId>(entity).copied() else {
-                continue;
-            };
+impl System for PlayerMovementSystem {
+    fn run(&mut self, cmd: &mut CommandBuffer, universe: &Universe, delta_time: f64) {
+        for query in
+            QueryItem::<(Read<PlayerId>, Read<dirk_world::components::Transform>)>::iter(universe)
+        {
+            let entity = query.entity();
+            let (player, transform) = query.into_params();
+            let player = *player;
             let input = self.input_state.get(player);
             if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
                 continue;
             }
-
-            let Some(transform) = universe.component::<dirk_world::components::Transform>(entity)
-            else {
-                continue;
-            };
 
             let mut transform = transform.clone();
             if input.look != glam::DVec2::ZERO {
@@ -73,10 +63,66 @@ impl TickingSystem for PlayerMovementSystem {
             cmd.set_component(entity, transform);
         }
     }
+}
 
-    fn query(&self) -> Query {
-        Query::empty()
-            .with_component::<PlayerId>()
-            .with_component::<dirk_world::components::Transform>()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PlayerInputFrame;
+    use dirk_universe::{Entity, World};
+    use dirk_world::components::Transform;
+
+    #[test]
+    fn registered_movement_uses_typed_queries_and_defers_updates() {
+        let input = PlayerInputState::default();
+        let player = PlayerId::default();
+        input.set(
+            player,
+            PlayerInputFrame {
+                movement: glam::Vec3::X,
+                ..PlayerInputFrame::default()
+            },
+        );
+        let mut universe = Universe::builder()
+            .with_system(PlayerMovementSystem::new(input.clone()))
+            .build();
+        let mut cmd = universe.handle().command_buffer();
+        let world = cmd.create_world(World::builder("movement"));
+        let moving = cmd.spawn(
+            world,
+            Entity::builder()
+                .with_component(player)
+                .with_component(Transform::default()),
+        );
+        let stationary = cmd.spawn(
+            world,
+            Entity::builder().with_component(Transform::default()),
+        );
+        cmd.spawn(world, Entity::builder().with_component(player));
+        cmd.submit();
+        universe.tick(0.5);
+        assert_eq!(
+            universe
+                .component::<Transform>(moving)
+                .expect("transform")
+                .location,
+            glam::Vec3::ZERO
+        );
+        input.set(player, PlayerInputFrame::default());
+        universe.tick(0.0);
+        assert_eq!(
+            universe
+                .component::<Transform>(moving)
+                .expect("transform")
+                .location,
+            glam::Vec3::new(175.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            universe
+                .component::<Transform>(stationary)
+                .expect("transform")
+                .location,
+            glam::Vec3::ZERO
+        );
     }
 }
