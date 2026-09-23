@@ -9,15 +9,11 @@ pub use presentation::*;
 pub use resource::*;
 
 use crate::{Backend, InvalidResourceKind as Ir, Result};
+use parking_lot::Mutex;
 use std::sync::{
-    Arc, Mutex, MutexGuard,
+    Arc,
     atomic::{AtomicUsize, Ordering},
 };
-fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
-    mutex
-        .lock()
-        .map_err(|_| Ir::BadState.with_detail("RHI state lock poisoned").into())
-}
 
 /// Unique native resource and immutable allocation metadata.
 /// Dropping the native object retires it through its device's garbage queue.

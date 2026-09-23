@@ -2,7 +2,7 @@ use super::{
     Arc, BufferInfo, GpuBindGroup, GpuBindGroupLayout, GpuBuffer, GpuGraphicsPipeline, GpuImage,
     GpuImageView, GpuPipelineLayout, GpuSampler, GpuShader, GpuSurface, GpuSurfaceFrame,
     GpuSwapchain, GroupMetadata, Mutex, Object, PipelineMetadata, RecordedCommands, SamplerInfo,
-    ViewMetadata, lock,
+    ViewMetadata,
 };
 use crate::ImageViewType as V;
 use crate::{
@@ -110,7 +110,7 @@ impl<B: Backend> Rhi<B> {
         {
             return Err(Ir::OutOfRange.into());
         }
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_buffer(desc)? },
             BufferInfo {
@@ -124,7 +124,7 @@ impl<B: Backend> Rhi<B> {
     pub fn create_image(&self, desc: &ImageDesc<'_>) -> Result<GpuImage<B>> {
         let info = ImageInfo::from(desc);
         self.validate_image(info)?;
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_image(desc)? },
             info,
@@ -210,7 +210,7 @@ impl<B: Backend> Rhi<B> {
             base_array_layer: range.base_array_layer,
             array_layer_count: range.array_layer_count,
         };
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_image_view(&raw)? },
             ViewMetadata { image: info, range },
@@ -248,7 +248,7 @@ impl<B: Backend> Rhi<B> {
         {
             return Err(Ir::OutOfRange.into());
         }
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_sampler(desc)? },
             SamplerInfo {
@@ -265,7 +265,7 @@ impl<B: Backend> Rhi<B> {
     /// are not a sandbox for untrusted shader programs. Compilation/reflection lives
     /// in the shader build layer; this boundary makes that trust explicit.
     pub unsafe fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<GpuShader<B>> {
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_shader(desc)? },
             desc.stage,
@@ -285,7 +285,7 @@ impl<B: Backend> Rhi<B> {
         {
             return Err(Ir::Mismatch.into());
         }
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe {
                 self.device
@@ -317,7 +317,7 @@ impl<B: Backend> Rhi<B> {
                 resource,
             });
         }
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe {
                 self.device.backend.create_bind_group(&BindGroupDesc {
@@ -421,7 +421,7 @@ impl<B: Backend> Rhi<B> {
             crate::BindingMap::new(&groups, stage)?.validate(self.capabilities().limits)?;
         }
         let native: Vec<_> = desc.bind_group_layouts.iter().map(|l| l.raw()).collect();
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe {
                 self.device
@@ -496,7 +496,7 @@ impl<B: Backend> Rhi<B> {
             alpha_to_coverage: desc.alpha_to_coverage,
             samples: desc.samples,
         };
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_graphics_pipeline(&raw)? },
             PipelineMetadata {
@@ -509,7 +509,7 @@ impl<B: Backend> Rhi<B> {
     }
     /// Creates a retained presentation target.
     pub fn create_surface(&self, info: SurfaceCreateInfo) -> Result<GpuSurface<B>> {
-        let _gate = lock(&self.device.gate)?;
+        let _gate = self.device.gate.lock();
         Ok(Self::object(
             unsafe { self.device.backend.create_surface(info)? },
             (),
@@ -530,7 +530,7 @@ impl<B: Backend> Rhi<B> {
     /// Commands recorded in this cycle must be submitted before it ends.
     pub fn finish_cycle(&mut self) -> Result<()> {
         {
-            let mut state = lock(&self.device.state)?;
+            let mut state = self.device.state.lock();
             self.device.backend.seal_garbage();
             let work = std::mem::take(&mut state.pending);
             state.cycles.push_back(work);
@@ -540,8 +540,8 @@ impl<B: Backend> Rhi<B> {
     }
     /// Collects old buckets only after all queues through that cycle have completed.
     pub fn collect_garbage(&mut self) -> Result<()> {
-        let _gate = lock(&self.device.gate)?;
-        let mut state = lock(&self.device.state)?;
+        let _gate = self.device.gate.lock();
+        let mut state = self.device.state.lock();
         while state.cycles.len() >= 3 {
             for work in &state.cycles[0] {
                 match work.wait(0) {
@@ -577,7 +577,7 @@ pub(super) struct Work<B: Backend> {
 }
 impl<B: Backend> Work<B> {
     pub(super) fn wait(&self, timeout: u64) -> Result<()> {
-        let mut payload = lock(&self.payload)?;
+        let mut payload = self.payload.lock();
         if payload.is_none() {
             return Ok(());
         }
@@ -585,7 +585,8 @@ impl<B: Backend> Work<B> {
             self.fence.wait(timeout)?;
         }
         if let Some(done) = payload.take() {
-            lock(&self.pools)?
+            self.pools
+                .lock()
                 .entry(self.queue)
                 .or_default()
                 .extend(done.commands);
@@ -618,21 +619,20 @@ impl<B: Backend> Drop for Device<B> {
     fn drop(&mut self) {
         // This owner is the last entry point for submissions. Native device loss is fatal.
         let _ = unsafe { self.backend.wait_idle() };
-        if let Ok(state) = self.state.get_mut() {
-            state.pending.clear();
-            state.cycles.clear();
-        }
+        let state = self.state.get_mut();
+        state.pending.clear();
+        state.cycles.clear();
         let _ = unsafe { self.backend.wait_idle() };
     }
 }
 
 impl<B: Backend> Device<B> {
     pub(super) fn wait_idle(&self) -> Result<()> {
-        let _gate = lock(&self.gate)?;
+        let _gate = self.gate.lock();
         unsafe {
             self.backend.wait_idle()?;
         }
-        let mut state = lock(&self.state)?;
+        let mut state = self.state.lock();
         for work in &state.pending {
             work.wait(u64::MAX)?;
         }
