@@ -1,8 +1,3 @@
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "backend methods share the crate Error contract; individual failure modes are backend-dependent"
-)]
-
 use std::fmt::Debug;
 
 use raw_window_handle::{DisplayHandle, WindowHandle};

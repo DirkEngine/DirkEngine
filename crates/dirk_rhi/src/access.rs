@@ -1,8 +1,4 @@
 //! Semantic access, ranges, portable limits, and shader binding agreement.
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "checked helpers return typed range, layout, or size errors"
-)]
 use crate::{
     BufferUsages, Extent3d, ImageAspects, ImageUsages, InvalidResourceKind as Ir, Result,
     ShaderStages, TextureFormat,
@@ -65,6 +61,9 @@ impl BufferRange {
         size: u64::MAX,
     };
     /// Resolves the remainder and rejects empty or out-of-bounds ranges.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` if the range is empty or extends past `total`.
     pub fn resolve(self, total: u64) -> Result<Self> {
         let size = if self.size == u64::MAX {
             total.checked_sub(self.offset)
@@ -115,6 +114,10 @@ impl ImageSubresourceRange {
         }
     }
     /// Checks and resolves against allocation metadata.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` for invalid mip or layer ranges, or `Mismatch`
+    /// when the selected aspects are incompatible with the image format.
     pub fn resolve(self, info: &ImageInfo) -> Result<Self> {
         let mips = BufferRange {
             offset: u64::from(self.base_mip_level),
@@ -184,6 +187,9 @@ impl From<&crate::ImageDesc<'_>> for ImageInfo {
 }
 impl ImageInfo {
     /// Extent of an existing mip.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` if `mip` does not exist in this image.
     pub fn mip_extent(self, mip: u32) -> Result<Extent3d> {
         if mip >= self.mip_levels {
             return Err(Ir::OutOfRange.into());
@@ -301,6 +307,10 @@ pub struct UploadLayout {
 }
 impl UploadLayout {
     /// Computes checked row padding using selected-device capabilities.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` for dimensions or row pitches that cannot be
+    /// represented, or `Empty` when `height` is zero.
     pub fn new(
         width: u32,
         height: u32,
@@ -324,6 +334,10 @@ impl UploadLayout {
         })
     }
     /// Copies tightly packed rows into an aligned staging payload.
+    ///
+    /// # Errors
+    /// Returns `Mismatch` if the input byte count differs from the layout,
+    /// or `OutOfRange` if the staging allocation size cannot be represented.
     pub fn pack(self, pixels: &[u8]) -> Result<Vec<u8>> {
         let packed = u64::from(self.row_bytes) * u64::from(self.rows.get());
         if u64::try_from(pixels.len()).map_err(|_| Ir::OutOfRange)? != packed {
@@ -362,6 +376,10 @@ pub struct BindingMap {
 }
 impl BindingMap {
     /// Builds a deterministic map from sorted portable groups and stage visibility.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` when group or shader-slot counts overflow, or
+    /// `Mismatch` if the same visible binding is declared twice.
     pub fn new(
         groups: &[&[crate::BindGroupLayoutEntry]],
         stage: crate::ShaderStage,
@@ -426,6 +444,9 @@ impl BindingMap {
         self.entries.get(&(group, binding)).copied()
     }
     /// Checks the map against the selected device's per-stage limits.
+    ///
+    /// # Errors
+    /// Returns `OutOfRange` if any binding exceeds its stage's slot limit.
     pub fn validate(&self, limits: Limits) -> Result<()> {
         for slots in self.entries.values() {
             if slots.buffer.is_some_and(|n| n >= limits.max_shader_buffers)

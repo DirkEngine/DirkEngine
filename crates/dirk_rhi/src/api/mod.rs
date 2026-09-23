@@ -1,8 +1,4 @@
 //! Portable validation and unique ownership above private native operations.
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "operations share the typed RHI error contract"
-)]
 mod device;
 mod encoder;
 mod presentation;
