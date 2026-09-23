@@ -15,7 +15,7 @@ pub use assets::*;
 
 mod handle;
 use handle::AssetRef;
-pub use handle::Handle;
+pub use handle::{AssetGeneration, Handle};
 
 use dirk_engine::{EngineBuilder, EngineHandle, EnginePlugin, Subsystem};
 use dirk_events::{Consumer, Dispatcher, EventManager};
@@ -26,6 +26,7 @@ use std::{
     collections::HashMap,
     fmt::Display,
     future::Future,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Weak},
@@ -96,13 +97,31 @@ pub(crate) const ASSETS_PATH: &str = std::env!("ASSETS_PATH");
 /// Handles are created internally by [`AssetRegistry`] during directory
 /// scanning and are not normally constructed by hand. They are serialisable
 /// so they can be stored in scene files or editor state.
-#[derive(Default, PartialEq, Eq, Hash, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct AssetHandle {
     /// Path relative to `ASSETS_PATH`, including the `.dirkasset` extension.
     handle: String,
     /// Runtime type tag, validated against the requested `T` in
     /// [`AssetRegistry::load_asset`].
     asset_type: AssetType,
+    /// Runtime asset root; omitted from serialized identity.
+    #[serde(skip)]
+    root: Option<PathBuf>,
+}
+
+impl PartialEq for AssetHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle && self.asset_type == other.asset_type
+    }
+}
+
+impl Eq for AssetHandle {}
+
+impl Hash for AssetHandle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.handle.hash(state);
+        self.asset_type.hash(state);
+    }
 }
 
 impl Display for AssetHandle {
@@ -127,12 +146,16 @@ impl AssetHandle {
         Self {
             handle: path.into(),
             asset_type,
+            root: None,
         }
     }
 
     /// Returns the **absolute** path to the `.dirkasset` file on disk.
     pub fn path(&self) -> PathBuf {
-        PathBuf::from(format!("{ASSETS_PATH}/{}", self.handle))
+        self.root
+            .as_deref()
+            .unwrap_or_else(|| Path::new(ASSETS_PATH))
+            .join(&self.handle)
     }
 
     /// Returns the **absolute** path to the directory containing the
@@ -427,8 +450,17 @@ struct AssetRegistryInner {
     /// [`load_asset::<T>`]: AssetRegistry::load_asset
     load_dispatchers: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
 
+    /// One lock per descriptor, so same-key loads share work without holding
+    /// a registry-wide lock across blocking disk IO.
+    load_locks: Mutex<HashMap<AssetHandle, Arc<Mutex<()>>>>,
+
     /// Weak references to currently live assets.
-    loaded_assets: RwLock<HashMap<AssetHandle, Box<dyn Any + Send + Sync>>>,
+    loaded_assets: RwLock<HashMap<AssetHandle, CachedAsset>>,
+}
+
+struct CachedAsset {
+    generation: AssetGeneration,
+    weak: Box<dyn Any + Send + Sync>,
 }
 
 impl AssetRegistry {
@@ -452,6 +484,19 @@ impl AssetRegistry {
     /// [`Error::IoError`]: crate::Error::IoError
     /// [`Error::SerialisationError`]: crate::Error::SerialisationError
     pub fn init(event_manager: &EventManager, workers: WorkerPool) -> Result<Self> {
+        Self::init_at(event_manager, workers, ASSETS_PATH)
+    }
+
+    /// Creates a registry with an explicit asset root, useful for isolated
+    /// projects and tests that do not use the build-time default path.
+    ///
+    /// # Errors
+    /// Returns an error if the root or any descriptor cannot be read or parsed.
+    pub fn init_at(
+        event_manager: &EventManager,
+        workers: WorkerPool,
+        root: impl AsRef<Path>,
+    ) -> Result<Self> {
         let mut inner = AssetRegistryInner {
             assets: HashMap::new(),
 
@@ -461,10 +506,11 @@ impl AssetRegistry {
             workers,
 
             load_dispatchers: RwLock::new(HashMap::new()),
+            load_locks: Mutex::new(HashMap::new()),
             loaded_assets: RwLock::new(HashMap::new()),
         };
 
-        let assets_path = PathBuf::from(ASSETS_PATH).canonicalize()?;
+        let assets_path = root.as_ref().canonicalize()?;
         inner.load(&assets_path, &assets_path)?;
         inner.validate();
 
@@ -486,11 +532,11 @@ impl AssetRegistry {
             .consume_all()
             .collect();
 
-        for InternalAssetUnloaded(handle) in unloaded {
-            self.clear_loaded_asset(&handle);
+        for InternalAssetUnloaded { handle, generation } in unloaded {
+            self.clear_loaded_asset(&handle, generation);
             self.inner
                 .unload_dispatcher
-                .dispatch(AssetUnloaded { handle });
+                .dispatch(AssetUnloaded { handle, generation });
         }
     }
 
@@ -525,17 +571,32 @@ impl AssetRegistry {
             return Err(Error::TypeMismatch(handle.raw().to_owned()));
         }
 
+        let load_lock = self
+            .inner
+            .load_locks
+            .lock()
+            .entry(handle.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _load_guard = load_lock.lock();
+
         if let Some(typed_handle) = self.cached_handle::<T>(&handle) {
             return Ok(typed_handle);
         }
 
+        let canonical_handle = self
+            .inner
+            .assets
+            .get_key_value(&handle)
+            .map(|(key, _)| key.clone())
+            .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
         let config = self
-            .asset_config::<T>(&handle)
+            .asset_config::<T>(&canonical_handle)
             .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
 
         let typed_handle = Handle::new(AssetRef::new(
-            handle.clone(),
-            T::load(&config, &handle)?,
+            canonical_handle.clone(),
+            T::load(&config, &canonical_handle)?,
             self.inner.event_manager.register(),
         ));
 
@@ -548,20 +609,30 @@ impl AssetRegistry {
         let cached = self.inner.loaded_assets.read();
         let weak = cached
             .get(handle)?
+            .weak
             .downcast_ref::<Weak<Mutex<AssetRef<T>>>>()?;
 
         weak.upgrade().map(Handle::from_inner)
     }
 
     fn cache_handle<T: Asset>(&self, handle: &Handle<T>) {
-        self.inner
-            .loaded_assets
-            .write()
-            .insert(handle.handle(), Box::new(handle.downgrade()));
+        self.inner.loaded_assets.write().insert(
+            handle.handle(),
+            CachedAsset {
+                generation: handle.generation(),
+                weak: Box::new(handle.downgrade()),
+            },
+        );
     }
 
-    fn clear_loaded_asset(&self, handle: &AssetHandle) {
-        self.inner.loaded_assets.write().remove(handle);
+    fn clear_loaded_asset(&self, handle: &AssetHandle, generation: AssetGeneration) {
+        let mut cached = self.inner.loaded_assets.write();
+        if cached
+            .get(handle)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            cached.remove(handle);
+        }
     }
 
     fn dispatch_loaded<T: Asset>(&self, handle: Handle<T>) {
@@ -649,6 +720,7 @@ impl AssetRegistryInner {
                 let handle = AssetHandle {
                     handle: relative_path.display().to_string(),
                     asset_type: config.meta.asset_type,
+                    root: Some(base.to_path_buf()),
                 };
                 config.meta.handle = handle.clone();
 

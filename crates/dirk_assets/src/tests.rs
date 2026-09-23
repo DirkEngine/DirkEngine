@@ -10,7 +10,7 @@
 //! | `errors` | Display messages, `From` impls |
 //! | `handle` | `get`/`take` semantics, clone sharing, drop event |
 //! | `dirk_asset_validation` | All failure branches + success branch |
-//! | `registry` | Error paths + full happy-path integration (requires ASSETS_PATH) |
+//! | `registry` | Isolated root, cache, concurrency and generation lifecycles |
 //!
 //! # Placement
 //!
@@ -31,11 +31,7 @@
 //!
 //! # Registry integration tests
 //!
-//! Tests in `registry::` that exercise `AssetRegistry::init` require
-//! `ASSETS_PATH` (the compile-time constant baked in by `build.rs`) to point
-//! to an existing directory. If the directory does not exist at test run time
-//! the tests **skip** rather than fail, so CI without a real asset tree stays
-//! green.
+//! Registry tests use their own temporary asset roots and always run in CI.
 
 #![allow(
     clippy::unwrap_used,
@@ -46,7 +42,6 @@
 
 // ── bring the entire crate into scope ────────────────────────────────────────
 use super::{
-    ASSETS_PATH,
     // public
     Asset,
     AssetConfig,
@@ -79,12 +74,6 @@ use tempfile::TempDir;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared test helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns `true` when `ASSETS_PATH` exists on disk so registry-dependent
-/// tests can skip gracefully in environments without a real asset tree.
-fn assets_path_exists() -> bool {
-    Path::new(ASSETS_PATH).exists()
-}
 
 /// A minimal valid glTF 2.0 document accepted by the `gltf` crate.
 fn minimal_gltf_json() -> &'static str {
@@ -637,7 +626,7 @@ mod handle {
 
         let fired: Vec<_> = consumer.consume_all().collect();
         assert_eq!(fired.len(), 1, "exactly one InternalAssetUnloaded event");
-        assert_eq!(fired[0].0, asset_handle);
+        assert_eq!(fired[0].handle, asset_handle);
     }
 
     #[test]
@@ -685,7 +674,7 @@ mod handle {
         drop(handle);
 
         let ev = consumer.consume_blocking().unwrap();
-        assert_eq!(ev.0, expected);
+        assert_eq!(ev.handle, expected);
     }
 
     // ── Debug ─────────────────────────────────────────────────────────────────
@@ -805,495 +794,170 @@ mod dirk_asset_validation {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AssetRegistry — tests requiring ASSETS_PATH
+// AssetRegistry — isolated integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod registry {
     use super::*;
+    use std::{
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
-    // ── init ──────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn init_returns_io_error_when_assets_path_missing() {
-        if assets_path_exists() {
-            return; // skip — this machine has a real asset tree
-        }
-        let workers = WorkerPool::new("test");
+    fn registry_with_model(name: &str) -> (TempDir, EventManager, AssetRegistry, AssetHandle) {
+        let root = TempDir::new().unwrap();
+        write_model_fixture(root.path(), name);
+        let workers = WorkerPool::new("asset-test");
         let events = EventManager::new(workers.clone());
-        assert!(
-            matches!(
-                AssetRegistry::init(&events, workers),
-                Err(Error::IoError(_))
-            ),
-            "Missing ASSETS_PATH should produce IoError"
-        );
+        let registry = AssetRegistry::init_at(&events, workers, root.path()).unwrap();
+        let id = AssetHandle::from_raw(format!("{name}.dirkasset"), AssetType::Model);
+        (root, events, registry, id)
     }
 
-    #[test]
-    fn init_succeeds_when_assets_path_exists() {
-        if !assets_path_exists() {
-            return;
-        }
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        assert!(
-            AssetRegistry::init(&events, workers).is_ok(),
-            "init should succeed with a valid ASSETS_PATH"
-        );
-    }
-
-    // ── load_asset error paths (do not require valid assets on disk) ──────────
-
-    #[test]
-    fn load_asset_returns_type_mismatch_for_wrong_type_tag() {
-        if !assets_path_exists() {
-            return;
-        }
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init(&events, workers).unwrap();
-
-        // Pass a handle whose AssetType is Unknown but request Model — must be TypeMismatch.
-        let bad_handle = AssetHandle::from_raw("anything.dirkasset", AssetType::Unknown);
-        let result = wait_for_load(registry.load_asset::<Model>(&bad_handle));
-        assert!(
-            matches!(result, Err(Error::TypeMismatch(_))),
-            "Wrong type tag must produce TypeMismatch"
-        );
-    }
-
-    #[test]
-    fn load_asset_returns_not_found_for_missing_handle() {
-        if !assets_path_exists() {
-            return;
-        }
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init(&events, workers).unwrap();
-
-        let ghost = AssetHandle::from_raw(
-            "nonexistent/ghost_that_will_never_exist.dirkasset",
-            AssetType::Model,
-        );
-        assert!(
-            matches!(
-                wait_for_load(registry.load_asset::<Model>(&ghost)),
-                Err(Error::NotFound(_))
-            ),
-            "Unknown handle must produce NotFound"
-        );
-    }
-
-    #[test]
-    fn type_mismatch_error_contains_handle_path() {
-        if !assets_path_exists() {
-            return;
-        }
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init(&events, workers).unwrap();
-
-        let path = "specific/path.dirkasset";
-        let bad = AssetHandle::from_raw(path, AssetType::Unknown);
-        match wait_for_load(registry.load_asset::<Model>(&bad)) {
-            Err(Error::TypeMismatch(p)) => assert_eq!(p, path),
-            other => panic!("expected TypeMismatch, got {other:?}"),
+    fn wait_for_event<E: dirk_events::Event>(consumer: &mut dirk_events::Consumer<E>) -> E {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = consumer.consume_all().next() {
+                return event;
+            }
+            assert!(Instant::now() < deadline, "event was not delivered in time");
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
     #[test]
-    fn not_found_error_contains_handle_path() {
-        if !assets_path_exists() {
-            return;
-        }
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init(&events, workers).unwrap();
-
-        let path = "no/such/asset.dirkasset";
-        let ghost = AssetHandle::from_raw(path, AssetType::Model);
-        match wait_for_load(registry.load_asset::<Model>(&ghost)) {
-            Err(Error::NotFound(p)) => assert_eq!(p, path),
-            other => panic!("expected NotFound, got {other:?}"),
-        }
-    }
-
-    // ── tick + full happy-path (requires writing fixtures to ASSETS_PATH) ─────
-
-    /// Creates a unique test sub-directory inside ASSETS_PATH, runs the
-    /// callback with a freshly-initialised registry scoped to that directory,
-    /// then removes the sub-directory regardless of test outcome.
-    fn with_temp_fixtures<F>(test_name: &str, f: F)
-    where
-        F: FnOnce(&mut AssetRegistry, &EventManager, &str),
-    {
-        if !assets_path_exists() {
-            return;
-        }
-
-        let sub = format!("__test_{test_name}__");
-        let dir = PathBuf::from(ASSETS_PATH).join(&sub);
-        fs::create_dir_all(&dir).expect("failed to create test fixture dir");
-
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let mut registry = AssetRegistry::init(&events, workers).expect("init failed");
-
-        f(&mut registry, &events, &sub);
-
-        // Best-effort cleanup — leave no test artefacts behind.
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_asset_returns_handle_for_valid_model() {
-        with_temp_fixtures("load_valid", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "hero");
-
-            // Re-init so the registry picks up the freshly written fixture.
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/hero.dirkasset");
-            let handle = AssetHandle::from_raw(raw, AssetType::Model);
-            assert!(
-                wait_for_load(r2.load_asset::<Model>(&handle)).is_ok(),
-                "Valid model asset must load without error"
-            );
-        });
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn load_asset_async_returns_handle_inside_tokio_runtime() {
-        if !assets_path_exists() {
-            return;
-        }
-
-        let sub = "__test_async_load__";
-        let dir = PathBuf::from(ASSETS_PATH).join(sub);
-        fs::create_dir_all(&dir).expect("failed to create test fixture dir");
-        write_model_fixture(&dir, "runtime");
-
-        let workers = WorkerPool::new("test");
-        let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init(&events, workers).expect("init failed");
-
-        let raw = format!("{sub}/runtime.dirkasset");
-        let handle = registry
-            .load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model))
-            .await
-            .expect("async load should succeed");
-
+    fn explicit_root_loads_model_and_resolves_source_paths() {
+        let (_root, _events, registry, id) = registry_with_model("hero");
+        let handle = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        assert_eq!(handle.get().unwrap().gltf.scenes().count(), 1);
         assert_eq!(
-            handle
-                .get()
-                .expect("model data should be readable")
-                .buffers
-                .len(),
-            0
+            handle.handle().dir(),
+            handle.handle().path().parent().unwrap()
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn load_asset_fires_asset_loaded_event() {
-        with_temp_fixtures("event_loaded", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "ship");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut loaded_consumer = events2.subscribe::<AssetLoaded<Model>>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/ship.dirkasset");
-            let handle_id = AssetHandle::from_raw(raw, AssetType::Model);
-            let _handle = wait_for_load(r2.load_asset::<Model>(&handle_id)).unwrap();
-
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            let events_fired: Vec<_> = loaded_consumer.consume_all().collect();
-            assert_eq!(events_fired.len(), 1, "Exactly one AssetLoaded event");
-        });
+    fn async_load_works_inside_runtime() {
+        let (_root, _events, registry, id) = registry_with_model("async");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let handle = runtime.block_on(registry.load_asset::<Model>(&id)).unwrap();
+        assert_eq!(handle.get().unwrap().gltf.scenes().count(), 1);
     }
 
     #[test]
-    fn load_asset_reuses_live_asset_without_reloading_from_disk() {
-        with_temp_fixtures("cached_load", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "cached");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/cached.dirkasset");
-            let handle_id = AssetHandle::from_raw(raw, AssetType::Model);
-            let first = wait_for_load(r2.load_asset::<Model>(&handle_id)).unwrap();
-
-            fs::remove_file(dir.join("cached.gltf")).unwrap();
-
-            let second = wait_for_load(r2.load_asset::<Model>(&handle_id))
-                .expect("cached live asset should load after source file is removed");
-
-            assert_eq!(
-                first.get().unwrap().gltf.scenes().count(),
-                second.get().unwrap().gltf.scenes().count()
-            );
-        });
+    fn missing_root_type_mismatch_and_unknown_handle_report_errors() {
+        let root = TempDir::new().unwrap();
+        let workers = WorkerPool::new("asset-test");
+        let events = EventManager::new(workers.clone());
+        assert!(matches!(
+            AssetRegistry::init_at(&events, workers.clone(), root.path().join("missing")),
+            Err(Error::IoError(_))
+        ));
+        let registry = AssetRegistry::init_at(&events, workers, root.path()).unwrap();
+        let wrong = AssetHandle::from_raw("wrong.dirkasset", AssetType::Unknown);
+        assert!(matches!(
+            wait_for_load(registry.load_asset::<Model>(&wrong)),
+            Err(Error::TypeMismatch(path)) if path == "wrong.dirkasset"
+        ));
+        let absent = AssetHandle::from_raw("absent.dirkasset", AssetType::Model);
+        assert!(matches!(
+            wait_for_load(registry.load_asset::<Model>(&absent)),
+            Err(Error::NotFound(path)) if path == "absent.dirkasset"
+        ));
     }
 
     #[test]
-    fn load_asset_does_not_fire_loaded_event_for_cached_asset() {
-        with_temp_fixtures("cached_event", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "cached_ship");
+    fn cached_load_shares_data_and_emits_one_loaded_event() {
+        let (_root, events, registry, id) = registry_with_model("cached");
+        let mut loaded = events.subscribe::<AssetLoaded<Model>>();
+        let first = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let event = wait_for_event(&mut loaded);
+        assert_eq!(event.handle.generation(), first.generation());
+        drop(event);
+        let second = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        assert_eq!(first.generation(), second.generation());
+        assert_eq!(loaded.consume_all().count(), 0);
+        first.take().unwrap();
+        assert!(matches!(second.take(), Err(Error::AlreadyTaken)));
+    }
 
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut loaded_consumer = events2.subscribe::<AssetLoaded<Model>>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
+    #[derive(Clone)]
+    struct CountingAsset;
 
-            let raw = format!("{sub}/cached_ship.dirkasset");
-            let handle_id = AssetHandle::from_raw(raw, AssetType::Model);
-            let _first = wait_for_load(r2.load_asset::<Model>(&handle_id)).unwrap();
-            let _second = wait_for_load(r2.load_asset::<Model>(&handle_id)).unwrap();
+    static DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            assert_eq!(
-                loaded_consumer.consume_all().count(),
-                1,
-                "AssetLoaded should only fire for the initial load"
-            );
-        });
+    impl Asset for CountingAsset {
+        type Config = ModelConfig;
+
+        fn load(_: &ModelConfig, _: &AssetHandle) -> Result<Self> {
+            DECODE_COUNT.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            Ok(Self)
+        }
+
+        fn asset_type() -> AssetType {
+            AssetType::Model
+        }
     }
 
     #[test]
-    fn loaded_event_handle_gives_access_to_model_data() {
-        with_temp_fixtures("event_data", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "tank");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut loaded_consumer = events2.subscribe::<AssetLoaded<Model>>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/tank.dirkasset");
-            let _handle = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            let ev = loaded_consumer.consume_all().next().unwrap();
-            let model = ev.handle.get().expect("handle.get() must succeed");
-            // A minimal glTF has exactly one scene.
-            assert_eq!(model.gltf.scenes().count(), 1);
-        });
+    fn concurrent_same_key_loads_share_one_decode_and_generation() {
+        DECODE_COUNT.store(0, Ordering::SeqCst);
+        let (_root, _events, registry, id) = registry_with_model("concurrent");
+        let gate = Arc::new(Barrier::new(3));
+        let threads = (0..2)
+            .map(|_| {
+                let registry = registry.clone();
+                let id = id.clone();
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    registry.load_asset_immediate::<CountingAsset>(id).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        gate.wait();
+        let handles = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(DECODE_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(handles[0].generation(), handles[1].generation());
     }
 
     #[test]
-    fn tick_emits_asset_unloaded_after_all_handles_dropped() {
-        with_temp_fixtures("tick_unload", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "barrel");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut unloaded_consumer = events2.subscribe::<AssetUnloaded>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/barrel.dirkasset");
-            let handle = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-
-            // Drop all references → InternalAssetUnloaded is queued.
-            drop(handle);
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick(); // registry converts it to AssetUnloaded
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-
-            let fired: Vec<_> = unloaded_consumer.consume_all().collect();
-            assert_eq!(fired.len(), 1, "Exactly one AssetUnloaded event after drop");
+    fn old_unload_preserves_new_generation_and_identifies_old_instance() {
+        let (_root, events, registry, id) = registry_with_model("reloaded");
+        let mut loaded = events.subscribe::<AssetLoaded<Model>>();
+        let mut unloaded = events.subscribe::<AssetUnloaded>();
+        let first = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let first_generation = first.generation();
+        drop(wait_for_event(&mut loaded));
+        drop(first);
+        let second = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        assert_ne!(first_generation, second.generation());
+        drop(wait_for_event(&mut loaded));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let old_unload = loop {
+            registry.tick();
+            if let Some(event) = unloaded.consume_all().next() {
+                break event;
+            }
             assert!(
-                fired[0].handle.raw().contains("barrel"),
-                "Unloaded event must carry the correct handle"
+                Instant::now() < deadline,
+                "old unload was not delivered in time"
             );
-        });
-    }
-
-    #[test]
-    fn tick_clears_cached_asset_after_unload() {
-        with_temp_fixtures("tick_cache_clear", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "cleared");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/cleared.dirkasset");
-            let handle_id = AssetHandle::from_raw(raw, AssetType::Model);
-            let handle = wait_for_load(r2.load_asset::<Model>(&handle_id)).unwrap();
-            assert_eq!(r2.inner.loaded_assets.read().len(), 1);
-
-            drop(handle);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick();
-
-            assert!(
-                r2.inner.loaded_assets.read().is_empty(),
-                "unload processing should clear weak cache entries"
-            );
-        });
-    }
-
-    #[test]
-    fn tick_does_not_emit_unloaded_while_handle_still_live() {
-        with_temp_fixtures("tick_no_unload", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "plane");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut unloaded_consumer = events2.subscribe::<AssetUnloaded>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/plane.dirkasset");
-            let handle = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick();
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-
-            assert_eq!(
-                unloaded_consumer.consume_all().count(),
-                0,
-                "No AssetUnloaded should fire while the handle is still alive"
-            );
-
-            drop(handle); // ensure RAII cleanup actually happens
-        });
-    }
-
-    #[test]
-    fn tick_emits_unloaded_only_when_last_clone_dropped() {
-        with_temp_fixtures("tick_clone_drop", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "crate_mesh");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let mut unloaded_consumer = events2.subscribe::<AssetUnloaded>();
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/crate_mesh.dirkasset");
-            let h1 = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-            let h2 = h1.clone();
-            let h3 = h1.clone();
-
-            drop(h1);
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick();
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            assert_eq!(unloaded_consumer.consume_all().count(), 0);
-
-            drop(h2);
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick();
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            assert_eq!(unloaded_consumer.consume_all().count(), 0);
-
-            drop(h3); // last clone
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            r2.tick();
-            // wait for the event to be dispatched
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            assert_eq!(
-                unloaded_consumer.consume_all().count(),
-                1,
-                "AssetUnloaded fires after last clone drops"
-            );
-        });
-    }
-
-    #[test]
-    fn handle_take_gives_correct_gltf_data() {
-        with_temp_fixtures("take_model", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "sphere");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/sphere.dirkasset");
-            let handle = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-
-            let model = handle.take().expect("take must succeed on first call");
-            // Minimal glTF has 0 meshes.
-            assert_eq!(model.gltf.meshes().count(), 0);
-            assert_eq!(model.buffers.len(), 0);
-            assert_eq!(model.images.len(), 0);
-
-            // Second take must fail.
-            assert!(matches!(handle.take(), Err(Error::AlreadyTaken)));
-        });
-    }
-
-    #[test]
-    fn loading_same_handle_twice_reuses_live_handle() {
-        with_temp_fixtures("double_load", |_registry, _events, sub| {
-            let dir = PathBuf::from(ASSETS_PATH).join(sub);
-            write_model_fixture(&dir, "rock");
-
-            let workers = WorkerPool::new("test");
-            let events2 = EventManager::new(workers.clone());
-            let r2 = AssetRegistry::init(&events2, workers).unwrap();
-
-            let raw = format!("{sub}/rock.dirkasset");
-            let h1 = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw.clone(), AssetType::Model)),
-            )
-            .unwrap();
-            let h2 = wait_for_load(
-                r2.load_asset::<Model>(&AssetHandle::from_raw(raw, AssetType::Model)),
-            )
-            .unwrap();
-
-            // Both handles share the same live asset. Taking from one must affect the other.
-            h1.take().unwrap();
-            assert!(
-                matches!(h2.take(), Err(Error::AlreadyTaken)),
-                "Second handle should share the already-taken asset data"
-            );
-        });
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(old_unload.handle, id);
+        assert_eq!(old_unload.generation, first_generation);
+        assert_eq!(
+            registry.cached_handle::<Model>(&id).unwrap().generation(),
+            second.generation()
+        );
     }
 }
