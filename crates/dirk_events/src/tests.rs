@@ -117,6 +117,10 @@ struct UnnamedStructLastOnly(i32, String, f64);
 #[event("unnamed static")]
 struct UnnamedStructStatic(u8, u8);
 
+#[derive(Debug, Clone, Event)]
+#[event("literal {{0}}, debug={0:?}, rounded={1:.2}")]
+struct UnnamedStructFormatting(u32, f32);
+
 // ── 1.4  Unit enum ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Event)]
@@ -274,6 +278,12 @@ mod macro_debug_output {
     fn unnamed_struct_static_ignores_all_fields() {
         let e = UnnamedStructStatic(1, 2);
         assert_eq!(e.debug(), "unnamed static");
+    }
+
+    #[test]
+    fn unnamed_struct_preserves_escaped_braces_and_specs() {
+        let e = UnnamedStructFormatting(12, 1.234);
+        assert_eq!(e.debug(), "literal {0}, debug=12, rounded=1.23");
     }
 
     // ── Unit enum ─────────────────────────────────────────────────────────

@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Attribute, DataEnum, DataStruct, DeriveInput, Fields, FieldsUnnamed, Ident, LitStr};
@@ -18,7 +20,7 @@ pub fn derive_event_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<To
             .map(|variant| {
                 let var_name = &variant.ident;
                 let fmt = get_message_format_from_attrs(&variant.attrs)?;
-                let (pattern, format_expr) = create_field_bindings(&variant.fields, &fmt);
+                let (pattern, format_expr) = create_field_bindings(&variant.fields, &fmt)?;
                 Ok(quote! {
                     #[allow(unused_variables)]
                     Self::#var_name #pattern => #format_expr,
@@ -43,7 +45,7 @@ pub fn derive_event_struct(input: &DeriveInput, data: &DataStruct) -> syn::Resul
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let fmt = get_message_format_from_attrs(&input.attrs)?;
-    let (pattern, format_expr) = create_field_bindings(&data.fields, &fmt);
+    let (pattern, format_expr) = create_field_bindings(&data.fields, &fmt)?;
 
     // Unit structs need no destructuring; everything else gets a `let Self …`.
     let content = if let Fields::Unit = data.fields {
@@ -68,7 +70,10 @@ pub fn derive_event_struct(input: &DeriveInput, data: &DataStruct) -> syn::Resul
 /// This will create the field destructuring pattern & the expression for the
 /// formatting of the field
 /// Returns (pattern, format expression)
-fn create_field_bindings(fields: &Fields, message_format: &str) -> (TokenStream, TokenStream) {
+fn create_field_bindings(
+    fields: &Fields,
+    message_format: &str,
+) -> syn::Result<(TokenStream, TokenStream)> {
     match fields {
         // struct Foo { x: T, y: T }  →  let Self { x, y, .. } = self;
         Fields::Named(named) => {
@@ -77,20 +82,20 @@ fn create_field_bindings(fields: &Fields, message_format: &str) -> (TokenStream,
             let pattern = quote! { { #(#idents,)* .. } };
             let format_expr = quote! { format!(#message_format) };
 
-            (pattern, format_expr)
+            Ok((pattern, format_expr))
         }
         // struct Foo(T, T)  →  let Self(_0, _1) = self;
         Fields::Unnamed(unnamed) => {
-            let (fmt, idents) = rewrite_unnamed_placeholders(message_format, unnamed);
+            let (fmt, idents) = rewrite_unnamed_placeholders(message_format, unnamed)?;
             // No `..`: we enumerate every field, so the pattern is already
             // exhaustive. Adding `..` would cause an "unnecessary `..`" lint.
             let pattern = quote! { ( #(#idents,)* ) };
             let format_expr = quote! { format!(#fmt) };
 
-            (pattern, format_expr)
+            Ok((pattern, format_expr))
         }
         // struct Foo;  →  nothing to destructure.
-        Fields::Unit => (quote! {}, quote! { format!(#message_format) }),
+        Fields::Unit => Ok((quote! {}, quote! { format!(#message_format) })),
     }
 }
 
@@ -113,26 +118,84 @@ fn get_message_format_from_attrs(attrs: &[Attribute]) -> syn::Result<String> {
     Ok(String::from("{self:?}"))
 }
 
-/// Rewrites positional `{0}`, `{1}`, … placeholders to the named bindings
-/// `{_0}`, `{_1}`, … used when destructuring unnamed (tuple) fields, and
-/// returns the rewritten format string together with the binding [`Ident`]s.
-fn rewrite_unnamed_placeholders(format: &str, fields: &FieldsUnnamed) -> (String, Vec<Ident>) {
-    // Create the list of potential variables (_0, _1, etc.)
+/// Rewrites active tuple-field placeholders while preserving escaped braces and
+/// formatting specifications. Dynamic positional widths are intentionally rejected.
+fn rewrite_unnamed_placeholders(
+    format: &str,
+    fields: &FieldsUnnamed,
+) -> syn::Result<(String, Vec<Ident>)> {
     let idents: Vec<Ident> = fields
         .unnamed
         .iter()
         .enumerate()
-        .map(|(i, _)| quote::format_ident!("_{}", i))
+        .map(|(i, _)| quote::format_ident!("_{i}"))
         .collect();
-
-    let new_format = idents
-        .iter()
-        .enumerate()
-        .fold(format.to_string(), |acc, (i, _)| {
-            acc.replace(&format!("{{{i}}}"), &format!("{{_{i}}}"))
-        });
-
-    (new_format, idents)
+    let mut output = String::with_capacity(format.len());
+    let bytes = format.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'{' {
+            if bytes.get(cursor + 1) == Some(&b'{') {
+                output.push_str("{{");
+                cursor += 2;
+                continue;
+            }
+            let start = cursor;
+            cursor += 1;
+            let index_start = cursor;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cursor += 1;
+            }
+            if cursor > index_start && matches!(bytes.get(cursor), Some(b':' | b'}')) {
+                let index = format[index_start..cursor].parse::<usize>().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        "tuple field index is too large",
+                    )
+                })?;
+                if index >= fields.unnamed.len() {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!("tuple event has no field {index}"),
+                    ));
+                }
+                let end = format[cursor..]
+                    .find('}')
+                    .map(|offset| cursor + offset)
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            proc_macro2::Span::call_site(),
+                            "unclosed event format placeholder",
+                        )
+                    })?;
+                let spec = &format[cursor..end];
+                if spec.contains('{')
+                    || spec
+                        .as_bytes()
+                        .windows(2)
+                        .any(|pair| pair[0].is_ascii_digit() && pair[1] == b'$')
+                {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        "dynamic positional format widths are not supported in tuple events",
+                    ));
+                }
+                write!(&mut output, "{{_{index}{spec}}}").expect("writing to String cannot fail");
+                cursor = end + 1;
+            } else {
+                // Named captures such as `{self:?}` are handled by `format!`.
+                output.push_str(&format[start..cursor]);
+            }
+        } else if bytes[cursor] == b'}' && bytes.get(cursor + 1) == Some(&b'}') {
+            output.push_str("}}");
+            cursor += 2;
+        } else {
+            let ch = format[cursor..].chars().next().expect("valid UTF-8");
+            output.push(ch);
+            cursor += ch.len_utf8();
+        }
+    }
+    Ok((output, idents))
 }
 
 #[cfg(test)]
@@ -156,7 +219,7 @@ mod tests {
     #[test]
     fn rewrite_replaces_all_positional_placeholders() {
         let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, idents) = rewrite_unnamed_placeholders("{0} and {1}", &fields);
+        let (fmt, idents) = rewrite_unnamed_placeholders("{0} and {1}", &fields).unwrap();
         assert_eq!(fmt, "{_0} and {_1}");
         assert_eq!(idents.len(), 2);
         assert_eq!(idents[0], quote::format_ident!("_0"));
@@ -166,7 +229,7 @@ mod tests {
     #[test]
     fn rewrite_leaves_non_positional_format_intact() {
         let fields = unnamed_fields_from("struct Foo(u32);");
-        let (fmt, idents) = rewrite_unnamed_placeholders("no placeholders", &fields);
+        let (fmt, idents) = rewrite_unnamed_placeholders("no placeholders", &fields).unwrap();
         assert_eq!(fmt, "no placeholders");
         assert_eq!(idents.len(), 1);
     }
@@ -174,15 +237,29 @@ mod tests {
     #[test]
     fn rewrite_handles_partial_placeholder_use() {
         let fields = unnamed_fields_from("struct Foo(u32, String, bool);");
-        let (fmt, _) = rewrite_unnamed_placeholders("only {1} matters", &fields);
+        let (fmt, _) = rewrite_unnamed_placeholders("only {1} matters", &fields).unwrap();
         assert_eq!(fmt, "only {_1} matters");
     }
 
     #[test]
     fn rewrite_handles_repeated_placeholder() {
         let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, _) = rewrite_unnamed_placeholders("{0} then {0} again", &fields);
+        let (fmt, _) = rewrite_unnamed_placeholders("{0} then {0} again", &fields).unwrap();
         assert_eq!(fmt, "{_0} then {_0} again");
+    }
+
+    #[test]
+    fn rewrite_preserves_escaped_braces_and_format_specs() {
+        let fields = unnamed_fields_from("struct Foo(f32);");
+        let (fmt, _) =
+            rewrite_unnamed_placeholders("literal {{0}}, value {0:.2?}", &fields).unwrap();
+        assert_eq!(fmt, "literal {{0}}, value {_0:.2?}");
+    }
+
+    #[test]
+    fn rewrite_rejects_invalid_field_indices() {
+        let fields = unnamed_fields_from("struct Foo(u32);");
+        assert!(rewrite_unnamed_placeholders("{1}", &fields).is_err());
     }
 
     // ── get_message_format_from_attrs ─────────────────────────────────────────
