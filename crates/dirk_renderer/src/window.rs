@@ -15,6 +15,7 @@ use crate::{
 /// Doesn't actually do any of the rendering of the game.
 pub struct Window {
     device: RenderDevice,
+    surface_target: std::sync::Arc<dirk_platform::WindowSurfaceTarget>,
 
     id: WindowId,
     surface: vk::SurfaceKHR,
@@ -26,12 +27,13 @@ pub struct Window {
 
 impl Window {
     pub fn build(device: &RenderDevice, plat_window: &dirk_platform::Window) -> Result<Self> {
+        let surface_target = plat_window.surface_target();
         let surface = unsafe {
             ash_window::create_surface(
                 &device.entry,
                 &device.instance,
-                plat_window.display_handle()?.as_raw(),
-                plat_window.window_handle()?.as_raw(),
+                surface_target.display_handle()?.as_raw(),
+                surface_target.window_handle()?.as_raw(),
                 None,
             )?
         };
@@ -42,11 +44,19 @@ impl Window {
             height: window_size.height,
         };
 
-        let swapchain = Swapchain::build(device, surface, size)?;
+        let swapchain = match Swapchain::build(device, surface, size) {
+            Ok(swapchain) => swapchain,
+            Err(error) => {
+                // The target remains alive until the failed surface is destroyed.
+                unsafe { device.surface_loader.destroy_surface(surface, None) };
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             id: plat_window.id(),
             device: device.clone(),
+            surface_target,
             surface,
             swapchain,
             occluded: false,
@@ -73,6 +83,9 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         self.swapchain.destroy();
-        self.device.destroy(Garbage::Surface(self.surface));
+        self.device.destroy(Garbage::Surface {
+            surface: self.surface,
+            target: self.surface_target.clone(),
+        });
     }
 }

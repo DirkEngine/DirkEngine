@@ -1046,7 +1046,8 @@ impl Renderer {
     }
 
     fn required_instance_extensions(window: &dirk_platform::Window) -> Result<Vec<*const i8>> {
-        let display_handle = window.display_handle()?.as_raw();
+        let surface_target = window.surface_target();
+        let display_handle = surface_target.display_handle()?.as_raw();
         let extensions = ash_window::enumerate_required_extensions(display_handle)?.to_vec();
 
         #[cfg(platform_macos)]

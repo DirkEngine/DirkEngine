@@ -207,7 +207,11 @@ pub enum Garbage {
     Semaphore(vk::Semaphore),
 
     Swapchain(vk::SwapchainKHR),
-    Surface(vk::SurfaceKHR),
+    Surface {
+        surface: vk::SurfaceKHR,
+        /// Keeps the native window alive until deferred surface destruction.
+        target: Arc<dirk_platform::WindowSurfaceTarget>,
+    },
     Shader(vk::ShaderModule),
 }
 
@@ -285,8 +289,9 @@ impl Garbage {
                 }
                 Self::DescriptorPool(pool) => device.destroy_descriptor_pool(pool, None),
                 Self::Semaphore(semaphore) => device.destroy_semaphore(semaphore, None),
-                Self::Surface(surface) => {
+                Self::Surface { surface, target } => {
                     render_device.surface_loader.destroy_surface(surface, None);
+                    drop(target);
                 }
                 Self::Swapchain(swapchain) => render_device
                     .swapchain_loader

@@ -213,21 +213,3 @@ impl HasDisplayHandle for WindowSurfaceTarget {
         self.raw.display_handle()
     }
 }
-
-impl HasWindowHandle for Window {
-    fn window_handle(
-        &self,
-    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
-    {
-        self.raw.window_handle()
-    }
-}
-
-impl HasDisplayHandle for Window {
-    fn display_handle(
-        &self,
-    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
-    {
-        self.raw.display_handle()
-    }
-}
