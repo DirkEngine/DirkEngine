@@ -465,6 +465,11 @@ impl Renderer {
         for event in platform_events {
             match event {
                 PlatformEvent::WindowCreated { id } => {
+                    // The main window is inserted before subscribing, so its queued
+                    // creation event may still arrive during the first tick.
+                    if self.windows.contains_key(&id) {
+                        continue;
+                    }
                     let windows = self.platform_windows.windows();
                     let Some(plat_window) = windows.get(&id) else {
                         continue;
