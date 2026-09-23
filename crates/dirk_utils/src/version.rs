@@ -2,10 +2,8 @@ use std::{fmt, str::FromStr};
 
 use thiserror::Error;
 
-/// A simple representation of a version. This is
-/// used to track engine version, etc...
-/// For now it is mainly used by Vulkan when populating
-/// the application info struct.
+/// A packed Vulkan-style version with 10-bit major/minor and 12-bit patch fields.
+/// This type does not implement Semantic Versioning or prerelease identifiers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Version(u32);
 
@@ -73,13 +71,14 @@ impl Version {
     pub fn bump_patch(self) -> Self {
         Self::new(self.major(), self.minor(), self.patch() + 1)
     }
-    /// Returns true if `self` is semver-compatible with `required`
-    /// (same major, self.minor >= required.minor).
+    /// Returns true if both versions share a major version and this version is
+    /// at least as new as `required`. This is not `SemVer` compatibility.
     #[must_use]
     pub fn is_compatible_with(self, required: Self) -> bool {
         self.major() == required.major() && self >= required
     }
-    /// If the major is 0, then this is a prerelease version.
+    /// Returns whether the major version is zero. This is a project convention,
+    /// not a `SemVer` prerelease identifier.
     #[must_use]
     pub fn is_prerelease(self) -> bool {
         self.major() == 0
@@ -156,6 +155,9 @@ impl FromStr for Version {
             .ok_or_else(err)?
             .parse::<u32>()
             .map_err(|_| err())?;
+        if major >= (1 << 10) || minor >= (1 << 10) || patch >= (1 << 12) {
+            return Err(err());
+        }
         Ok(Self::new(major, minor, patch))
     }
 }
@@ -276,6 +278,9 @@ mod tests {
 
     #[test]
     fn test_parse_invalid() {
+        for input in ["1024.0.0", "0.1024.0", "0.0.4096", "4294967295.0.0"] {
+            assert!(input.parse::<Version>().is_err(), "{input}");
+        }
         assert!("1.2".parse::<Version>().is_err());
         assert!("abc".parse::<Version>().is_err());
         assert!("1.x.3".parse::<Version>().is_err());
