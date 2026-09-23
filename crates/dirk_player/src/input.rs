@@ -31,6 +31,9 @@ impl InputContext {
                 self.pointer_delta = glam::Vec2::ZERO;
             }
             InputEvent::Key { .. }
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
+            | InputEvent::ModifiersChanged(_)
             | InputEvent::PointerEntered
             | InputEvent::PointerButton { .. }
             | InputEvent::Scroll { .. } => {}

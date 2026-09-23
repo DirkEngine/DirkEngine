@@ -242,15 +242,10 @@ impl Renderer {
             rhi.supported_sample_counts(color, dirk_rhi::ImageUsages::COLOR_ATTACHMENT);
         let depth_counts =
             rhi.supported_sample_counts(depth, dirk_rhi::ImageUsages::DEPTH_STENCIL_ATTACHMENT);
-        [
-            SampleCount::Eight,
-            SampleCount::Four,
-            SampleCount::Two,
-            SampleCount::One,
-        ]
-        .into_iter()
-        .find(|&count| color_counts.supports(count) && depth_counts.supports(count))
-        .unwrap_or(SampleCount::One)
+        [SampleCount::Four, SampleCount::Two, SampleCount::One]
+            .into_iter()
+            .find(|&count| color_counts.supports(count) && depth_counts.supports(count))
+            .unwrap_or(SampleCount::One)
     }
 
     /// Renderer initialization. Creates the active backend and renderer objects.
@@ -437,6 +432,7 @@ impl Renderer {
                 &self.rhi,
                 event.id,
                 ViewportSettings::new(Extent3d::new_2d(1, 1), self.properties.surface_format),
+                self.properties,
             )?;
             #[cfg(feature = "editor")]
             self.viewport_editor.add_viewport(
@@ -525,7 +521,29 @@ impl Renderer {
     /// Backend errors can occur during rendering.
     fn end_frame(&mut self) -> Result<()> {
         #[cfg(feature = "editor")]
-        self.egui.end_frame();
+        {
+            let (output, pixels_per_point) = self.egui.end_frame();
+            if let Some(window) = self.egui_window {
+                let cursor = egui_cursor(output.cursor_icon);
+                let ime = output.ime.map(|ime| {
+                    let rect = ime.cursor_rect;
+                    let scale = f64::from(pixels_per_point);
+                    dirk_platform::ImeArea {
+                        x: f64::from(rect.min.x) * scale,
+                        y: f64::from(rect.min.y) * scale,
+                        width: f64::from(rect.width()) * scale,
+                        height: f64::from(rect.height()) * scale,
+                    }
+                });
+                self.platform_windows.apply_ui_state(window, cursor, ime);
+            }
+            if !output.commands.is_empty() {
+                tracing::warn!(
+                    count = output.commands.len(),
+                    "egui clipboard and URL commands have no platform handler"
+                );
+            }
+        }
 
         let frame_index = self.current_frame();
         if let Some(completion) = self.frames[frame_index].completion.take() {
@@ -671,15 +689,16 @@ impl Renderer {
 
         let mut cmd = self.rhi.create_encoder("presentation render graph")?;
         #[cfg(feature = "editor")]
-        if let Some(extent) = targets
+        if let Some(target) = targets
             .iter()
             .find(|target| Some(target.window) == self.egui_window)
-            .map(|target| target.extent)
         {
+            self.egui
+                .set_target_format(&self.rhi, target.image.format().texture)?;
             // SAFETY: the renderer waited for this frame slot; texture updates record explicit dependencies.
             unsafe {
                 self.egui
-                    .prepare(&self.rhi, &mut cmd, extent, frame_index)?;
+                    .prepare(&self.rhi, &mut cmd, target.extent, frame_index)?;
             }
         }
 
@@ -860,4 +879,47 @@ impl Drop for Renderer {
         }
         info!("cleaning up renderer");
     }
+}
+
+#[cfg(feature = "editor")]
+fn egui_cursor(icon: egui::CursorIcon) -> Option<dirk_platform::CursorIcon> {
+    use dirk_platform::CursorIcon as Platform;
+    use egui::CursorIcon as Ui;
+    Some(match icon {
+        Ui::None => return None,
+        Ui::Default => Platform::Default,
+        Ui::ContextMenu => Platform::ContextMenu,
+        Ui::Help => Platform::Help,
+        Ui::PointingHand => Platform::Pointer,
+        Ui::Progress => Platform::Progress,
+        Ui::Wait => Platform::Wait,
+        Ui::Cell => Platform::Cell,
+        Ui::Crosshair => Platform::Crosshair,
+        Ui::Text => Platform::Text,
+        Ui::VerticalText => Platform::VerticalText,
+        Ui::Alias => Platform::Alias,
+        Ui::Copy => Platform::Copy,
+        Ui::Move => Platform::Move,
+        Ui::NoDrop => Platform::NoDrop,
+        Ui::NotAllowed => Platform::NotAllowed,
+        Ui::Grab => Platform::Grab,
+        Ui::Grabbing => Platform::Grabbing,
+        Ui::AllScroll => Platform::AllScroll,
+        Ui::ResizeHorizontal => Platform::EwResize,
+        Ui::ResizeNeSw => Platform::NeswResize,
+        Ui::ResizeNwSe => Platform::NwseResize,
+        Ui::ResizeVertical => Platform::NsResize,
+        Ui::ResizeEast => Platform::EResize,
+        Ui::ResizeSouthEast => Platform::SeResize,
+        Ui::ResizeSouth => Platform::SResize,
+        Ui::ResizeSouthWest => Platform::SwResize,
+        Ui::ResizeWest => Platform::WResize,
+        Ui::ResizeNorthWest => Platform::NwResize,
+        Ui::ResizeNorth => Platform::NResize,
+        Ui::ResizeNorthEast => Platform::NeResize,
+        Ui::ResizeColumn => Platform::ColResize,
+        Ui::ResizeRow => Platform::RowResize,
+        Ui::ZoomIn => Platform::ZoomIn,
+        Ui::ZoomOut => Platform::ZoomOut,
+    })
 }

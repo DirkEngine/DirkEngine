@@ -15,13 +15,14 @@ mod handler;
 mod window;
 
 pub use winit::{
+    cursor::CursorIcon,
     keyboard::ModifiersState,
     window::{Theme, WindowId},
 };
 pub use {
     errors::Error,
     event::*,
-    window::{MainWindow, PlatformWindows, Window, WindowSurfaceTarget, Windows},
+    window::{ImeArea, MainWindow, PlatformWindows, Window, WindowSurfaceTarget, Windows},
 };
 
 use errors::Result;
