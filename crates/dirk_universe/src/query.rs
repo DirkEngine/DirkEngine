@@ -1,210 +1,137 @@
-//! This module handles querying entities from a [`World`] based on what
-//! components they have (or don't have).
+//! Typed, read-only queries over live entities.
 //!
-//! [`World`]: crate::World
+//! Queries read live entities across all worlds. A tuple of parameters fetches
+//! every requested component, skipping entities missing any of them. Filter
+//! tuples also use AND semantics; the default filter `()` matches every entity.
+//! Component references borrow the universe, so mutation remains deferred through
+//! command buffers.
+//!
+//! ```rust
+//! use dirk_universe::{
+//!     Universe, components::Component,
+//!     query::{QueryItem, Read, filter::Without},
+//! };
+//!
+//! #[derive(Component, Debug)]
+//! struct Position(f32);
+//! #[derive(Component, Debug)]
+//! struct Velocity(f32);
+//! #[derive(Component, Debug)]
+//! struct Frozen;
+//!
+//! fn inspect_moving_entities(universe: &Universe) {
+//!     for query in QueryItem::<(Read<Position>, Read<Velocity>), Without<Frozen>>::iter(universe) {
+//!         let entity = query.entity();
+//!         let (position, velocity) = query.into_params();
+//!         println!("{entity:?}: position {}, velocity {}", position.0, velocity.0);
+//!     }
+//! }
+//! ```
 
-pub mod experimental;
 pub mod filter;
 
-use std::any::TypeId;
+use std::marker::PhantomData;
 
-use crate::{Entity, Universe, WorldId, components::Component};
+use self::filter::Filter;
+use crate::{Entity, Universe, components::Component};
 
-/// A struct to query entities from a [`World`].
-///
-/// Conditions are evaluated as:
-///   - ALL `with_component` types must be present, **and**
-///   - NONE of the `without_component` types may be present, **and**
-///   - the entity lives in **at least one** of the `with_world` worlds
-///     (if any are specified — omitting `with_world` entirely matches all
-///     worlds), **and**
-///   - the entity does **not** live in any `without_world` world.
-///
-/// Note: unlike `with_component`, which uses AND across calls, `with_world`
-/// uses OR across calls. This means the entity only needs to belong to *one*
-/// of the specified worlds to match.
-///
-/// An empty query matches every entity.
-///
-/// # Example
-/// ```rust
-/// # use dirk_universe::components::Component;
-/// # use dirk_universe::query::Query;
-/// # #[derive(Component, Debug, serde::Deserialize, serde::Serialize)]
-/// # struct Position;
-/// # #[derive(Component, Debug, serde::Deserialize, serde::Serialize)]
-/// # struct Velocity;
-/// # #[derive(Component, Debug, serde::Deserialize, serde::Serialize)]
-/// # struct Frozen;
-/// let query = Query::empty()
-///     .with_component::<Position>()
-///     .with_component::<Velocity>()
-///     .without_component::<Frozen>();
-/// ```
-///
-/// [`World`]: crate::World
-#[derive(Default)]
-pub struct Query {
-    /// Component types that must ALL be present on a matching entity.
-    required_components: Vec<TypeId>,
-    /// Component types that must ALL be absent on a matching entity.
-    excluded_components: Vec<TypeId>,
-    /// Worlds that the entity could be on.
-    /// Matching is OR: the entity must live in at least one of these worlds.
-    possible_worlds: Vec<WorldId>,
-    /// Worlds that the entity must not be in (AND NOT across all entries).
-    excluded_worlds: Vec<WorldId>,
+/// A matched entity and the data fetched for it by a query.
+pub struct QueryItem<'u, P: QueryParameter, F: Filter = ()> {
+    entity: Entity,
+    params: P::Item<'u>,
+    _filter: PhantomData<fn() -> (P, F)>,
 }
 
-impl Query {
-    /// Creates a new, empty [`Query`] that matches every entity.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Require that matching entities have component `C`.
-    ///
-    /// Calling this multiple times with different types adds AND conditions.
-    /// Adding the same type twice is a no-op; the condition is deduplicated.
-    ///
-    /// # Panics (debug only)
-    /// Panics in debug builds if `C` has already been added via
-    /// [`without_component`], since such a query can never match anything.
-    ///
-    /// [`without_component`]: Query::without_component
-    #[must_use]
-    pub fn with_component<C: Component>(mut self) -> Self {
-        let id = TypeId::of::<C>();
-        debug_assert!(
-            !self.excluded_components.contains(&id),
-            "with_component and without_component called with the same type — \
-             this query will never match any entity"
-        );
-        if !self.required_components.contains(&id) {
-            self.required_components.push(id);
-        }
-        self
-    }
-
-    /// Require that matching entities do **not** have component `C`.
-    ///
-    /// Like [`with_component`], multiple calls add independent AND NOT
-    /// conditions. Adding the same type twice is a no-op.
-    ///
-    /// # Panics (debug only)
-    /// Panics in debug builds if `C` has already been added via
-    /// [`with_component`], since such a query can never match anything.
-    ///
-    /// [`with_component`]: Query::with_component
-    #[must_use]
-    pub fn without_component<C: Component>(mut self) -> Self {
-        let id = TypeId::of::<C>();
-        debug_assert!(
-            !self.required_components.contains(&id),
-            "without_component and with_component called with the same type — \
-             this query will never match any entity"
-        );
-        if !self.excluded_components.contains(&id) {
-            self.excluded_components.push(id);
-        }
-        self
-    }
-
-    /// Restrict matching entities to those that live in `world`.
-    ///
-    /// Multiple calls add OR conditions: an entity matches if it lives in
-    /// **any** of the specified worlds. Calling with the same [`WorldId`]
-    /// twice is a no-op.
-    ///
-    /// # Panics (debug only)
-    /// Panics in debug builds if `world` has already been added via
-    /// [`without_world`], since such a query can never match anything.
-    ///
-    /// [`without_world`]: Query::without_world
-    #[must_use]
-    pub fn with_world(mut self, world: WorldId) -> Self {
-        debug_assert!(
-            !self.excluded_worlds.contains(&world),
-            "with_world and without_world called with the same WorldId — \
-             this query will never match any entity"
-        );
-        if !self.possible_worlds.contains(&world) {
-            self.possible_worlds.push(world);
-        }
-        self
-    }
-
-    /// Require that matching entities do **not** live in `world`.
-    ///
-    /// Multiple calls add independent AND NOT conditions. Calling with the
-    /// same [`WorldId`] twice is a no-op.
-    ///
-    /// # Panics (debug only)
-    /// Panics in debug builds if `world` has already been added via
-    /// [`with_world`], since such a query can never match anything.
-    ///
-    /// [`with_world`]: Query::with_world
-    #[must_use]
-    pub fn without_world(mut self, world: WorldId) -> Self {
-        debug_assert!(
-            !self.possible_worlds.contains(&world),
-            "without_world and with_world called with the same WorldId — \
-             this query will never match any entity"
-        );
-        if !self.excluded_worlds.contains(&world) {
-            self.excluded_worlds.push(world);
-        }
-        self
-    }
-
-    /// Returns `true` if `entity` satisfies every condition in this [`Query`].
-    ///
-    /// This is the single source of truth; [`query`] is implemented in terms
-    /// of it.
-    ///
-    /// [`query`]: Query::query
-    #[must_use]
-    pub(crate) fn matches(&self, universe: &Universe, entity: Entity) -> bool {
-        let world_ok = self.possible_worlds.is_empty()
-            || self
-                .possible_worlds
-                .iter()
-                .any(|&world| universe.is_in_world(world, entity));
-
-        if !world_ok {
-            return false;
+impl<'u, P: QueryParameter, F: Filter> QueryItem<'u, P, F> {
+    pub(crate) fn matches(entity: Entity, universe: &'u Universe) -> Option<Self> {
+        if !F::matches(entity, universe) {
+            return None;
         }
 
-        if self
-            .excluded_worlds
-            .iter()
-            .any(|&world| universe.is_in_world(world, entity))
-        {
-            return false;
-        }
-
-        self.required_components
-            .iter()
-            .all(|&t| universe.components.contains(entity, t))
-            && self
-                .excluded_components
-                .iter()
-                .all(|&t| !universe.components.contains(entity, t))
+        Some(Self {
+            entity,
+            params: P::from_entity(entity, universe)?,
+            _filter: PhantomData,
+        })
     }
 
-    /// Returns an iterator over all entities that satisfy this [`Query`].
+    /// Returns the entity matched by this query item.
+    pub fn entity(&self) -> Entity {
+        self.entity
+    }
+
+    /// Returns the fetched query parameters.
+    pub fn params(&self) -> &P::Item<'u> {
+        &self.params
+    }
+
+    /// Consumes this query item and returns the fetched parameters.
+    pub fn into_params(self) -> P::Item<'u> {
+        self.params
+    }
+
+    /// Iterates over every live entity for which `F` matches and every
+    /// parameter of `P` fetches successfully — e.g. `Read<C>` already skips
+    /// entities without `C`, even when `F` is the default `()` filter.
     ///
-    /// The iterator is lazy — no allocation occurs until the caller collects.
-    /// Entities are sourced from [`Universe::entities`] so despawned IDs are
-    /// never returned, even if their component data has not yet been cleaned up.
-    ///
-    /// [`World`]: crate::World
-    pub(crate) fn query<'u>(&'u self, universe: &'u Universe) -> impl Iterator<Item = Entity> {
+    /// Entities from every world are included. The iteration order is unspecified.
+    pub fn iter(universe: &'u Universe) -> impl Iterator<Item = Self> + 'u {
         universe
             .entities
             .keys()
             .copied()
-            .filter(|&e| self.matches(universe, e))
+            .filter_map(move |entity| Self::matches(entity, universe))
+    }
+}
+
+/// Describes the data fetched for each entity matched by a query.
+pub trait QueryParameter: Sized {
+    /// The concrete value borrowed or produced for one matched entity.
+    type Item<'u>;
+
+    /// Builds this parameter value for `entity`, returning `None` if it does not match.
+    fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>>;
+}
+
+impl QueryParameter for () {
+    type Item<'u> = ();
+
+    fn from_entity(_: Entity, _: &Universe) -> Option<Self::Item<'_>> {
+        Some(())
+    }
+}
+
+macro_rules! impl_query_parameter_for_tuple {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name),+> QueryParameter for ($($name,)+)
+        where
+            $($name: QueryParameter),+
+        {
+            type Item<'u> = ($($name::Item<'u>,)+);
+
+            fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>> {
+                Some(($($name::from_entity(entity, universe)?,)+))
+            }
+        }
+    };
+}
+
+impl_query_parameter_for_tuple!(A);
+impl_query_parameter_for_tuple!(A, B);
+impl_query_parameter_for_tuple!(A, B, C);
+impl_query_parameter_for_tuple!(A, B, C, D);
+impl_query_parameter_for_tuple!(A, B, C, D, E);
+impl_query_parameter_for_tuple!(A, B, C, D, E, F);
+impl_query_parameter_for_tuple!(A, B, C, D, E, F, G);
+impl_query_parameter_for_tuple!(A, B, C, D, E, F, G, H);
+
+/// Fetches an immutable component reference for each matched entity.
+pub struct Read<C: Component>(PhantomData<C>);
+
+impl<C: Component> QueryParameter for Read<C> {
+    type Item<'u> = &'u C;
+
+    fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>> {
+        universe.component::<C>(entity)
     }
 }
