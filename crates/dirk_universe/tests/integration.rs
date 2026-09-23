@@ -217,6 +217,59 @@ fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
 }
 
 #[test]
+#[should_panic(expected = "cannot merge a UniverseBuilder with issued handles or queued commands")]
+fn composed_builders_reject_retained_other_handle() {
+    let other = Universe::builder();
+    let _handle = other.handle();
+    let _ = Universe::builder().with_other(other);
+}
+
+#[test]
+#[should_panic(expected = "cannot merge a UniverseBuilder with issued handles or queued commands")]
+fn composed_builders_reject_queued_other_commands() {
+    let other = Universe::builder();
+    let mut cmd = other.handle().command_buffer();
+    cmd.create_world(World::builder("would disappear"));
+    cmd.submit();
+    let _ = Universe::builder().with_other(other);
+}
+
+#[test]
+fn destroyed_world_rejects_later_spawns_and_transfers() {
+    let mut universe = Universe::builder().build();
+    let mut cmd = universe.handle().command_buffer();
+    let destroyed = cmd.create_world(World::builder("destroyed"));
+    let surviving = cmd.create_world(World::builder("surviving"));
+    let existing = cmd.spawn(surviving, Entity::builder());
+    cmd.destroy_world(destroyed);
+    let rejected = cmd.spawn(destroyed, Entity::builder());
+    cmd.send(existing, destroyed);
+    cmd.submit();
+    universe.tick(0.0);
+
+    assert!(universe.world(destroyed).is_none());
+    assert!(!universe.is_alive(rejected));
+    assert_eq!(universe.get_world(existing), Some(surviving));
+    assert_eq!(universe.alive_count(), 1);
+}
+
+#[test]
+fn despawn_discards_later_component_writes() {
+    let mut universe = Universe::builder().build();
+    let mut cmd = universe.handle().command_buffer();
+    let world = cmd.create_world(World::builder("world"));
+    let entity = cmd.spawn(world, Entity::builder().with_component(Position(1, 2)));
+    cmd.despawn(entity);
+    cmd.set_component(entity, Hidden);
+    cmd.submit();
+    universe.tick(0.0);
+
+    assert!(!universe.is_alive(entity));
+    assert!(universe.component::<Position>(entity).is_none());
+    assert!(universe.component::<Hidden>(entity).is_none());
+}
+
+#[test]
 fn systems_run_once_per_tick_even_without_entities_and_share_changes() {
     use std::{cell::RefCell, rc::Rc};
     let observed = Rc::new(RefCell::new(Vec::new()));
