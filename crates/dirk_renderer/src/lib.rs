@@ -273,7 +273,10 @@ impl Renderer {
         info!("initializing renderer RHI with Vulkan");
 
         let surface_target = window.surface_target();
-        let surface_info = (surface_target.display_handle()?, surface_target.window_handle()?);
+        let surface_info = (
+            surface_target.display_handle()?,
+            surface_target.window_handle()?,
+        );
         let version = |version: Version| (version.major(), version.minor(), version.patch());
         let mut rhi = Rhi::new(&dirk_rhi::RhiCreateInfo {
             engine_name: create_info.engine_name.to_string_lossy().as_ref(),
