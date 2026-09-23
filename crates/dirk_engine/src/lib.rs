@@ -166,8 +166,16 @@ pub struct Engine {
     frame_dispatcher: dirk_events::Dispatcher<events::BeginFrame>,
     exiting_dispatcher: dirk_events::Dispatcher<events::Exiting>,
     last_tick: Instant,
-    started: bool,
-    shutdown: bool,
+    lifecycle: EngineLifecycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EngineLifecycle {
+    Ready,
+    Starting,
+    Running,
+    Failed,
+    Shutdown,
 }
 
 impl Engine {
@@ -178,6 +186,10 @@ impl Engine {
     }
 
     /// Creates a new engine with default builder configuration.
+    ///
+    /// Operating-system signal handling is disabled by default. Applications
+    /// that own process-wide signal policy can enable it with
+    /// [`EngineBuilder::with_os_signals`].
     ///
     /// # Errors
     ///
@@ -194,26 +206,43 @@ impl Engine {
     ///
     /// Returns an error if a subsystem fails to start.
     pub fn start(&mut self) -> Result<()> {
-        if self.started {
-            return Ok(());
+        match self.lifecycle {
+            EngineLifecycle::Running => return Ok(()),
+            EngineLifecycle::Ready => {}
+            EngineLifecycle::Starting | EngineLifecycle::Failed | EngineLifecycle::Shutdown => {
+                return Err(Error::InvalidLifecycleState {
+                    operation: "start",
+                    status: self.status(),
+                });
+            }
         }
 
+        self.lifecycle = EngineLifecycle::Starting;
         self.state.set_status(EngineStatus::Starting);
 
-        for subsystem in &mut self.subsystems {
-            subsystem
-                .start(&self.handle)
-                .map_err(|source| Error::SubsystemFailedStart {
-                    name: subsystem.name(),
-                    source,
-                })?;
+        let result = (|| {
+            for subsystem in &mut self.subsystems {
+                subsystem
+                    .start(&self.handle)
+                    .map_err(|source| Error::SubsystemFailedStart {
+                        name: subsystem.name(),
+                        source,
+                    })?;
+            }
+
+            #[cfg(feature = "editor")]
+            self.editor.start(&self.handle)?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.lifecycle = EngineLifecycle::Failed;
+            self.state.set_status(EngineStatus::Error);
+            return result;
         }
 
-        #[cfg(feature = "editor")]
-        self.editor.start(&self.handle)?;
-
         self.last_tick = Instant::now();
-        self.started = true;
+        self.lifecycle = EngineLifecycle::Running;
         self.state.set_status(EngineStatus::Running);
         Ok(())
     }
@@ -230,8 +259,17 @@ impl Engine {
             self.tick().map_err(|err| Error::TickFailed(err.into()))?;
         }
 
-        self.shutdown()
-            .map_err(|err| Error::ShutdownFailed(err.into()))
+        let shutdown_result = self.shutdown();
+        if let Some(error) = self.take_error() {
+            let source = match shutdown_result {
+                Ok(()) => error,
+                Err(shutdown_error) => {
+                    error.context(format!("engine shutdown also failed: {shutdown_error:#}"))
+                }
+            };
+            return Err(Error::RuntimeFailed { source });
+        }
+        shutdown_result.map_err(|err| Error::ShutdownFailed(err.into()))
     }
 
     /// Starts the engine if needed, then advances it by one tick.
@@ -240,8 +278,17 @@ impl Engine {
     ///
     /// Returns an error if a subsystem fails to start or tick.
     pub fn tick(&mut self) -> Result<EngineStatus> {
-        if !self.started {
+        if self.lifecycle == EngineLifecycle::Ready {
             self.start()?;
+        }
+        if matches!(
+            self.lifecycle,
+            EngineLifecycle::Failed | EngineLifecycle::Shutdown
+        ) {
+            return Err(Error::InvalidLifecycleState {
+                operation: "tick",
+                status: self.status(),
+            });
         }
 
         self.process_commands();
@@ -258,10 +305,6 @@ impl Engine {
         self.frame_dispatcher.dispatch(events::BeginFrame(frame));
 
         let delta_time = self.capture_delta_time();
-
-        // TODO: renders too fast and semaphores have problem.
-        // remove when rendering takes longer
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         self.universe.tick(delta_time);
 
@@ -305,7 +348,7 @@ impl Engine {
     ///
     /// Returns an error if a subsystem fails to shut down.
     pub fn shutdown(&mut self) -> Result<()> {
-        if self.shutdown {
+        if self.lifecycle == EngineLifecycle::Shutdown {
             return Ok(());
         }
 
@@ -313,35 +356,55 @@ impl Engine {
             self.request_exit(None);
         }
 
-        #[cfg(feature = "editor")]
-        self.editor.shutdown(&self.handle)?;
+        self.lifecycle = EngineLifecycle::Shutdown;
 
-        while let Some(mut subsystem) = self.subsystems.pop() {
-            subsystem
-                .shutdown(&self.handle)
-                .map_err(|source| Error::SubsystemFailedShutdown {
-                    name: subsystem.name(),
-                    source,
-                })?;
+        let mut first_error = None;
+
+        #[cfg(feature = "editor")]
+        if let Err(err) = self.editor.shutdown(&self.handle) {
+            first_error = Some(err);
         }
 
+        while let Some(mut subsystem) = self.subsystems.pop() {
+            if let Err(source) = subsystem.shutdown(&self.handle) {
+                let err = Error::SubsystemFailedShutdown {
+                    name: subsystem.name(),
+                    source,
+                };
+                if first_error.is_none() {
+                    first_error = Some(err);
+                } else {
+                    error!("additional engine shutdown failure: {err:#}");
+                }
+            }
+        }
+
+        self.process_commands();
         self.signals.shutdown();
-        self.shutdown = true;
         self.state.set_status(EngineStatus::Exited);
-        Ok(())
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Takes a terminal error reported with [`EngineHandle::exit_with_error`].
+    ///
+    /// Call this after manually driving the engine with [`Engine::tick`] to
+    /// inspect the original failure. [`Engine::run`] returns it automatically.
+    pub fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.state.error.write().take()
     }
 
     fn request_exit(&mut self, error: Option<anyhow::Error>) {
-        if self.is_exiting() {
-            return;
-        }
+        let was_exiting = self.is_exiting();
 
         match error {
             Some(error) => self.state.set_error(error),
+            None if was_exiting => return,
             None => self.state.set_status(EngineStatus::ExitRequested),
         }
 
-        self.exiting_dispatcher.dispatch(events::Exiting);
+        if !was_exiting {
+            self.exiting_dispatcher.dispatch(events::Exiting);
+        }
     }
 
     fn process_commands(&mut self) {
@@ -368,7 +431,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        if !self.shutdown
+        if self.lifecycle != EngineLifecycle::Shutdown
             && let Err(err) = self.shutdown()
         {
             error!("engine shutdown failed: {err:#}");
@@ -494,15 +557,16 @@ impl EngineState {
     }
 
     fn set_error(&self, err: anyhow::Error) {
-        *self.error.write() = Some(err);
+        let mut reported_error = self.error.write();
+        if reported_error.is_none() {
+            *reported_error = Some(err);
+        } else {
+            error!("additional engine runtime failure: {err:#}");
+        }
         *self.status.write() = EngineStatus::Error;
     }
 
     fn set_status(&self, status: EngineStatus) {
-        debug_assert!(
-            !matches!(status, EngineStatus::Error),
-            "use EngineStatus::set_error to set an error status"
-        );
         *self.status.write() = status;
     }
 }

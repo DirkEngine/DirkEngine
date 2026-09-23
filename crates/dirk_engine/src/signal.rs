@@ -1,29 +1,34 @@
 //! Operating system signal integration.
 //!
 //! The signal handler installed by this module does not touch engine state from
-//! inside the OS signal context. `signal-hook` writes notifications into a pipe,
-//! a background thread forwards them to this subsystem, and the subsystem asks
-//! the engine to exit during the normal tick flow.
+//! inside the OS signal context. On Unix, `signal-hook` writes notifications
+//! into a pipe and a background thread forwards them to the engine. On Windows,
+//! signal-safe atomic flags are polled during the normal tick flow.
 //!
 //! This is intentionally scoped to terminal and service-manager workflows. On
 //! Unix-like systems this covers common termination signals such as `SIGINT`,
 //! `SIGTERM`, `SIGHUP`, and `SIGQUIT`. On Windows, `signal-hook` is limited to
 //! CRT signal emulation, so this covers `SIGINT` and `SIGBREAK` only. Console
 //! close, logoff, shutdown events, and normal game-window close events are
-//! handled elsewhere by platform/window integration.
+//! handled elsewhere by platform/window integration. Signal handling is opt-in
+//! because `signal-hook` cannot restore the host process's previous disposition
+//! after an engine is dropped.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
-    },
-    thread::{self, JoinHandle},
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver},
 };
 
-use signal_hook::{
-    iterator::{Handle as SignalIteratorHandle, Signals},
-    low_level::{emulate_default_handler, signal_name},
-};
+#[cfg(not(windows))]
+use std::thread::{self, JoinHandle};
+
+#[cfg(not(windows))]
+use signal_hook::iterator::{Handle as SignalIteratorHandle, Signals};
+#[cfg(not(windows))]
+use signal_hook::low_level::emulate_default_handler;
+use signal_hook::low_level::signal_name;
+#[cfg(windows)]
+use signal_hook::{SigId, flag, low_level::unregister};
 use tracing::{debug, error, info, warn};
 
 #[cfg(windows)]
@@ -46,11 +51,13 @@ impl OperatingSystemSignal {
     }
 }
 
+#[cfg(not(windows))]
 struct SignalListener {
     handle: SignalIteratorHandle,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(not(windows))]
 impl SignalListener {
     fn install(sender: mpsc::Sender<OperatingSystemSignal>) -> anyhow::Result<Self> {
         let mut signals = Signals::new(handled_signals())?;
@@ -98,6 +105,47 @@ impl SignalListener {
     }
 }
 
+#[cfg(not(windows))]
+impl Drop for SignalListener {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(windows)]
+struct SignalListener {
+    registrations: Vec<(i32, std::sync::Arc<AtomicBool>, SigId)>,
+}
+
+#[cfg(windows)]
+impl SignalListener {
+    fn install(_sender: mpsc::Sender<OperatingSystemSignal>) -> anyhow::Result<Self> {
+        let mut listener = Self {
+            registrations: Vec::new(),
+        };
+        for &signal in handled_signals() {
+            let requested = std::sync::Arc::new(AtomicBool::new(false));
+            let id = flag::register(signal, std::sync::Arc::clone(&requested))?;
+            listener.registrations.push((signal, requested, id));
+        }
+        Ok(listener)
+    }
+
+    fn received_signal(&self) -> Option<OperatingSystemSignal> {
+        self.registrations
+            .iter()
+            .find(|(_, requested, _)| requested.swap(false, Ordering::SeqCst))
+            .map(|(signal, _, _)| OperatingSystemSignal::new(*signal))
+    }
+
+    fn shutdown(&mut self) {
+        for (_, _, id) in self.registrations.drain(..) {
+            unregister(id);
+        }
+    }
+}
+
+#[cfg(windows)]
 impl Drop for SignalListener {
     fn drop(&mut self) {
         self.shutdown();
@@ -124,6 +172,14 @@ impl OperatingSystemSignals {
         })
     }
 
+    pub(crate) fn disabled() -> Self {
+        let (_sender, receiver) = mpsc::channel();
+        Self {
+            receiver,
+            listener: None,
+        }
+    }
+
     #[cfg(test)]
     fn from_receiver(receiver: Receiver<OperatingSystemSignal>) -> Self {
         Self {
@@ -134,8 +190,7 @@ impl OperatingSystemSignals {
 
     #[cfg(test)]
     pub(crate) fn empty_for_tests() -> Self {
-        let (_sender, receiver) = mpsc::channel();
-        Self::from_receiver(receiver)
+        Self::disabled()
     }
 
     #[cfg(test)]
@@ -146,7 +201,11 @@ impl OperatingSystemSignals {
     }
 
     pub(crate) fn exit_requested(&mut self) -> bool {
-        if let Ok(signal) = self.receiver.try_recv() {
+        let received = self.receiver.try_recv().ok();
+        #[cfg(windows)]
+        let received = received.or_else(|| self.listener.as_ref()?.received_signal());
+
+        if let Some(signal) = received {
             warn!(
                 signal = signal.number,
                 name = signal.name(),
