@@ -24,7 +24,7 @@ pub struct PlatformHandler {
     main_window_created: bool,
     /// Error raised inside a winit callback, surfaced by the next pump.
     error: Option<anyhow::Error>,
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     shutdown_requested: bool,
     windows: PlatformWindows,
 
@@ -47,7 +47,7 @@ impl PlatformHandler {
         Self {
             main_window_created: false,
             error: None,
-            #[cfg(platform_macos)]
+            #[cfg(target_os = "macos")]
             shutdown_requested: false,
             windows,
             modifiers: ModifiersState::default(),
@@ -83,7 +83,7 @@ impl PlatformHandler {
         debug!("Closed {count} window(s) during platform shutdown");
     }
 
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     pub fn request_shutdown(&mut self) {
         self.shutdown_requested = true;
     }
@@ -359,7 +359,7 @@ impl ApplicationHandler for PlatformHandler {
         self.dispatch_input_event(id, &event);
     }
 
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.shutdown_requested {
             event_loop.exit();
