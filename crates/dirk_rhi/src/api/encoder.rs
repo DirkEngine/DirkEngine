@@ -698,10 +698,23 @@ impl<B: Backend> RenderPass<'_, B> {
         groups: &[&GpuBindGroup<B>],
         dynamic_offsets: &[u64],
     ) -> Result<()> {
+        let capabilities = self.encoder.device.backend.capabilities();
+        let mut offsets = dynamic_offsets.iter();
         for (index, group) in groups.iter().enumerate() {
-            if layout.info().get(first_group as usize + index) != Some(&group.info().layout) {
+            let slot = first_group
+                .checked_add(u32::try_from(index).map_err(|_| Ir::OutOfRange)?)
+                .ok_or(Ir::OutOfRange)?;
+            if layout.info().get(slot as usize) != Some(&group.info().layout) {
                 return Err(Ir::Mismatch.into());
             }
+            group
+                .info()
+                .validate_dynamic_offsets(slot, &mut offsets, capabilities)?;
+        }
+        if offsets.next().is_some() {
+            return Err(Ir::Mismatch
+                .with_detail("too many dynamic buffer offsets for bound groups")
+                .into());
         }
         let native: Vec<_> = groups.iter().map(|g| g.raw()).collect();
         let result = unsafe {

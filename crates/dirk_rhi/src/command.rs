@@ -1,8 +1,3 @@
-#![allow(
-    clippy::missing_errors_doc,
-    reason = "command recording errors are backend-dependent and use the crate Error contract"
-)]
-
 //! Command recording is currently focused on graphics and transfer work.
 //!
 //! Compute queue and shader types are part of the shared resource vocabulary,

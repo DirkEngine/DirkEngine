@@ -61,6 +61,45 @@ pub struct GroupMetadata {
     /// Implemented layout.
     pub layout: Vec<crate::BindGroupLayoutEntry>,
 }
+impl GroupMetadata {
+    /// Consumes this group's offsets in ascending layout-binding order.
+    pub(super) fn validate_dynamic_offsets<'a>(
+        &self,
+        group: u32,
+        offsets: &mut impl Iterator<Item = &'a u64>,
+        capabilities: crate::Capabilities,
+    ) -> crate::Result<()> {
+        for entry in &self.layout {
+            let alignment = match entry.ty {
+                crate::BindingType::UniformBuffer {
+                    dynamic_offset: true,
+                } => capabilities.min_uniform_buffer_offset_alignment,
+                crate::BindingType::StorageBuffer {
+                    dynamic_offset: true,
+                    ..
+                } => capabilities.min_storage_buffer_offset_alignment,
+                _ => continue,
+            }
+            .max(1);
+            let offset = offsets.next().ok_or_else(|| {
+                crate::InvalidResourceKind::Mismatch.with_detail(format!(
+                    "missing dynamic offset for group {group} binding {}",
+                    entry.binding
+                ))
+            })?;
+            if !offset.is_multiple_of(alignment) {
+                return Err(crate::InvalidResourceKind::Mismatch
+                    .with_detail(format!(
+                        "dynamic offset for group {group} binding {} must be aligned to {alignment} bytes",
+                        entry.binding
+                    ))
+                    .into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Immutable pipeline render compatibility.
 #[derive(Clone)]
 pub struct PipelineMetadata {
@@ -113,5 +152,60 @@ impl<B: Backend> GpuBuffer<B> {
             return Err(Ir::OutOfRange.into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dynamic_offset_tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_offsets_follow_sorted_bindings_and_alignment() {
+        let group = GroupMetadata {
+            layout: vec![
+                crate::BindGroupLayoutEntry {
+                    binding: 2,
+                    ty: crate::BindingType::StorageBuffer {
+                        read_only: true,
+                        dynamic_offset: true,
+                    },
+                    visibility: crate::ShaderStages::FRAGMENT,
+                },
+                crate::BindGroupLayoutEntry {
+                    binding: 7,
+                    ty: crate::BindingType::UniformBuffer {
+                        dynamic_offset: true,
+                    },
+                    visibility: crate::ShaderStages::VERTEX,
+                },
+            ],
+        };
+        let capabilities = crate::Capabilities {
+            limits: crate::Limits::default(),
+            depth_bias_clamp: false,
+            max_sampler_anisotropy: 1,
+            min_uniform_buffer_offset_alignment: 256,
+            min_storage_buffer_offset_alignment: 16,
+            buffer_copy_offset_alignment: 4,
+            buffer_copy_row_pitch_alignment: 4,
+            dedicated_compute_queue: false,
+            dedicated_copy_queue: false,
+        };
+
+        assert!(
+            group
+                .validate_dynamic_offsets(0, &mut [16, 256].iter(), capabilities)
+                .is_ok()
+        );
+        assert!(
+            group
+                .validate_dynamic_offsets(0, &mut [256, 16].iter(), capabilities)
+                .is_err()
+        );
+        assert!(
+            group
+                .validate_dynamic_offsets(0, &mut [16].iter(), capabilities)
+                .is_err()
+        );
     }
 }
