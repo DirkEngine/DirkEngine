@@ -9,6 +9,7 @@ use crate::{physical_device::QueueFamilyIndices, resources::sync::Fence};
 pub enum QueueType {
     Graphics,
     Transfer,
+    #[expect(dead_code, reason = "legacy compute pool has no current caller")]
     Compute,
 }
 
