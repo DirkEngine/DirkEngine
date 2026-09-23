@@ -63,21 +63,6 @@ impl EditorServices {
         context: &EditorRenderContext<'_>,
         universe: &Universe,
     ) -> anyhow::Result<()> {
-        self.state
-            .lock()
-            .render_menu_for_tests(title, ui, context, universe)
-    }
-}
-
-impl EditorServicesState {
-    #[cfg(test)]
-    fn render_menu_for_tests(
-        &mut self,
-        title: &str,
-        ui: &mut egui::Ui,
-        context: &EditorRenderContext<'_>,
-        universe: &Universe,
-    ) -> anyhow::Result<()> {
         use std::sync::mpsc;
 
         use anyhow::Context;
@@ -86,7 +71,13 @@ impl EditorServicesState {
 
         let (editor_commands, command_receiver) = mpsc::channel();
         let editor_commands = EditorCommandSender::new(editor_commands);
-        let windows = self.windows();
+        let (windows, menu) = {
+            let state = self.state.lock();
+            (
+                state.windows(),
+                state.menus.iter().find(|menu| menu.title == title).cloned(),
+            )
+        };
         let mut menu_context = EditorMenuContext::new(&windows, editor_commands.clone());
         let mut ui_context = EditorUiContext {
             delta_time: context.delta_time(),
@@ -95,17 +86,22 @@ impl EditorServicesState {
             universe,
         };
 
-        let Some(menu) = self.menus.iter_mut().find(|menu| menu.title == title) else {
+        let Some(menu) = menu else {
             return Err(anyhow::anyhow!("menu `{title}` is not registered"));
         };
 
         menu.menu
+            .lock()
             .ui(ui, &mut ui_context, &mut menu_context)
             .with_context(|| format!("menu `{title}` failed to render"))?;
-        self.apply_commands(command_receiver.try_iter());
+        self.state
+            .lock()
+            .apply_commands(command_receiver.try_iter());
         Ok(())
     }
+}
 
+impl EditorServicesState {
     #[cfg(test)]
     fn close_window_tab(&mut self, id: EditorWindowId) {
         if let Some(state) = self.window_states.get_mut(&id) {
@@ -477,6 +473,159 @@ fn open_windows_render_through_dock_tabs() -> anyhow::Result<()> {
 
     assert_eq!(*calls.lock(), vec!["window"]);
     Ok(())
+}
+
+#[test]
+fn window_callback_can_query_and_mutate_services() -> anyhow::Result<()> {
+    let services = EditorServices::new();
+    let callback_services = services.clone();
+    let observed = Arc::new(Mutex::new(None));
+    let callback_observed = Arc::clone(&observed);
+    services.add_window_fn(descriptor("source", true), move |_ui, _context| {
+        *callback_observed.lock() = Some(callback_services.window_count());
+        callback_services.add_window_fn(descriptor("added", false), |_ui, _context| Ok(()));
+        Ok(())
+    });
+
+    render_services(&services, &Universe::builder().build())?;
+
+    assert_eq!(*observed.lock(), Some(1));
+    assert_eq!(services.window_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn menu_callback_can_query_services() -> anyhow::Result<()> {
+    let services = EditorServices::new();
+    let callback_services = services.clone();
+    let observed = Arc::new(Mutex::new(None));
+    let callback_observed = Arc::clone(&observed);
+    services.add_menu_fn(
+        EditorMenuDescriptor {
+            title: "query".to_owned(),
+        },
+        move |_ui, _context, _editor| {
+            *callback_observed.lock() = Some(callback_services.menu_count());
+            Ok(())
+        },
+    );
+
+    let ctx = egui::Context::default();
+    ctx.begin_pass(egui::RawInput::default());
+    let handle = build_context().handle().clone();
+    let frame = EditorRenderContext::new(0.016, &handle);
+    let mut result = Ok(());
+    egui::CentralPanel::default().show(&ctx, |ui| {
+        result = services.render_menu_for_tests("query", ui, &frame, &Universe::builder().build());
+    });
+    let _ = ctx.end_pass();
+    result?;
+    assert_eq!(*observed.lock(), Some(1));
+    Ok(())
+}
+
+#[test]
+fn editor_shutdown_attempts_all_callbacks_after_failure() {
+    struct ShutdownRecorder {
+        name: &'static str,
+        fail: bool,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl EditorSubsystem for ShutdownRecorder {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn shutdown(
+            &mut self,
+            _engine: &crate::EngineHandle,
+            _editor: &EditorServices,
+        ) -> anyhow::Result<()> {
+            self.events.lock().push(self.name);
+            anyhow::ensure!(!self.fail, "shutdown failed");
+            Ok(())
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subsystems: Vec<Box<dyn EditorSubsystem>> = [("first", false), ("second", true)]
+        .into_iter()
+        .map(|(name, fail)| {
+            Box::new(ShutdownRecorder {
+                name,
+                fail,
+                events: Arc::clone(&events),
+            }) as Box<dyn EditorSubsystem>
+        })
+        .collect();
+    let mut editor = EditorRuntime::new(EditorServices::new(), subsystems);
+    let handle = build_context().handle().clone();
+
+    assert!(matches!(
+        editor.shutdown(&handle),
+        Err(Error::EditorSubsystemFailedShutdown { name: "second", .. })
+    ));
+    assert_eq!(*events.lock(), vec!["second", "first"]);
+}
+
+#[test]
+fn same_title_windows_have_distinct_widget_ids() -> anyhow::Result<()> {
+    let services = EditorServices::new();
+    let ids = Arc::new(Mutex::new(Vec::new()));
+    for category in ["left", "right"] {
+        let ids = Arc::clone(&ids);
+        services.add_window_fn(
+            EditorWindowDescriptor {
+                title: "same title".to_owned(),
+                category: category.to_owned(),
+                default_open: true,
+                show_in_list: true,
+            },
+            move |ui, _context| {
+                ids.lock().push(ui.id());
+                Ok(())
+            },
+        );
+    }
+
+    render_services(&services, &Universe::builder().build())?;
+
+    let ids = ids.lock();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    Ok(())
+}
+
+#[test]
+fn adding_new_category_with_only_floating_tabs_keeps_main_surface_valid() {
+    let services = EditorServices::new();
+    let first = services.add_window_fn(
+        EditorWindowDescriptor {
+            category: "first".to_owned(),
+            ..descriptor("floating", true)
+        },
+        |_ui, _context| Ok(()),
+    );
+    {
+        let mut state = services.state.lock();
+        let tab = state.dock_state.find_tab(&first).expect("first tab exists");
+        state.dock_state.remove_tab(tab);
+        state.dock_state.add_window(vec![first]);
+        assert!(state.dock_state.main_surface().is_empty());
+    }
+
+    let second = services.add_window_fn(
+        EditorWindowDescriptor {
+            category: "second".to_owned(),
+            ..descriptor("main", true)
+        },
+        |_ui, _context| Ok(()),
+    );
+
+    assert!(services.dock_contains_window_for_tests(first));
+    assert!(services.dock_contains_window_for_tests(second));
+    assert!(!services.state.lock().dock_state.main_surface().is_empty());
 }
 
 #[test]
