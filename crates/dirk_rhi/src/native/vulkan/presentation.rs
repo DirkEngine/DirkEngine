@@ -66,8 +66,14 @@ impl VulkanSurface {
                 context.families.present,
                 raw,
             )
-        }
-        .map_err(vk_error)?;
+        };
+        let supported = match supported {
+            Ok(supported) => supported,
+            Err(error) => {
+                unsafe { context.surface_loader.destroy_surface(raw, None) };
+                return Err(vk_error(error));
+            }
+        };
         if !supported {
             unsafe { context.surface_loader.destroy_surface(raw, None) };
             return Err(Error::Backend(anyhow::anyhow!(
