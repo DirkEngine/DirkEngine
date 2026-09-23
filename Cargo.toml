@@ -95,24 +95,27 @@ thiserror = "2"
 anyhow = "1"
 cargo_metadata = "0.21"
 
-# Engine modules
-dirk_build    = { version = "0.1.0", path = "crates/dirk_build" }
-dirk_threads  = { version = "0.1.0", path = "crates/dirk_threads" }
-dirk_utils    = { version = "0.1.0", path = "crates/dirk_utils" }
-dirk_events   = { version = "0.1.0", path = "crates/dirk_events" }
-dirk_proc     = { version = "0.1.0", path = "crates/dirk_proc" }
-dirk_platform = { version = "0.1.0", path = "crates/dirk_platform" }
-dirk_input    = { version = "0.1.0", path = "crates/dirk_input" }
-dirk_rhi      = { version = "0.1.0", path = "crates/dirk_rhi" }
-dirk_renderer = { version = "0.1.0", path = "crates/dirk_renderer" }
-dirk_assets   = { version = "0.1.0", path = "crates/dirk_assets" }
-dirk_world    = { version = "0.1.0", path = "crates/dirk_world" }
-dirk_universe = { version = "0.1.0", path = "crates/dirk_universe" }
-dirk_player   = { version = "0.1.0", path = "crates/dirk_player" }
-dirk_engine   = { version = "0.1.0", path = "crates/dirk_engine" }
-dirk_editor   = { version = "0.1.0", path = "crates/dirk_editor" }
+bytemuck = { version = "1", features = ["derive"] }
 
-dirk_shaders  = { version = "0.1.0", path = "crates/dirk_shaders" }
+# Engine modules
+dirk_build        = { version = "0.1.0", path = "crates/dirk_build" }
+dirk_threads      = { version = "0.1.0", path = "crates/dirk_threads" }
+dirk_utils        = { version = "0.1.0", path = "crates/dirk_utils" }
+dirk_events       = { version = "0.1.0", path = "crates/dirk_events" }
+dirk_proc         = { version = "0.1.0", path = "crates/dirk_proc" }
+dirk_platform     = { version = "0.1.0", path = "crates/dirk_platform" }
+dirk_input        = { version = "0.1.0", path = "crates/dirk_input" }
+dirk_render_utils = { version = "0.1.0", path = "crates/dirk_render_utils" }
+dirk_rhi          = { version = "0.1.0", path = "crates/dirk_rhi" }
+dirk_renderer     = { version = "0.1.0", path = "crates/dirk_renderer" }
+dirk_assets       = { version = "0.1.0", path = "crates/dirk_assets" }
+dirk_world        = { version = "0.1.0", path = "crates/dirk_world" }
+dirk_universe     = { version = "0.1.0", path = "crates/dirk_universe" }
+dirk_player       = { version = "0.1.0", path = "crates/dirk_player" }
+dirk_engine       = { version = "0.1.0", path = "crates/dirk_engine" }
+dirk_editor       = { version = "0.1.0", path = "crates/dirk_editor" }
+
+dirk_shaders      = { version = "0.1.0", path = "crates/dirk_shaders" }
 
 # Main Engine Dependencies
 winit = "0.31.0-beta.2"
