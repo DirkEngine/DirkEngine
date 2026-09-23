@@ -2,20 +2,20 @@
 //!
 //! [`Component`]: dirk_universe::components::Component
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::{HashMap, HashSet};
 
-use dirk_assets::{AssetLoad, AssetRegistry, Model};
+use dirk_assets::{AssetHandle, AssetLoad, AssetRegistry, Handle, Model};
 use dirk_universe::{
     CommandBuffer, Entity, Universe, changes::ComponentChange, components::Component,
     systems::System,
 };
 use glam::{Mat4, Quat, Vec3};
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Marks an entity as having a renderable mesh.
 ///
-/// The `model` field is resolved at render time against the engine's asset
-/// registry. If no matching asset is found the entity is silently skipped.
+/// The `model` field is resolved by [`ModelUploadSystem`] against the engine's
+/// asset registry. Changing it requests the new model on the next tick.
 ///
 /// # Examples
 /// ```
@@ -27,14 +27,7 @@ use tracing::warn;
 #[derive(Debug, Clone, Component)]
 pub struct Renderable {
     /// Asset-registry key for the mesh to render (e.g. `"meshes/cube.glb"`).
-    pub model: dirk_assets::AssetHandle,
-    /// This is a tokio `JoinHandle` under the hood. This keeps the `Handle<T>`
-    /// alive while the `JoinHandle` is alive. This means that this field
-    /// is stopping the asset form being unloaded by the renderer.
-    ///
-    /// Please do not try to await/poll this future, this would drop the handle
-    /// and lead the asset to disapear on the renderer
-    handle: Option<Arc<AssetLoad<Model>>>,
+    pub model: AssetHandle,
 }
 
 impl Renderable {
@@ -42,59 +35,96 @@ impl Renderable {
     ///
     /// [`AssetHandle`]: dirk_assets::AssetHandle
     #[must_use]
-    pub fn new(model: dirk_assets::AssetHandle) -> Self {
-        Self {
-            model,
-            handle: None,
-        }
+    pub fn new(model: AssetHandle) -> Self {
+        Self { model }
     }
 }
 
 /// Loads models referenced by added or updated [`Renderable`] components.
 pub struct ModelUploadSystem {
     assets: AssetRegistry,
+    requests: HashMap<Entity, ModelRequest>,
+}
+
+struct ModelRequest {
+    model: AssetHandle,
+    status: ModelLoad,
+}
+
+enum ModelLoad {
+    Pending(AssetLoad<Model>),
+    Ready { _handle: Handle<Model> },
+    Failed,
+}
+
+impl ModelRequest {
+    fn new(assets: &AssetRegistry, model: AssetHandle) -> Self {
+        let status = ModelLoad::Pending(assets.load_asset::<Model>(&model));
+        Self { model, status }
+    }
+
+    fn poll(&mut self, entity: Entity) {
+        let result = match &mut self.status {
+            ModelLoad::Pending(load) => load.try_poll(),
+            ModelLoad::Ready { .. } | ModelLoad::Failed => None,
+        };
+        if let Some(result) = result {
+            self.status = match result {
+                Ok(handle) => ModelLoad::Ready { _handle: handle },
+                Err(error) => {
+                    error!(?entity, asset = %self.model, error = ?error, "failed to load model");
+                    ModelLoad::Failed
+                }
+            };
+        }
+    }
 }
 
 impl ModelUploadSystem {
     /// Creates a new [`ModelUploadSystem`] using the provided [`AssetRegistry`].
     #[must_use]
     pub fn new(assets: AssetRegistry) -> Self {
-        Self { assets }
+        Self {
+            assets,
+            requests: HashMap::new(),
+        }
     }
 }
 
 impl System for ModelUploadSystem {
-    fn run(&mut self, cmd: &mut CommandBuffer, universe: &Universe, _: f64) {
+    fn run(&mut self, _: &mut CommandBuffer, universe: &Universe, _: f64) {
         let mut changed = HashSet::new();
         for change in universe.component_changes::<Renderable>() {
-            let (ComponentChange::Added { entity, .. } | ComponentChange::Updated { entity, .. }) =
-                change
-            else {
-                continue;
+            let entity = match change {
+                ComponentChange::Added { entity, .. }
+                | ComponentChange::Updated { entity, .. }
+                | ComponentChange::Removed { entity, .. } => entity,
             };
-            // Load only the final live value, once, even after several updates.
-            if changed.insert(entity)
-                && let Some(component) = universe.component::<Renderable>(entity)
-            {
-                self.load(cmd, entity, component);
+            changed.insert(entity);
+        }
+
+        // Reconcile once against the final component value, even if it changed
+        // several times in this command batch.
+        for entity in changed {
+            if let Some(component) = universe.component::<Renderable>(entity) {
+                if self
+                    .requests
+                    .get(&entity)
+                    .is_none_or(|request| request.model != component.model)
+                {
+                    self.requests.insert(
+                        entity,
+                        ModelRequest::new(&self.assets, component.model.clone()),
+                    );
+                }
+            } else {
+                self.requests.remove(&entity);
             }
         }
-    }
-}
 
-impl ModelUploadSystem {
-    fn load(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Renderable) {
-        if component.handle.is_some() {
-            return;
+        for (entity, request) in &mut self.requests {
+            request.poll(*entity);
         }
-        let handle = self.assets.load_asset::<Model>(&component.model);
-        cmd.set_component(
-            entity,
-            Renderable {
-                handle: Some(Arc::new(handle)),
-                ..component.clone()
-            },
-        );
     }
 }
 
