@@ -143,7 +143,7 @@ impl Drop for Platform {
         // AppKit sends window-destruction callbacks while closing native
         // windows. Ask winit to close them while its handler is still
         // registered, then release the Rust window wrappers.
-        #[cfg(platform_macos)]
+        #[cfg(target_os = "macos")]
         {
             self.handler.request_shutdown();
             self.event_loop
@@ -151,7 +151,7 @@ impl Drop for Platform {
         }
 
         self.handler.shutdown();
-        #[cfg(not(platform_macos))]
+        #[cfg(not(target_os = "macos"))]
         {
             // On other platforms, process the window destruction events
             // before tearing down the event loop.
