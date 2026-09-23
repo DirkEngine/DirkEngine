@@ -159,6 +159,10 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+    /// Text committed by the platform input method, preserving case and layout.
+    Text(String),
+    /// Composition updates from the platform input method.
+    Ime(ImeEvent),
     /// The pointer moved.
     PointerMoved {
         /// Current clamped normalized position.
@@ -196,6 +200,19 @@ pub enum InputEvent {
     /// The input region gained or lost keyboard focus. Losing focus releases
     /// held input even when the OS does not send matching release events.
     FocusChanged(bool),
+}
+
+/// Platform-independent input method event.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ImeEvent {
+    /// Composition started.
+    Enabled,
+    /// Current composition candidate.
+    Preedit(String),
+    /// Final composition text.
+    Commit(String),
+    /// Composition ended.
+    Disabled,
 }
 
 /// A raw input that can activate an [`InputAction`].
@@ -344,6 +361,8 @@ impl InputState {
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. }
             | InputEvent::FocusChanged(true)
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
             | InputEvent::ModifiersChanged(_) => {}
             // release held keys
             InputEvent::PointerLeft | InputEvent::FocusChanged(false) => {
