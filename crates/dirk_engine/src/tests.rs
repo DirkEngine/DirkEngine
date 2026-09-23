@@ -118,6 +118,63 @@ impl Subsystem for ShutdownFailingSubsystem {
     }
 }
 
+struct RecordedSubsystem {
+    name: &'static str,
+    events: Arc<Mutex<Vec<&'static str>>>,
+    fail_start: bool,
+    fail_shutdown: bool,
+}
+
+impl Subsystem for RecordedSubsystem {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn start(&mut self, _handle: &EngineHandle) -> anyhow::Result<()> {
+        self.events.lock().push(self.name);
+        anyhow::ensure!(!self.fail_start, "start failed");
+        Ok(())
+    }
+
+    fn shutdown(&mut self, _handle: &EngineHandle) -> anyhow::Result<()> {
+        self.events.lock().push(self.name);
+        anyhow::ensure!(!self.fail_shutdown, "shutdown failed");
+        Ok(())
+    }
+}
+
+struct RuntimeFailingSubsystem;
+
+impl Subsystem for RuntimeFailingSubsystem {
+    fn name(&self) -> &'static str {
+        "runtime-failing"
+    }
+
+    fn tick(
+        &mut self,
+        _delta_time: f64,
+        handle: &EngineHandle,
+        _universe: &Universe,
+    ) -> anyhow::Result<()> {
+        handle.exit();
+        handle.exit_with_error(anyhow::anyhow!("runtime fault"));
+        Ok(())
+    }
+}
+
+struct PartiallyFailingPlugin;
+
+impl EnginePlugin for PartiallyFailingPlugin {
+    fn name(&self) -> &'static str {
+        "partially-failing"
+    }
+
+    fn build(&self, builder: &mut EngineBuilder) -> anyhow::Result<()> {
+        builder.add_subsystem(|_| Ok(StartFailingSubsystem));
+        anyhow::bail!("plugin setup failed")
+    }
+}
+
 struct PublishingSubsystem {
     events: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -271,8 +328,7 @@ fn engine_with_subsystems_and_signals(
         frame_dispatcher: events.register(),
         exiting_dispatcher: events.register(),
         last_tick: Instant::now(),
-        started: false,
-        shutdown: false,
+        lifecycle: EngineLifecycle::Ready,
     }
 }
 
@@ -310,6 +366,101 @@ fn registering_same_plugin_twice_only_builds_it_once() -> Result<()> {
 
     assert_eq!(builds.load(Ordering::Relaxed), 1);
     Ok(())
+}
+
+#[test]
+fn failed_plugin_registration_poison_builder() {
+    let mut builder = EngineBuilder::new();
+    assert!(builder.with_plugin(PartiallyFailingPlugin).is_err());
+    assert!(matches!(
+        builder.with_plugin(PartiallyFailingPlugin),
+        Err(Error::PluginBuilderPoisoned { .. })
+    ));
+    assert!(matches!(
+        builder.build(),
+        Err(Error::PluginBuilderPoisoned { .. })
+    ));
+}
+
+#[test]
+fn runtime_error_is_returned_after_shutdown() {
+    let engine = engine_with_subsystems(vec![Box::new(RuntimeFailingSubsystem)]);
+    let err = engine.run().expect_err("runtime failure must reach caller");
+    assert!(err.to_string().contains("runtime failure"));
+    assert!(format!("{err:#}").contains("runtime fault"));
+}
+
+#[test]
+fn manually_driven_engine_can_take_runtime_error() -> Result<()> {
+    let mut engine = engine_with_subsystems(vec![Box::new(RuntimeFailingSubsystem)]);
+    assert_eq!(engine.tick()?, EngineStatus::Error);
+    let err = engine
+        .take_error()
+        .expect("runtime error must remain available");
+    assert_eq!(err.to_string(), "runtime fault");
+    engine.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn failed_start_cannot_repeat_subsystem_start() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = engine_with_subsystems(vec![Box::new(RecordedSubsystem {
+        name: "start-once",
+        events: Arc::clone(&events),
+        fail_start: true,
+        fail_shutdown: false,
+    })]);
+    assert!(engine.start().is_err());
+    assert!(matches!(
+        engine.start(),
+        Err(Error::InvalidLifecycleState { .. })
+    ));
+    assert!(matches!(
+        engine.tick(),
+        Err(Error::InvalidLifecycleState { .. })
+    ));
+    assert_eq!(*events.lock(), vec!["start-once"]);
+}
+
+#[test]
+fn shutdown_before_start_cannot_restart_engine() -> Result<()> {
+    let mut engine = engine_with_subsystems(Vec::new());
+    engine.shutdown()?;
+    assert_eq!(engine.status(), EngineStatus::Exited);
+    assert!(matches!(
+        engine.tick(),
+        Err(Error::InvalidLifecycleState { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn shutdown_attempts_every_subsystem_after_error() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subsystems: Vec<Box<dyn Subsystem>> =
+        [("first", false), ("second", true), ("third", false)]
+            .into_iter()
+            .map(|(name, fail_shutdown)| {
+                Box::new(RecordedSubsystem {
+                    name,
+                    events: Arc::clone(&events),
+                    fail_start: false,
+                    fail_shutdown,
+                }) as Box<dyn Subsystem>
+            })
+            .collect();
+    let mut engine = engine_with_subsystems(subsystems);
+    engine.start().expect("start succeeds");
+    assert!(matches!(
+        engine.shutdown(),
+        Err(Error::SubsystemFailedShutdown { name: "second", .. })
+    ));
+    assert_eq!(
+        *events.lock(),
+        vec!["first", "second", "third", "third", "second", "first"]
+    );
+    assert_eq!(engine.status(), EngineStatus::Exited);
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let mut builder = dirk_engine::Engine::builder();
+    builder.with_os_signals(true);
 
     match cli.verbose {
         0 => {}

@@ -11,6 +11,35 @@ use dirk_engine::{Engine, EngineBuilder, EngineHandle, EnginePlugin, Subsystem};
 
 const CHILD_ENV: &str = "DIRK_ENGINE_SIGNAL_TEST_CHILD";
 const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
+
+#[test]
+fn default_engine_does_not_change_host_signal_disposition() -> anyhow::Result<()> {
+    let child = Command::new(std::env::current_exe()?)
+        .env(CHILD_ENV, "1")
+        .arg("--exact")
+        .arg("signal_test_child_drops_default_engine")
+        .spawn()?;
+
+    thread::sleep(Duration::from_secs(1));
+    send_signal(&child, "TERM")?;
+    let status = wait_for_exit(child, Duration::from_secs(5))?;
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(SIGTERM));
+    Ok(())
+}
+
+#[test]
+fn signal_test_child_drops_default_engine() -> anyhow::Result<()> {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return Ok(());
+    }
+
+    drop(Engine::new()?);
+    loop {
+        thread::sleep(Duration::from_secs(1));
+    }
+}
 
 struct BlockingShutdownPlugin;
 
@@ -75,6 +104,7 @@ fn signal_test_child_blocks_during_shutdown() -> anyhow::Result<()> {
     }
 
     let mut builder = Engine::builder();
+    builder.with_os_signals(true);
     builder.with_log_level(piquel_log::LogLevel::Error);
     builder.with_plugin(BlockingShutdownPlugin)?;
 
