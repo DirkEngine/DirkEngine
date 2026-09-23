@@ -96,15 +96,18 @@ fn write_model_fixture(dir: &Path, name: &str) -> PathBuf {
 }
 
 fn wait_for_load<T: Asset>(mut load: AssetLoad<T>) -> Result<Handle<T>> {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
         if let Some(result) = load.try_poll() {
             return result;
         }
 
+        assert!(
+            std::time::Instant::now() < deadline,
+            "asset load did not complete"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-
-    panic!("asset load did not complete");
 }
 
 /// A minimal `Asset` implementation used only in tests that need a typed
@@ -868,6 +871,7 @@ mod registry {
             wait_for_load(registry.load_asset::<Model>(&absent)),
             Err(Error::NotFound(path)) if path == "absent.dirkasset"
         ));
+        assert!(registry.inner.load_locks.lock().is_empty());
     }
 
     #[test]

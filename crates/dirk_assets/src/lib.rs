@@ -571,25 +571,26 @@ impl AssetRegistry {
             return Err(Error::TypeMismatch(handle.raw().to_owned()));
         }
 
-        let load_lock = self
-            .inner
-            .load_locks
-            .lock()
-            .entry(handle.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _load_guard = load_lock.lock();
-
-        if let Some(typed_handle) = self.cached_handle::<T>(&handle) {
-            return Ok(typed_handle);
-        }
-
         let canonical_handle = self
             .inner
             .assets
             .get_key_value(&handle)
             .map(|(key, _)| key.clone())
             .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
+
+        let load_lock = self
+            .inner
+            .load_locks
+            .lock()
+            .entry(canonical_handle.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _load_guard = load_lock.lock();
+
+        if let Some(typed_handle) = self.cached_handle::<T>(&canonical_handle) {
+            return Ok(typed_handle);
+        }
+
         let config = self
             .asset_config::<T>(&canonical_handle)
             .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
