@@ -29,6 +29,11 @@ impl Allocator {
         Self::default()
     }
 
+    /// A builder can be merged only while no handle or queued buffer from it survives.
+    pub(crate) fn is_unique(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Allocates a new [`WorldId`].
     #[must_use]
     pub fn allocate_world(&self) -> WorldId {

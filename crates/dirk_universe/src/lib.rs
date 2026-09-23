@@ -396,9 +396,22 @@ impl UniverseBuilder {
         self
     }
 
-    /// Will combine the `other` [`UniverseBuilder`] with this one.
+    /// Appends the worlds and systems configured on `other`.
+    ///
+    /// Only configuration can be merged. Handles from independent builders
+    /// allocate overlapping IDs and submit to different queues, so `other`
+    /// must not have issued a handle or command buffer that is still alive.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `other` has a live handle or a queued command buffer. Build
+    /// it separately instead, or submit commands through this builder's handle.
     #[must_use]
     pub fn with_other(mut self, other: Self) -> Self {
+        assert!(
+            other.handle.allocator.is_unique(),
+            "cannot merge a UniverseBuilder with issued handles or queued commands"
+        );
         for world in other.worlds {
             self.worlds.push(world);
         }
