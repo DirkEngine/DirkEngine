@@ -24,13 +24,41 @@ pub(crate) struct Viewport {
     pub world: Option<WorldId>,
     settings: ViewportSettings,
     output: Image,
+    attachments: [ViewportAttachments; crate::MAX_FRAMES_IN_FLIGHT],
+    depth_format: TextureFormat,
+    samples: SampleCount,
     output_state: dirk_rhi::ImageState,
     output_has_rendered: bool,
 }
 
+struct ViewportAttachments {
+    depth: Image,
+    color: Option<Image>,
+}
+
 impl Viewport {
-    pub fn new(device: &Rhi, player: PlayerId, settings: ViewportSettings) -> Result<Self> {
+    pub fn new(
+        device: &Rhi,
+        player: PlayerId,
+        settings: ViewportSettings,
+        properties: crate::RendererProperties,
+    ) -> Result<Self> {
         let settings = settings.clamped();
+        let output = Self::create_output(device, &settings)?;
+        let attachments = [
+            Self::create_attachments(
+                device,
+                &settings,
+                properties.depth_format,
+                properties.msaa_samples,
+            )?,
+            Self::create_attachments(
+                device,
+                &settings,
+                properties.depth_format,
+                properties.msaa_samples,
+            )?,
+        ];
 
         let camera_ubo = [UniformBuffer::new(device)?, UniformBuffer::new(device)?];
         let allocator = BindingLayout::<SceneSet>::new(device)?;
@@ -55,7 +83,10 @@ impl Viewport {
             camera: None,
             world: None,
             settings,
-            output: Self::create_output(device, &settings)?,
+            output,
+            attachments,
+            depth_format: properties.depth_format,
+            samples: properties.msaa_samples,
             output_state: Viewport::undefined_state(),
             output_has_rendered: false,
         })
@@ -116,8 +147,14 @@ impl Viewport {
             return Ok(());
         }
 
+        let output = Self::create_output(device, &settings)?;
+        let attachments = [
+            Self::create_attachments(device, &settings, self.depth_format, self.samples)?,
+            Self::create_attachments(device, &settings, self.depth_format, self.samples)?,
+        ];
         self.settings = settings;
-        self.output = Self::create_output(device, &self.settings)?;
+        self.output = output;
+        self.attachments = attachments;
         self.output_state = Self::undefined_state();
         self.output_has_rendered = false;
         Ok(())
@@ -136,6 +173,33 @@ impl Viewport {
         let mut import = self.import();
         import.initial_state = Self::shader_read_state();
         import
+    }
+
+    pub fn import_depth(&self, frame: usize) -> ImportedTexture<'_> {
+        Self::discardable_attachment(
+            &self.attachments[frame].depth,
+            dirk_rhi::ImageState::DepthStencilAttachment,
+        )
+    }
+
+    pub fn import_msaa_color(&self, frame: usize) -> Option<ImportedTexture<'_>> {
+        self.attachments[frame]
+            .color
+            .as_ref()
+            .map(|image| Self::discardable_attachment(image, dirk_rhi::ImageState::ColorAttachment))
+    }
+
+    fn discardable_attachment(
+        image: &Image,
+        final_state: dirk_rhi::ImageState,
+    ) -> ImportedTexture<'_> {
+        ImportedTexture {
+            image: image.rhi_image(),
+            view: image.rhi_view(),
+            // Each pass clears the image; its previous contents do not matter.
+            initial_state: dirk_rhi::ImageState::Undefined,
+            final_state,
+        }
     }
 
     pub fn mark_render_submitted(&mut self) {
@@ -163,6 +227,39 @@ impl Viewport {
                 samples: SampleCount::One,
             },
         )
+    }
+
+    fn create_attachments(
+        device: &Rhi,
+        settings: &ViewportSettings,
+        depth_format: TextureFormat,
+        samples: SampleCount,
+    ) -> Result<ViewportAttachments> {
+        let depth = Image::create_image(
+            device,
+            &ImageCreateInfo {
+                extent: settings.extent,
+                format: depth_format,
+                usage: ImageUsages::DEPTH_STENCIL_ATTACHMENT,
+                mip_levels: 1,
+                samples,
+            },
+        )?;
+        let color = (samples != SampleCount::One)
+            .then(|| {
+                Image::create_image(
+                    device,
+                    &ImageCreateInfo {
+                        extent: settings.extent,
+                        format: settings.format,
+                        usage: ImageUsages::COLOR_ATTACHMENT,
+                        mip_levels: 1,
+                        samples,
+                    },
+                )
+            })
+            .transpose()?;
+        Ok(ViewportAttachments { depth, color })
     }
 }
 

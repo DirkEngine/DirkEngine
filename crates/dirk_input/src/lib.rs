@@ -159,6 +159,12 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+    /// Text committed by the platform input method, preserving case and layout.
+    Text(String),
+    /// Composition updates from the platform input method.
+    Ime(ImeEvent),
+    /// Keyboard modifiers changed without a key event.
+    ModifiersChanged(Modifiers),
     /// The pointer moved.
     PointerMoved {
         /// Current clamped normalized position.
@@ -190,6 +196,19 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+}
+
+/// Platform-independent input method event.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ImeEvent {
+    /// Composition started.
+    Enabled,
+    /// Current composition candidate.
+    Preedit(String),
+    /// Final composition text.
+    Commit(String),
+    /// Composition ended.
+    Disabled,
 }
 
 /// A raw input that can activate an [`InputAction`].
@@ -336,7 +355,10 @@ impl InputState {
             }
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
+            | InputEvent::ModifiersChanged(_) => {}
             // release held keys
             InputEvent::PointerLeft => {
                 self.held.clear();

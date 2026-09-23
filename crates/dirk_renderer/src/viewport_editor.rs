@@ -291,6 +291,9 @@ fn draw_viewport_window(
             }
             | InputEvent::PointerLeft => captured = false,
             InputEvent::Key { .. }
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
+            | InputEvent::ModifiersChanged(_)
             | InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. } => {}

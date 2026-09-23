@@ -1,7 +1,7 @@
 use dirk_render_utils::upload::ImageUpload;
 use std::{collections::HashMap, mem::size_of, time::Instant};
 
-use dirk_input::{ButtonState, InputEvent};
+use dirk_input::{ButtonState, ImeEvent, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
 use dirk_rhi::{
     AddressMode, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor, BlendOp,
@@ -31,7 +31,9 @@ use crate::{
 
 pub struct EguiState {
     ctx: Context,
+    target_format: dirk_rhi::TextureFormat,
     output_is_srgb: bool,
+    modifiers: egui::Modifiers,
     pipeline: GraphicsPipeline<EguiPipelineSpec>,
     texture_allocator: BindingLayout<EguiTextureSet>,
     user_sampler: crate::resources::Sampler,
@@ -70,15 +72,10 @@ impl EguiState {
 
         Ok(Self {
             ctx: Context::default(),
+            target_format: properties.surface_format,
             output_is_srgb: is_srgb_format(properties.surface_format),
-            pipeline: GraphicsPipeline::build(
-                device,
-                crate::pipeline::graphics::PipelineSettings {
-                    color_format: properties.surface_format,
-                    depth: None,
-                    samples: SampleCount::One,
-                },
-            )?,
+            modifiers: egui::Modifiers::default(),
+            pipeline: Self::pipeline_for_format(device, properties.surface_format)?,
             texture_allocator,
             user_sampler,
             textures: HashMap::new(),
@@ -89,6 +86,36 @@ impl EguiState {
             prepared: None,
             textures_to_free: std::array::from_fn(|_| Vec::new()),
         })
+    }
+
+    /// The active egui window may use a different surface format from the first window.
+    pub fn set_target_format(
+        &mut self,
+        device: &Rhi,
+        format: dirk_rhi::TextureFormat,
+    ) -> Result<()> {
+        if self.target_format == format {
+            return Ok(());
+        }
+        let pipeline = Self::pipeline_for_format(device, format)?;
+        self.pipeline = pipeline;
+        self.target_format = format;
+        self.output_is_srgb = is_srgb_format(format);
+        Ok(())
+    }
+
+    fn pipeline_for_format(
+        device: &Rhi,
+        format: dirk_rhi::TextureFormat,
+    ) -> Result<GraphicsPipeline<EguiPipelineSpec>> {
+        Ok(GraphicsPipeline::build(
+            device,
+            crate::pipeline::graphics::PipelineSettings {
+                color_format: format,
+                depth: None,
+                samples: SampleCount::One,
+            },
+        )?)
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -110,6 +137,23 @@ impl EguiState {
             native_pixels_per_point,
             input.events.as_slice(),
         );
+        for event in &input.events {
+            if event.window != input.window_id {
+                continue;
+            }
+            match &event.event {
+                InputEvent::ModifiersChanged(modifiers)
+                | InputEvent::Key { modifiers, .. }
+                | InputEvent::PointerButton { modifiers, .. }
+                | InputEvent::Scroll { modifiers, .. } => {
+                    self.modifiers = (*modifiers).into();
+                }
+                _ => {}
+            }
+        }
+        if !input.focused {
+            self.modifiers = egui::Modifiers::default();
+        }
         let system_theme = input.theme.map(|theme| match theme {
             Theme::Dark => egui::Theme::Dark,
             Theme::Light => egui::Theme::Light,
@@ -118,6 +162,7 @@ impl EguiState {
             screen_rect: Some(screen_rect),
             time: Some(self.start_time.elapsed().as_secs_f64()),
             focused: input.focused,
+            modifiers: self.modifiers,
             system_theme,
             events,
             ..egui::RawInput::default()
@@ -136,7 +181,7 @@ impl EguiState {
         self.ctx.clone()
     }
 
-    pub fn end_frame(&mut self) {
+    pub fn end_frame(&mut self) -> (egui::PlatformOutput, f32) {
         let output = self.ctx.end_pass();
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         let mut textures_delta = self
@@ -149,6 +194,7 @@ impl EguiState {
             primitives,
             pixels_per_point: output.pixels_per_point,
         });
+        (output.platform_output, output.pixels_per_point)
     }
 
     pub fn free_textures_for_frame(&mut self, frame: usize) {
@@ -803,21 +849,20 @@ fn append_translated_event(
                     modifiers,
                 });
             }
-            if *state == ButtonState::Pressed
-                && !*repeat
-                && !modifiers.command
-                && !modifiers.ctrl
-                && let Some(text) = key.text()
-            {
-                out.push(egui::Event::Text(text.to_owned()));
-            }
         }
+        InputEvent::Text(text) => out.push(egui::Event::Text(text.clone())),
+        InputEvent::Ime(event) => out.push(egui::Event::Ime(match event {
+            ImeEvent::Enabled => egui::ImeEvent::Enabled,
+            ImeEvent::Preedit(text) => egui::ImeEvent::Preedit(text.clone()),
+            ImeEvent::Commit(text) => egui::ImeEvent::Commit(text.clone()),
+            ImeEvent::Disabled => egui::ImeEvent::Disabled,
+        })),
+        InputEvent::ModifiersChanged(_) | InputEvent::PointerEntered => {}
         InputEvent::PointerMoved { position, .. } => {
             out.push(egui::Event::PointerMoved(
                 position.to_egui(extent, native_pixels_per_point),
             ));
         }
-        InputEvent::PointerEntered => {}
         InputEvent::PointerLeft => {
             out.push(egui::Event::PointerGone);
         }
@@ -912,21 +957,27 @@ mod tests {
     }
 
     #[test]
-    fn printable_key_press_emits_key_and_text_events() {
+    fn committed_text_preserves_case_separately_from_binding_key() {
         let modifiers = Modifiers::default();
         let events = translate_events(
             window_id(1),
             glam::UVec2 { x: 100, y: 100 },
             1.0,
-            &[WindowInputEvent {
-                window: window_id(1),
-                event: InputEvent::Key {
-                    key: LogicalKey::character("a"),
-                    state: ButtonState::Pressed,
-                    repeat: false,
-                    modifiers,
+            &[
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Key {
+                        key: LogicalKey::character("A"),
+                        state: ButtonState::Pressed,
+                        repeat: false,
+                        modifiers,
+                    },
                 },
-            }],
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Text("A".to_owned()),
+                },
+            ],
         );
 
         assert_eq!(
@@ -939,7 +990,7 @@ mod tests {
                     repeat: false,
                     modifiers: modifiers.into(),
                 },
-                egui::Event::Text("a".to_owned()),
+                egui::Event::Text("A".to_owned()),
             ]
         );
     }
@@ -950,22 +1001,28 @@ mod tests {
             window_id(1),
             glam::UVec2 { x: 100, y: 100 },
             1.0,
-            &[WindowInputEvent {
-                window: window_id(1),
-                event: InputEvent::Key {
-                    key: LogicalKey::Named(NamedKey::Space),
-                    state: ButtonState::Pressed,
-                    repeat: false,
-                    modifiers: Modifiers::default(),
+            &[
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Key {
+                        key: LogicalKey::Named(NamedKey::Space),
+                        state: ButtonState::Pressed,
+                        repeat: false,
+                        modifiers: Modifiers::default(),
+                    },
                 },
-            }],
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Text(" ".to_owned()),
+                },
+            ],
         );
 
         assert!(events.contains(&egui::Event::Text(" ".to_owned())));
     }
 
     #[test]
-    fn printable_key_text_events_are_suppressed_for_repeats_releases_and_command_modifiers() {
+    fn key_events_never_invent_text_but_repeated_commits_are_inserted() {
         let ctrl_modifiers = Modifiers {
             ctrl: true,
             ..Modifiers::default()
@@ -975,6 +1032,10 @@ mod tests {
             glam::UVec2 { x: 100, y: 100 },
             1.0,
             &[
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Text("a".to_owned()),
+                },
                 WindowInputEvent {
                     window: window_id(1),
                     event: InputEvent::Key {
@@ -1005,10 +1066,43 @@ mod tests {
             ],
         );
 
-        assert!(
+        assert_eq!(
             events
                 .iter()
-                .all(|event| !matches!(event, egui::Event::Text(_)))
+                .filter(|event| matches!(event, egui::Event::Text(_)))
+                .collect::<Vec<_>>(),
+            vec![&egui::Event::Text("a".to_owned())]
+        );
+    }
+
+    #[test]
+    fn ime_composition_and_commit_reach_egui() {
+        let events = translate_events(
+            window_id(1),
+            glam::UVec2 { x: 100, y: 100 },
+            1.0,
+            &[
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Ime(ImeEvent::Enabled),
+                },
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Ime(ImeEvent::Preedit("あ".to_owned())),
+                },
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Ime(ImeEvent::Commit("あ".to_owned())),
+                },
+            ],
+        );
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Enabled),
+                egui::Event::Ime(egui::ImeEvent::Preedit("あ".to_owned())),
+                egui::Event::Ime(egui::ImeEvent::Commit("あ".to_owned())),
+            ]
         );
     }
 
