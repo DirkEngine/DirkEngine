@@ -75,14 +75,18 @@ impl Platform {
             window_consumer: events.subscribe(),
         };
 
-        // Pump until `can_create_surfaces` fires and the main window exists.
+        // Pump until `can_create_surfaces` creates the main window or fails.
         // Each call returns quickly; the OS dispatches the startup events
         // within the first few iterations.
-        while !platform.handler.is_initialized() {
-            match platform
+        loop {
+            let status = platform
                 .event_loop
-                .pump_app_events(Some(Duration::ZERO), &mut platform.handler)
-            {
+                .pump_app_events(Some(Duration::ZERO), &mut platform.handler);
+            if let Some(result) = platform.handler.take_initialization() {
+                result.map_err(Error::WindowCreation)?;
+                break;
+            }
+            match status {
                 PumpStatus::Exit(code) => return Err(Error::AppExited(code)),
                 PumpStatus::Continue => {}
             }
