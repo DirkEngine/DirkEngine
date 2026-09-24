@@ -26,7 +26,6 @@ macro_rules! impl_filter_for_tuple {
     };
 }
 
-impl_filter_for_tuple!(A);
 impl_filter_for_tuple!(A, B);
 impl_filter_for_tuple!(A, B, C);
 impl_filter_for_tuple!(A, B, C, D);
