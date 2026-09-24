@@ -7,12 +7,21 @@
 //!
 //! [`AssetRegistry::load_asset`]: crate::AssetRegistry::load_asset
 
-use std::sync::{Arc, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicU64, Ordering},
+};
 
 use dirk_events::Dispatcher;
 use parking_lot::Mutex;
 
 use crate::{Asset, AssetHandle, Error, Result, events::InternalAssetUnloaded};
+
+/// Identifies one loaded instance of an asset, including across unload/reload cycles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AssetGeneration(u64);
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Private inner state shared by all clones of a [`Handle<T>`].
 ///
@@ -25,6 +34,7 @@ pub(crate) struct AssetRef<T: Asset> {
     /// The identifier of this asset; carried along so the drop event can
     /// include the handle for registry bookkeeping.
     pub(crate) asset_handle: AssetHandle,
+    pub(crate) generation: AssetGeneration,
 
     /// The loaded asset data.
     ///
@@ -51,6 +61,13 @@ impl<T: Asset> AssetRef<T> {
     ) -> Self {
         Self {
             asset_handle,
+            generation: AssetGeneration(
+                NEXT_GENERATION
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                        value.checked_add(1)
+                    })
+                    .expect("asset generation counter exhausted"),
+            ),
             data: Some(data),
             unload_dispatcher,
         }
@@ -69,8 +86,10 @@ impl<T: Asset> Drop for AssetRef<T> {
     /// [`AssetRegistry::tick`]: crate::AssetRegistry::tick
     /// [`AssetUnloaded`]: crate::AssetUnloaded
     fn drop(&mut self) {
-        self.unload_dispatcher
-            .dispatch(InternalAssetUnloaded(self.asset_handle.clone()));
+        self.unload_dispatcher.dispatch(InternalAssetUnloaded {
+            handle: self.asset_handle.clone(),
+            generation: self.generation,
+        });
     }
 }
 
@@ -154,6 +173,12 @@ impl<T: Asset> Handle<T> {
     pub fn handle(&self) -> AssetHandle {
         let inner = self.0.lock();
         inner.asset_handle.clone()
+    }
+
+    /// Returns the identity of this load, which changes after unload and reload.
+    #[must_use]
+    pub fn generation(&self) -> AssetGeneration {
+        self.0.lock().generation
     }
 }
 

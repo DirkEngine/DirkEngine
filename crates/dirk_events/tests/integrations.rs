@@ -341,6 +341,8 @@ fn enum_event_round_trips_through_manager() {
     dispatcher.dispatch(NetworkEvent::PacketReceived(1024));
     dispatcher.dispatch(NetworkEvent::Disconnected);
 
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
     let events = collect_all(&mut consumer);
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].debug(), "connected to example.com:443");
