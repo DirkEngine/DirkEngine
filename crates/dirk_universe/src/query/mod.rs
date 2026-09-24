@@ -116,7 +116,6 @@ macro_rules! impl_query_parameter_for_tuple {
     };
 }
 
-impl_query_parameter_for_tuple!(A);
 impl_query_parameter_for_tuple!(A, B);
 impl_query_parameter_for_tuple!(A, B, C);
 impl_query_parameter_for_tuple!(A, B, C, D);
