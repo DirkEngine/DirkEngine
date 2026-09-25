@@ -430,7 +430,7 @@ fn with_and_without_filters_compose() {
     with_health.sort_unstable();
     assert_eq!(with_health, vec![health_only.raw(), both.raw()]);
 
-    let mut without_health: Vec<_> = QueryItem::<(), (Without<Health>,)>::iter(&universe)
+    let mut without_health: Vec<_> = QueryItem::<(), Without<Health>>::iter(&universe)
         .map(|query| query.entity().raw())
         .collect();
     without_health.sort_unstable();
