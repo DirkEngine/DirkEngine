@@ -1,138 +1,144 @@
-//! Typed queries over live entities.
-//!
-//! Queries read live entities across all worlds. A tuple of parameters fetches
-//! every requested component, skipping entities missing any of them. Filter
-//! tuples also use AND semantics; the default filter `()` matches every entity.
-//! `&C` reads a component. `&mut C` edits a clone of a component immediately
-//! for later systems in the same tick, preserving the ordered change log.
-//!
-//! ```rust
-//! use dirk_universe::{
-//!     Universe, components::Component,
-//!     query::{QueryItem, filter::Without},
-//! };
-//!
-//! #[derive(Component, Debug)]
-//! struct Position(f32);
-//! #[derive(Component, Debug)]
-//! struct Velocity(f32);
-//! #[derive(Component, Debug)]
-//! struct Frozen;
-//!
-//! fn inspect_moving_entities(universe: &Universe) {
-//!     for query in QueryItem::<(&Position, &Velocity), Without<Frozen>>::iter(universe) {
-//!         let entity = query.entity();
-//!         let (position, velocity) = query.into_params();
-//!         println!("{entity:?}: position {}, velocity {}", position.0, velocity.0);
-//!     }
-//! }
-//! ```
+//! Typed iteration and lookups over live entities across all worlds.
+//! Tuples fetch components together; filter tuples combine conditions with AND.
 
 pub mod filter;
-
-use std::{
-    any::{TypeId, type_name},
-    collections::HashMap,
-    marker::PhantomData,
-};
 
 use self::filter::Filter;
 use crate::{
     Entity, Universe, WorldId,
     components::{Component, ComponentMut},
 };
+use std::{
+    any::{TypeId, type_name},
+    cell::Ref,
+    collections::{HashMap, hash_map::Keys},
+    marker::PhantomData,
+};
 
-/// One matching entity supplied to a system invocation.
+/// A system's view of matching entities. Systems run once per tick, even when
+/// their queries are empty. Include `Entity` in `P` to fetch entity IDs.
 ///
-/// The engine calls the system once for each match. Use `into_params()` to
-/// access its components; no iteration is needed inside the system.
-pub type Query<'u, P, F = ()> = QueryItem<'u, P, F>;
-
-/// Read-only lookups for systems that run once per tick, including lifecycle
-/// systems that must run when no live entities match. This parameter does not
-/// cause per-entity invocation.
-pub struct QueryView<'u, P: ReadOnlyQueryParameter, F: Filter = ()> {
+/// `&C` yields a shared borrow; `&mut C` yields a mutable borrow that marks the
+/// component changed on mutable dereference. Neither requires `C: Clone`.
+pub struct Query<'u, P: QueryParameter, F: Filter = ()> {
     universe: &'u Universe,
+    last_run: u64,
     _marker: PhantomData<fn() -> (P, F)>,
 }
 
-impl<'u, P: ReadOnlyQueryParameter, F: Filter> QueryView<'u, P, F> {
-    pub(crate) fn new(universe: &'u Universe) -> Self {
+impl<'u, P: QueryParameter, F: Filter> Query<'u, P, F> {
+    pub(crate) fn for_system(universe: &'u Universe, last_run: u64) -> Self {
         Self {
             universe,
+            last_run,
             _marker: PhantomData,
         }
     }
 
-    /// Iterates over live entities matching this read-only query.
-    pub fn iter(&self) -> impl Iterator<Item = QueryItem<'u, P, F>> + 'u {
-        QueryItem::iter(self.universe)
+    fn iterator(&self, world: Option<WorldId>) -> QueryIter<'_, P, F> {
+        QueryIter {
+            entities: self.universe.entities.keys(),
+            universe: self.universe,
+            last_run: self.last_run,
+            world,
+            _marker: PhantomData,
+        }
+    }
+
+    fn fetch(&self, entity: Entity) -> Option<P::Item<'_>> {
+        if !self.universe.is_alive(entity) || !F::matches(entity, self.universe, self.last_run) {
+            return None;
+        }
+        P::from_entity(entity, self.universe)
+    }
+
+    /// Iterates over matching entities, allowing component mutation.
+    pub fn iter_mut(&mut self) -> QueryIter<'_, P, F> {
+        self.iterator(None)
+    }
+
+    /// Iterates over matching entities in one world, allowing mutation.
+    pub fn iter_in_world_mut(&mut self, world: WorldId) -> QueryIter<'_, P, F> {
+        self.iterator(Some(world))
+    }
+
+    /// Borrows one matching entity's data for mutation.
+    pub fn get_mut(&mut self, entity: Entity) -> Option<P::Item<'_>> {
+        self.fetch(entity)
+    }
+}
+
+impl<'u, P: ReadOnlyQueryParameter, F: Filter> Query<'u, P, F> {
+    /// Creates a read-only query outside a system. `Added` and `Changed` match
+    /// all present components here, since there is no previous system run.
+    #[must_use]
+    pub fn new(universe: &'u Universe) -> Self {
+        Self::for_system(universe, 0)
+    }
+
+    /// Iterates over matching entities.
+    #[must_use]
+    pub fn iter(&self) -> QueryIter<'_, P, F> {
+        self.iterator(None)
     }
 
     /// Iterates over matching entities in one world.
-    pub fn iter_in_world(&self, world: WorldId) -> impl Iterator<Item = QueryItem<'u, P, F>> + 'u {
-        let universe = self.universe;
-        universe
-            .entities_in_world(world)
-            .filter_map(move |entity| QueryItem::matches(entity, universe))
-    }
-
-    /// Fetches one entity if it is alive and matches this query.
     #[must_use]
-    pub fn get(&self, entity: Entity) -> Option<QueryItem<'u, P, F>> {
-        self.universe
-            .is_alive(entity)
-            .then(|| QueryItem::matches(entity, self.universe))
-            .flatten()
+    pub fn iter_in_world(&self, world: WorldId) -> QueryIter<'_, P, F> {
+        self.iterator(Some(world))
+    }
+
+    /// Borrows one entity if it is alive and matches this query.
+    #[must_use]
+    pub fn get(&self, entity: Entity) -> Option<P::Item<'_>> {
+        self.fetch(entity)
     }
 }
 
-/// A matched entity and the data fetched for it by a query.
-pub struct QueryItem<'u, P: QueryParameter, F: Filter = ()> {
-    entity: Entity,
-    params: P::Item<'u>,
-    _filter: PhantomData<fn() -> (P, F)>,
+/// An iterator over a query's matching data. Entity order is unspecified.
+pub struct QueryIter<'u, P: QueryParameter, F: Filter> {
+    entities: Keys<'u, Entity, WorldId>,
+    universe: &'u Universe,
+    last_run: u64,
+    world: Option<WorldId>,
+    _marker: PhantomData<fn() -> (P, F)>,
 }
 
-impl<'u, P: QueryParameter, F: Filter> QueryItem<'u, P, F> {
-    pub(crate) fn matches(entity: Entity, universe: &'u Universe) -> Option<Self> {
-        if !F::matches(entity, universe) {
-            return None;
+impl<'u, P: QueryParameter, F: Filter> Iterator for QueryIter<'u, P, F> {
+    type Item = P::Item<'u>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for &entity in self.entities.by_ref() {
+            if self
+                .world
+                .is_some_and(|world| !self.universe.is_in_world(world, entity))
+                || !F::matches(entity, self.universe, self.last_run)
+            {
+                continue;
+            }
+            if let Some(item) = P::from_entity(entity, self.universe) {
+                return Some(item);
+            }
         }
-
-        Some(Self {
-            entity,
-            params: P::from_entity(entity, universe)?,
-            _filter: PhantomData,
-        })
-    }
-
-    /// Returns the entity matched by this query item.
-    pub fn entity(&self) -> Entity {
-        self.entity
-    }
-
-    /// Returns the fetched query parameters.
-    pub fn params(&self) -> &P::Item<'u> {
-        &self.params
-    }
-
-    /// Consumes this query item and returns the fetched parameters.
-    pub fn into_params(self) -> P::Item<'u> {
-        self.params
+        None
     }
 }
 
-impl<'u, P: ReadOnlyQueryParameter, F: Filter> QueryItem<'u, P, F> {
-    /// Iterates over every live entity for which `F` matches and every
-    /// parameter of `P` fetches successfully. Entities from every world are
-    /// included; iteration order is unspecified.
-    pub fn iter(universe: &'u Universe) -> impl Iterator<Item = Self> + 'u {
-        universe
-            .entities
-            .keys()
-            .copied()
-            .filter_map(move |entity| Self::matches(entity, universe))
+impl<'q, P: ReadOnlyQueryParameter, F: Filter> IntoIterator for &'q Query<'_, P, F> {
+    type Item = P::Item<'q>;
+    type IntoIter = QueryIter<'q, P, F>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'q, P: QueryParameter, F: Filter> IntoIterator for &'q mut Query<'_, P, F> {
+    type Item = P::Item<'q>;
+    type IntoIter = QueryIter<'q, P, F>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -247,11 +253,8 @@ impl_query_parameter_for_tuple!(A, B, C, D, E, F);
 impl_query_parameter_for_tuple!(A, B, C, D, E, F, G);
 impl_query_parameter_for_tuple!(A, B, C, D, E, F, G, H);
 
-/// Compatibility alias for a read-only component query.
-pub type Read<C> = &'static C;
-
 impl<C: Component> QueryParameter for &C {
-    type Item<'u> = &'u C;
+    type Item<'u> = Ref<'u, C>;
 
     fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>> {
         universe.component::<C>(entity)
@@ -263,16 +266,27 @@ impl<C: Component> QueryParameter for &C {
 }
 impl<C: Component> ReadOnlyQueryParameter for &C {}
 
-impl<C: Component + Clone> QueryParameter for &mut C {
+impl<C: Component> QueryParameter for &mut C {
     type Item<'u> = ComponentMut<'u, C>;
 
     fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>> {
         universe
             .components
-            .get_mut::<C>(entity, &universe.edit_order, &universe.prepared_order)
+            .get_mut::<C>(entity, universe.change_tick.get())
     }
 
     fn register_access(access: &mut QueryAccess) {
         access.write::<C>();
     }
 }
+
+impl QueryParameter for Entity {
+    type Item<'u> = Entity;
+
+    fn from_entity(entity: Entity, universe: &Universe) -> Option<Self::Item<'_>> {
+        universe.is_alive(entity).then_some(entity)
+    }
+
+    fn register_access(_: &mut QueryAccess) {}
+}
+impl ReadOnlyQueryParameter for Entity {}

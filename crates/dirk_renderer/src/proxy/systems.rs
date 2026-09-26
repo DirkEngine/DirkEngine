@@ -1,10 +1,14 @@
-//! Replays ordered ECS changes into the renderer through one command channel.
+//! Synchronizes renderer state from current components and structural IDs.
+
+use std::any::TypeId;
 
 use crate::{Error, render_commands::RenderCommandSender};
 use dirk_player::PlayerId;
 use dirk_universe::{
-    changes::{Change, ComponentChange},
-    systems::{Changes, System},
+    Entity,
+    lifecycle::LifecycleEvent,
+    query::{Query, filter::Changed},
+    systems::{Lifecycle, System},
 };
 use dirk_world::components::{Renderable, Transform};
 
@@ -17,16 +21,8 @@ impl RendererSystem {
         Self { sender }
     }
 
-    fn mesh(&self, change: &ComponentChange<'_, Renderable>) {
-        let (entity, model) = match *change {
-            ComponentChange::Added { entity, component }
-            | ComponentChange::Updated {
-                entity,
-                new: component,
-                ..
-            } => (entity, Some(component.model.clone())),
-            ComponentChange::Removed { entity, .. } => (entity, None),
-        };
+    fn mesh(&self, entity: Entity, component: Option<&Renderable>) {
+        let model = component.map(|component| component.model.clone());
         self.sender.enqueue_command(move |renderer| {
             let proxy = renderer
                 .scene_manager
@@ -37,16 +33,9 @@ impl RendererSystem {
         });
     }
 
-    fn transform(&self, change: &ComponentChange<'_, Transform>) {
-        let (entity, model, view) = match *change {
-            ComponentChange::Added { entity, component }
-            | ComponentChange::Updated {
-                entity,
-                new: component,
-                ..
-            } => (entity, Some(component.matrix()), Some(component.view())),
-            ComponentChange::Removed { entity, .. } => (entity, None, None),
-        };
+    fn transform(&self, entity: Entity, component: Option<&Transform>) {
+        let model = component.map(Transform::matrix);
+        let view = component.map(Transform::view);
         self.sender.enqueue_command(move |renderer| {
             let proxy = renderer
                 .scene_manager
@@ -58,74 +47,83 @@ impl RendererSystem {
         });
     }
 
-    fn player(&self, change: &ComponentChange<'_, PlayerId>) {
-        let (entity, old, new) = match *change {
-            ComponentChange::Added { entity, component } => (entity, None, Some(*component)),
-            ComponentChange::Updated { entity, old, new } => (entity, Some(*old), Some(*new)),
-            ComponentChange::Removed { entity, component } => (entity, Some(*component), None),
-        };
+    fn player(&self, entity: Entity, player: Option<PlayerId>) {
         self.sender.enqueue_command(move |renderer| {
-            if let Some(old) = old
-                && let Some(viewport) = renderer.viewports.get_mut(&old)
-                && viewport.camera == Some(entity)
-            {
-                viewport.camera = None;
-                viewport.world = None;
-            }
-            if let Some(new) = new {
-                renderer.bind_viewport_to_entity(new, entity);
+            // The renderer already owns the previous binding; ECS snapshots
+            // are unnecessary when a PlayerId changes or is removed.
+            renderer.clear_viewports_for_camera(entity);
+            if let Some(player) = player {
+                renderer.bind_viewport_to_entity(player, entity);
             }
             Ok(())
         });
     }
 }
 
-impl System<Changes<'_>> for RendererSystem {
-    fn run(&mut self, changes: Changes<'_>) {
-        // One ordered stream ensures that scenes/proxies exist before updates,
-        // and component cleanup precedes proxy/scene destruction.
-        for change in changes.iter() {
-            match *change {
-                Change::WorldCreated { world } => self.sender.enqueue_command(move |renderer| {
-                    renderer.scene_manager.create_scene(world)?;
-                    Ok(())
-                }),
-                Change::WorldDestroyed { world } => self.sender.enqueue_command(move |renderer| {
-                    renderer.scene_manager.destroy_scene(world);
-                    Ok(())
-                }),
-                Change::EntitySpawned { entity, world } => {
+type RendererParams<'u> = (
+    Lifecycle<'u>,
+    Query<'u, (Entity, &'u Renderable), Changed<Renderable>>,
+    Query<'u, (Entity, &'u Transform), Changed<Transform>>,
+    Query<'u, (Entity, &'u PlayerId), Changed<PlayerId>>,
+);
+
+impl System<RendererParams<'_>> for RendererSystem {
+    fn run(&mut self, (lifecycle, meshes, transforms, players): RendererParams<'_>) {
+        // Replay structure before uploading current values. This handles
+        // transient entities and component removal/reinsertion in one tick.
+        for event in lifecycle.iter() {
+            match *event {
+                LifecycleEvent::WorldCreated { world } => {
+                    self.sender.enqueue_command(move |renderer| {
+                        renderer.scene_manager.create_scene(world)?;
+                        Ok(())
+                    });
+                }
+                LifecycleEvent::WorldDestroyed { world } => {
+                    self.sender.enqueue_command(move |renderer| {
+                        renderer.scene_manager.destroy_scene(world);
+                        Ok(())
+                    });
+                }
+                LifecycleEvent::EntitySpawned { entity, world } => {
                     self.sender.enqueue_command(move |renderer| {
                         renderer.scene_manager.create_proxy(entity, world)?;
                         Ok(())
                     });
                 }
-                Change::EntityMoved { entity, to, .. } => {
+                LifecycleEvent::EntityMoved { entity, to, .. } => {
                     self.sender.enqueue_command(move |renderer| {
                         renderer.scene_manager.send_proxy(entity, to)?;
                         renderer.update_viewport_world_for_camera(entity, to);
                         Ok(())
                     });
                 }
-                Change::EntityDespawned { entity, .. } => {
+                LifecycleEvent::EntityDespawned { entity, .. } => {
                     self.sender.enqueue_command(move |renderer| {
                         renderer.clear_viewports_for_camera(entity);
                         renderer.scene_manager.destroy_proxy(entity)?;
                         Ok(())
                     });
                 }
-                _ => {
-                    if let Some(change) = change.component::<Renderable>() {
-                        self.mesh(&change);
-                    }
-                    if let Some(change) = change.component::<Transform>() {
-                        self.transform(&change);
-                    }
-                    if let Some(change) = change.component::<PlayerId>() {
-                        self.player(&change);
+                LifecycleEvent::ComponentRemoved { entity, type_id } => {
+                    if type_id == TypeId::of::<Renderable>() {
+                        self.mesh(entity, None);
+                    } else if type_id == TypeId::of::<Transform>() {
+                        self.transform(entity, None);
+                    } else if type_id == TypeId::of::<PlayerId>() {
+                        self.player(entity, None);
                     }
                 }
             }
+        }
+        for (entity, component) in &meshes {
+            self.mesh(entity, Some(&component));
+        }
+        for (entity, component) in &transforms {
+            self.transform(entity, Some(&component));
+        }
+        for (entity, player) in &players {
+            self.player(entity, Some(*player));
         }
     }
 }

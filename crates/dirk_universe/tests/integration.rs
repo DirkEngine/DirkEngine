@@ -3,8 +3,11 @@
 use dirk_universe::{
     Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
-    query::{Query, QueryItem, QueryView, Read},
-    systems::{Changes, Commands, DeltaTime},
+    query::{
+        Query,
+        filter::{Added, Changed, Without},
+    },
+    systems::{Commands, DeltaTime, Lifecycle, RemovedComponents, ToSystem},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -13,7 +16,7 @@ struct Position(i32, i32);
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
 struct Hidden;
 
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Component)]
 struct Counter(i32);
 
 #[derive(Debug, Component)]
@@ -149,15 +152,17 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let system_seen = Rc::clone(&seen);
     let mut calls = 0;
-    let system =
-        move |mut cmd: Commands<'_>, query: Query<'_, Read<Position>>, DeltaTime(delta_time)| {
-            calls += 1;
-            let position = query.params();
+    let system = move |mut cmd: Commands<'_>,
+                       query: Query<'_, (Entity, &Position)>,
+                       DeltaTime(delta_time)| {
+        calls += 1;
+        for (entity, position) in &query {
             system_seen
                 .borrow_mut()
-                .push((calls, query.entity(), position.0, delta_time));
-            cmd.set_component(query.entity(), Position(position.0 + calls, position.1));
-        };
+                .push((calls, entity, position.0, delta_time));
+            cmd.set_component(entity, Position(position.0 + calls, position.1));
+        }
+    };
     let mut universe = Universe::builder()
         .with_world(World::builder("w"))
         .with_system(system)
@@ -175,10 +180,10 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
     universe.tick(0.25);
     assert_eq!(universe.component::<Position>(entity).map(|p| p.0), Some(2));
     universe.tick(0.5);
-    assert_eq!(universe.component::<Position>(entity).map(|p| p.0), Some(3));
+    assert_eq!(universe.component::<Position>(entity).map(|p| p.0), Some(4));
     assert_eq!(
         *seen.borrow(),
-        vec![(1, entity, 2, 0.25), (2, entity, 3, 0.5)]
+        vec![(2, entity, 2, 0.25), (3, entity, 4, 0.5)]
     );
 
     let mut cmd = universe.handle().command_buffer();
@@ -190,7 +195,7 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
 }
 
 #[test]
-fn multiple_queries_match_the_same_entity_once_across_worlds() {
+fn multiple_queries_are_independent_collections_across_worlds() {
     use std::{cell::RefCell, rc::Rc};
 
     let observed = Rc::new(RefCell::new(Vec::new()));
@@ -215,64 +220,52 @@ fn multiple_queries_match_the_same_entity_once_across_worlds() {
         )
         .with_system(
             move |position: Query<'_, &Position>, hidden: Query<'_, &Hidden>| {
-                assert_eq!(position.entity(), hidden.entity());
-                system_observed.borrow_mut().push(position.into_params().0);
+                assert_eq!(hidden.iter().count(), 3);
+                system_observed
+                    .borrow_mut()
+                    .extend(position.iter().map(|position| position.0));
             },
         )
         .build();
 
     universe.tick(0.0);
     observed.borrow_mut().sort_unstable();
-    assert_eq!(*observed.borrow(), vec![3, 5]);
+    assert_eq!(*observed.borrow(), vec![1, 3, 5]);
 }
 
 #[test]
-fn mutable_query_edits_are_visible_to_later_systems_and_logged_next_tick() {
+fn independent_observers_see_mutations_according_to_system_order() {
     use std::{cell::RefCell, rc::Rc};
-
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let updates = Rc::new(RefCell::new(Vec::new()));
-    let system_seen = Rc::clone(&seen);
-    let system_updates = Rc::clone(&updates);
+    let before = Rc::new(RefCell::new(Vec::new()));
+    let after = Rc::new(RefCell::new(Vec::new()));
+    let second_after = Rc::new(RefCell::new(Vec::new()));
+    let observer = |seen: Rc<RefCell<Vec<Vec<i32>>>>| {
+        move |query: Query<&Counter, Changed<Counter>>| {
+            seen.borrow_mut()
+                .push(query.iter().map(|counter| counter.0).collect());
+        }
+    };
+    let mut writes = 0;
     let mut universe = Universe::builder()
-        .with_world(
-            World::builder("w").with_entity(
-                Entity::builder()
-                    .with_component(Counter(0))
-                    .with_component(Step(2)),
-            ),
-        )
-        .with_system(|query: Query<'_, (&Step, &mut Counter)>| {
-            let (step, mut counter) = query.into_params();
-            counter.0 += step.0;
-        })
-        .with_system(move |query: Query<'_, &Counter>| {
-            let counter: &Counter = query.into_params();
-            system_seen.borrow_mut().push(counter.0);
-        })
-        .with_system(move |changes: Changes<'_>| {
-            for change in changes.components::<Counter>() {
-                if let dirk_universe::changes::ComponentChange::Updated { old, new, .. } = change {
-                    system_updates.borrow_mut().push((old.0, new.0));
+        .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(0))))
+        .with_system(observer(before.clone()))
+        .with_system(move |mut query: Query<&mut Counter>| {
+            if writes < 2 {
+                for mut counter in &mut query {
+                    counter.0 += 1;
                 }
+                writes += 1;
             }
         })
+        .with_system(observer(after.clone()))
+        .with_system(observer(second_after.clone()))
         .build();
-
-    universe.tick(0.0);
-    assert_eq!(*seen.borrow(), vec![2]);
-    assert!(updates.borrow().is_empty());
-    let added = universe
-        .component_changes::<Counter>()
-        .find_map(|change| match change {
-            dirk_universe::changes::ComponentChange::Added { component, .. } => Some(component.0),
-            _ => None,
-        });
-    assert_eq!(added, Some(0));
-
-    universe.tick(0.0);
-    assert_eq!(*seen.borrow(), vec![2, 4]);
-    assert_eq!(*updates.borrow(), vec![(0, 2)]);
+    for _ in 0..4 {
+        universe.tick(0.0);
+    }
+    assert_eq!(*before.borrow(), vec![vec![0], vec![1], vec![2], vec![]]);
+    assert_eq!(*after.borrow(), vec![vec![1], vec![2], vec![], vec![]]);
+    assert_eq!(*second_after.borrow(), *after.borrow());
 }
 
 #[test]
@@ -289,26 +282,15 @@ fn overlapping_query_parameters_are_rejected_at_registration() {
 }
 
 #[test]
-#[should_panic(expected = "overlapping mutable queries")]
-fn query_views_cannot_overlap_mutable_query_access() {
-    let _ = Universe::builder()
-        .with_system(|_: QueryView<'_, &Counter>, _: Query<'_, &mut Counter>| {});
-}
-
-#[test]
-fn query_views_run_once_per_tick_with_zero_or_multiple_matches() {
+fn queries_run_once_with_zero_or_multiple_matches_and_support_lookups() {
     use std::{cell::RefCell, rc::Rc};
-
     let seen = Rc::new(RefCell::new(Vec::new()));
     let system_seen = Rc::clone(&seen);
     let mut universe = Universe::builder()
-        .with_system(move |view: QueryView<'_, &Position>| {
-            let items: Vec<_> = view.iter().collect();
-            for item in &items {
-                assert_eq!(
-                    view.get(item.entity()).unwrap().into_params().0,
-                    item.params().0
-                );
+        .with_system(move |query: Query<(Entity, &Position)>| {
+            let items: Vec<_> = query.iter().collect();
+            for (entity, position) in &items {
+                assert_eq!(query.get(*entity).unwrap().1.0, position.0);
             }
             system_seen.borrow_mut().push(items.len());
         })
@@ -325,35 +307,30 @@ fn query_views_run_once_per_tick_with_zero_or_multiple_matches() {
 }
 
 #[test]
-fn reading_through_a_mutable_query_does_not_record_an_update() {
-    use std::{cell::Cell, rc::Rc};
-
-    let updates = Rc::new(Cell::new(0));
-    let system_updates = Rc::clone(&updates);
+fn mutable_reads_stay_clean_and_equal_writes_count_as_changes() {
+    use std::{cell::RefCell, rc::Rc};
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let system_seen = Rc::clone(&seen);
+    let mut run = 0;
     let mut universe = Universe::builder()
         .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(7))))
-        .with_system(|query: Query<'_, &mut Counter>| {
-            assert_eq!(query.into_params().0, 7);
+        .with_system(move |mut query: Query<&mut Counter>| {
+            run += 1;
+            for mut counter in &mut query {
+                assert_eq!(counter.0, 7);
+                if run == 3 {
+                    counter.0 = 7;
+                }
+            }
         })
-        .with_system(move |changes: Changes<'_>| {
-            system_updates.set(
-                system_updates.get()
-                    + changes
-                        .components::<Counter>()
-                        .filter(|change| {
-                            matches!(
-                                change,
-                                dirk_universe::changes::ComponentChange::Updated { .. }
-                            )
-                        })
-                        .count(),
-            );
+        .with_system(move |query: Query<&Counter, Changed<Counter>>| {
+            system_seen.borrow_mut().push(query.iter().count());
         })
         .build();
-
-    universe.tick(0.0);
-    universe.tick(0.0);
-    assert_eq!(updates.get(), 0);
+    for _ in 0..4 {
+        universe.tick(0.0);
+    }
+    assert_eq!(*seen.borrow(), vec![1, 0, 1, 0]);
 }
 
 #[test]
@@ -363,9 +340,11 @@ fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let make_system = |index| {
         let seen = Rc::clone(&seen);
-        move |mut cmd: Commands<'_>, query: Query<'_, Read<Position>>| {
-            seen.borrow_mut().push((index, query.params().0));
-            cmd.set_component(query.entity(), Position(index, 0));
+        move |mut cmd: Commands<'_>, query: Query<'_, (Entity, &Position)>| {
+            for (entity, position) in &query {
+                seen.borrow_mut().push((index, position.0));
+                cmd.set_component(entity, Position(index, 0));
+            }
         }
     };
     let other = Universe::builder().with_system(make_system(2));
@@ -438,18 +417,18 @@ fn despawn_discards_later_component_writes() {
 }
 
 #[test]
-fn systems_run_once_per_tick_even_without_entities_and_share_changes() {
+fn systems_run_once_per_tick_even_without_entities_and_share_lifecycle() {
     use std::{cell::RefCell, rc::Rc};
     let observed = Rc::new(RefCell::new(Vec::new()));
     let mut builder = Universe::builder();
     for id in [1, 2] {
         let observed = Rc::clone(&observed);
         let mut calls = 0;
-        builder = builder.with_system(move |changes: Changes<'_>, DeltaTime(delta_time)| {
+        builder = builder.with_system(move |lifecycle: Lifecycle<'_>, DeltaTime(delta_time)| {
             calls += 1;
             observed
                 .borrow_mut()
-                .push((id, calls, changes.iter().count(), delta_time));
+                .push((id, calls, lifecycle.iter().count(), delta_time));
         });
     }
     let mut universe = builder.build();
@@ -473,104 +452,60 @@ fn systems_run_once_per_tick_even_without_entities_and_share_changes() {
 }
 
 #[test]
-fn change_log_retains_intermediate_values_and_orders_transient_lifecycles() {
-    use dirk_universe::changes::{Change, ComponentChange};
+fn structural_records_preserve_order_and_only_record_successful_removals() {
+    use dirk_universe::lifecycle::LifecycleEvent;
     let mut universe = Universe::builder().build();
     let mut cmd = universe.handle().command_buffer();
     let first = cmd.create_world(World::builder("first"));
     let second = cmd.create_world(World::builder("second"));
     let entity = cmd.spawn(first, Entity::builder().with_component(Position(1, 0)));
     cmd.set_component(entity, Position(2, 0));
-    cmd.set_component(entity, Position(3, 0));
     cmd.remove_component::<Position>(entity);
-    cmd.remove_component::<Position>(entity); // No duplicate removal event.
-    cmd.set_component(entity, Position(4, 0));
+    cmd.remove_component::<Position>(entity);
+    cmd.set_component(entity, Position(3, 0));
     cmd.send(entity, second);
     cmd.destroy_world(second);
-    cmd.despawn(entity); // Already removed by world destruction.
-    cmd.set_component(entity, Position(5, 0)); // Must not revive it.
+    cmd.despawn(entity);
     cmd.destroy_world(first);
     cmd.submit();
     universe.tick(0.0);
-
-    let values: Vec<_> = universe
-        .component_changes::<Position>()
-        .map(|change| match change {
-            ComponentChange::Added { component, .. } => ("added", None, Some(component.0)),
-            ComponentChange::Updated { old, new, .. } => ("updated", Some(old.0), Some(new.0)),
-            ComponentChange::Removed { component, .. } => ("removed", Some(component.0), None),
-        })
-        .collect();
     assert_eq!(
-        values,
+        universe.lifecycle().copied().collect::<Vec<_>>(),
         vec![
-            ("added", None, Some(1)),
-            ("updated", Some(1), Some(2)),
-            ("updated", Some(2), Some(3)),
-            ("removed", Some(3), None),
-            ("added", None, Some(4)),
-            ("removed", Some(4), None),
-        ]
-    );
-    let lifecycle: Vec<_> = universe
-        .changes()
-        .map(|change| match change {
-            Change::WorldCreated { .. } => "world-created",
-            Change::EntitySpawned {
-                entity: changed,
-                world,
-            } => {
-                assert_eq!((*changed, *world), (entity, first));
-                "spawned"
-            }
-            Change::ComponentAdded { .. } => "added",
-            Change::ComponentUpdated { .. } => "updated",
-            Change::ComponentRemoved { .. } => "removed",
-            Change::EntityMoved {
-                entity: changed,
-                from,
-                to,
-            } => {
-                assert_eq!((*changed, *from, *to), (entity, first, second));
-                "moved"
-            }
-            Change::EntityDespawned {
-                entity: changed,
-                world,
-            } => {
-                assert_eq!((*changed, *world), (entity, second));
-                "despawned"
-            }
-            Change::WorldDestroyed { .. } => "world-destroyed",
-        })
-        .collect();
-    assert_eq!(
-        lifecycle,
-        vec![
-            "world-created",
-            "world-created",
-            "spawned",
-            "added",
-            "updated",
-            "updated",
-            "removed",
-            "added",
-            "moved",
-            "removed",
-            "despawned",
-            "world-destroyed",
-            "world-destroyed"
+            LifecycleEvent::WorldCreated { world: first },
+            LifecycleEvent::WorldCreated { world: second },
+            LifecycleEvent::EntitySpawned {
+                entity,
+                world: first
+            },
+            LifecycleEvent::ComponentRemoved {
+                entity,
+                type_id: std::any::TypeId::of::<Position>()
+            },
+            LifecycleEvent::EntityMoved {
+                entity,
+                from: first,
+                to: second
+            },
+            LifecycleEvent::ComponentRemoved {
+                entity,
+                type_id: std::any::TypeId::of::<Position>()
+            },
+            LifecycleEvent::EntityDespawned {
+                entity,
+                world: second
+            },
+            LifecycleEvent::WorldDestroyed { world: second },
+            LifecycleEvent::WorldDestroyed { world: first },
         ]
     );
     assert_eq!(universe.alive_count(), 0);
-    assert_eq!(universe.worlds().count(), 0);
-    assert_eq!(QueryItem::<Read<Position>>::iter(&universe).count(), 0);
     universe.tick(0.0);
-    assert_eq!(universe.changes().count(), 0);
+    assert_eq!(universe.lifecycle().count(), 0);
 }
 
 #[test]
-fn removed_non_clone_components_are_released_when_the_log_expires() {
+fn removed_non_clone_components_are_released_immediately() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -593,8 +528,135 @@ fn removed_non_clone_components_are_released_when_the_log_expires() {
     cmd.despawn(entity);
     cmd.submit();
     universe.tick(0.0);
-    assert_eq!(universe.component_changes::<Tracked>().count(), 2);
-    assert_eq!(dropped.load(Ordering::SeqCst), 0);
-    universe.tick(0.0);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
+    use std::{cell::RefCell, rc::Rc};
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let removed_seen = Rc::new(RefCell::new(Vec::new()));
+    let observer_seen = seen.clone();
+    let observer_removed = removed_seen.clone();
+    let mut universe = Universe::builder()
+        .with_system(
+            move |added: Query<&Counter, Added<Counter>>,
+                  changed: Query<&Counter, Changed<Counter>>,
+                  removed: RemovedComponents<Counter>| {
+                observer_seen.borrow_mut().push((
+                    added.iter().map(|value| value.0).collect::<Vec<_>>(),
+                    changed.iter().map(|value| value.0).collect::<Vec<_>>(),
+                ));
+                observer_removed
+                    .borrow_mut()
+                    .push(removed.iter().collect::<Vec<_>>());
+            },
+        )
+        .build();
+    let mut cmd = universe.handle().command_buffer();
+    let world = cmd.create_world(World::builder("w"));
+    let entity = cmd.spawn(world, Entity::builder().with_component(Counter(1)));
+    cmd.submit();
+    universe.tick(0.0);
+    let mut cmd = universe.handle().command_buffer();
+    cmd.set_component(entity, Counter(2));
+    cmd.set_component(entity, Counter(3));
+    cmd.submit();
+    universe.tick(0.0);
+    let mut cmd = universe.handle().command_buffer();
+    cmd.remove_component::<Counter>(entity);
+    cmd.set_component(entity, Counter(4));
+    cmd.submit();
+    universe.tick(0.0);
+    let mut cmd = universe.handle().command_buffer();
+    cmd.despawn(entity);
+    cmd.submit();
+    universe.tick(0.0);
+    universe.tick(0.0);
+    assert_eq!(
+        *seen.borrow(),
+        vec![
+            (vec![1], vec![1]),
+            (vec![], vec![3]),
+            (vec![4], vec![4]),
+            (vec![], vec![]),
+            (vec![], vec![]),
+        ]
+    );
+    assert_eq!(
+        *removed_seen.borrow(),
+        vec![vec![], vec![], vec![entity], vec![entity], vec![]]
+    );
+}
+
+#[test]
+fn change_detection_survives_an_observer_skipping_ticks() {
+    use std::{cell::RefCell, rc::Rc};
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let observer_seen = seen.clone();
+    let mut observer = (move |query: Query<&Counter, Changed<Counter>>| {
+        observer_seen
+            .borrow_mut()
+            .push(query.iter().map(|counter| counter.0).collect::<Vec<_>>());
+    })
+    .to_system();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(0))))
+        .with_system(|mut query: Query<&mut Counter>| {
+            for mut counter in &mut query {
+                counter.0 += 1;
+            }
+        })
+        .build();
+    let commands = RefCell::new(universe.handle().command_buffer());
+    universe.tick(0.0);
+    observer.run(&universe, 0.0, &commands);
+    for _ in 0..3 {
+        universe.tick(0.0);
+    }
+    observer.run(&universe, 0.0, &commands);
+    observer.run(&universe, 0.0, &commands);
+    assert_eq!(*seen.borrow(), vec![vec![1], vec![4], vec![]]);
+}
+
+#[test]
+fn mutable_iteration_and_lookups_edit_live_values_in_one_system() {
+    let mut universe = Universe::builder()
+        .with_system(
+            |mut query: Query<(Entity, &mut Counter, &Step), Without<Hidden>>| {
+                let world = WorldId::default();
+                let entities: Vec<_> = query
+                    .iter_in_world_mut(world)
+                    .map(|(entity, mut counter, step)| {
+                        counter.0 += step.0;
+                        entity
+                    })
+                    .collect();
+                for entity in entities {
+                    let (_, mut counter, _) = query.get_mut(entity).unwrap();
+                    assert_eq!(counter.0, 2);
+                    counter.0 += 3;
+                }
+            },
+        )
+        .build();
+    let mut cmd = universe.handle().command_buffer();
+    let first = cmd.create_world(World::builder("first"));
+    let second = cmd.create_world(World::builder("second"));
+    let builder = || {
+        Entity::builder()
+            .with_component(Counter(0))
+            .with_component(Step(2))
+    };
+    let included = cmd.spawn(first, builder());
+    let hidden = cmd.spawn(first, builder().with_component(Hidden));
+    let other_world = cmd.spawn(second, builder());
+    cmd.submit();
+    universe.tick(0.0);
+    assert_eq!(universe.component::<Counter>(included).unwrap().0, 5);
+    assert_eq!(universe.component::<Counter>(hidden).unwrap().0, 0);
+    assert_eq!(universe.component::<Counter>(other_world).unwrap().0, 0);
+    let query = Query::<(Entity, &Counter), Without<Hidden>>::new(&universe);
+    assert!(query.get(hidden).is_none());
+    assert_eq!(query.iter_in_world(first).count(), 1);
 }
