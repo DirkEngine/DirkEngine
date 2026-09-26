@@ -123,7 +123,7 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     pub fn new(device: &mut Rhi, events: &dirk_events::EventManager) -> Result<Self> {
         let mut material_alloc = BindingLayout::<MaterialSet>::new(device)?;
-        let mut uploads = dirk_render_utils::upload::UploadBatch::new(device)?;
+        let mut uploads = dirk_render_utils::upload::UploadBatch::new();
         let (fallback_material, fallback_texture) =
             Self::create_fallback_material(device, &mut uploads, &mut material_alloc)?;
         uploads.finish(device)?;

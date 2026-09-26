@@ -70,7 +70,8 @@ impl Viewport {
     pub fn prepare_camera(&mut self, frame: usize, view: glam::Mat4) -> Result<()> {
         #[allow(clippy::cast_precision_loss)]
         let aspect = self.settings.extent.width as f32 / self.settings.extent.height as f32;
-        let proj = glam::camera::lh::proj::vulkan::perspective(
+        // Existing camera views and movement use this projection convention.
+        let proj = glam::camera::rh::proj::vulkan::perspective(
             self.settings.fov_y_radians,
             aspect,
             self.settings.near,
