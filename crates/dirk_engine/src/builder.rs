@@ -36,8 +36,10 @@ pub struct EngineBuilder {
     engine_version: dirk_utils::Version,
     worker_name: String,
     log_level: piquel_log::LogLevel,
+    handle_os_signals: bool,
     plugins: HashSet<TypeId>,
     plugins_in_progress: HashSet<TypeId>,
+    failed_plugin: Option<&'static str>,
     subsystem_factories: HashMap<TypeId, SubsystemFactory>,
     subsystem_order: Vec<TypeId>,
     #[cfg(feature = "editor")]
@@ -65,8 +67,10 @@ impl EngineBuilder {
             engine_version: package_version,
             worker_name: "dirk-workers".to_owned(),
             log_level: piquel_log::LogLevel::Info,
+            handle_os_signals: false,
             plugins: HashSet::new(),
             plugins_in_progress: HashSet::new(),
+            failed_plugin: None,
             subsystem_factories: HashMap::new(),
             subsystem_order: Vec::new(),
             #[cfg(feature = "editor")]
@@ -100,6 +104,17 @@ impl EngineBuilder {
         self
     }
 
+    /// Opts into process-wide SIGINT and termination handling.
+    ///
+    /// The host application should enable this only when the engine owns its
+    /// signal policy for the process lifetime. `signal-hook` cannot restore the
+    /// previous disposition after the engine is dropped. Window close events
+    /// are handled separately and do not require this option.
+    pub fn with_os_signals(&mut self, enabled: bool) -> &mut Self {
+        self.handle_os_signals = enabled;
+        self
+    }
+
     /// Registers a plugin with the builder, unless this concrete plugin type
     /// has already been registered.
     ///
@@ -112,11 +127,16 @@ impl EngineBuilder {
     /// # Errors
     ///
     /// Returns [`Error::PluginBuildFailed`] if the plugin fails to register its
-    /// build-time pieces.
+    /// build-time pieces. A failed registration makes the builder unusable:
+    /// plugin callbacks may have already changed it, and retrying would retain
+    /// those partial changes.
     pub fn with_plugin<P>(&mut self, plugin: P) -> Result<&mut Self>
     where
         P: EnginePlugin + 'static,
     {
+        if let Some(name) = self.failed_plugin {
+            return Err(Error::PluginBuilderPoisoned { name });
+        }
         let type_id = TypeId::of::<P>();
         if self.plugins.contains(&type_id) {
             return Ok(self);
@@ -133,7 +153,10 @@ impl EngineBuilder {
         let result = plugin.build(self);
         self.plugins_in_progress.remove(&type_id);
 
-        result.map_err(|source| Error::PluginBuildFailed { name, source })?;
+        if let Err(source) = result {
+            self.failed_plugin.get_or_insert(name);
+            return Err(Error::PluginBuildFailed { name, source });
+        }
         self.plugins.insert(type_id);
         drop(plugin);
         Ok(self)
@@ -206,6 +229,9 @@ impl EngineBuilder {
     ///
     /// Returns an error if logging or subsystem initialization fails.
     pub fn build(mut self) -> Result<Engine> {
+        if let Some(name) = self.failed_plugin {
+            return Err(Error::PluginBuilderPoisoned { name });
+        }
         let logger = piquel_log::Logger::new()
             .with_max_level(self.log_level)
             .with_log_bridge(true)
@@ -259,7 +285,11 @@ impl EngineBuilder {
             services
         };
 
-        let signals = OperatingSystemSignals::install().map_err(Error::SignalHandlerInitFailed)?;
+        let signals = if self.handle_os_signals {
+            OperatingSystemSignals::install().map_err(Error::SignalHandlerInitFailed)?
+        } else {
+            OperatingSystemSignals::disabled()
+        };
 
         let mut subsystems = Vec::with_capacity(self.subsystem_factories.len());
 
@@ -299,8 +329,7 @@ impl EngineBuilder {
             frame_dispatcher: events.register(),
             exiting_dispatcher: events.register(),
             last_tick: Instant::now(),
-            started: false,
-            shutdown: false,
+            lifecycle: crate::EngineLifecycle::Ready,
         })
     }
 }

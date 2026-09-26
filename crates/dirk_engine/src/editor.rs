@@ -334,7 +334,7 @@ impl EditorServices {
         state.windows.push(RegisteredWindow {
             id,
             descriptor,
-            window: Box::new(window),
+            window: Arc::new(Mutex::new(Box::new(window))),
         });
         state
             .window_states
@@ -385,7 +385,7 @@ impl EditorServices {
         self.state.lock().menus.push(RegisteredMenu {
             id,
             title: descriptor.title,
-            menu: Box::new(menu),
+            menu: Arc::new(Mutex::new(Box::new(menu))),
         });
         id
     }
@@ -495,7 +495,141 @@ impl EditorServices {
             style.apply(ctx);
         }
 
-        self.state.lock().render(ctx, context, universe)
+        let (editor_commands, command_receiver) = mpsc::channel();
+        let editor_commands = EditorCommandSender::new(editor_commands);
+
+        let (menus, window_infos) = {
+            let state = self.state.lock();
+            (state.menus.clone(), state.windows())
+        };
+        Self::render_menus(
+            &menus,
+            &window_infos,
+            ctx,
+            context,
+            &editor_commands,
+            universe,
+        )?;
+
+        let (windows, mut dock_state) = {
+            let mut state = self.state.lock();
+            state.apply_commands(command_receiver.try_iter());
+            state.bootstrap_default_dock_layout();
+            state.sync_dock_tabs_with_open_windows();
+            (state.windows.clone(), state.dock_state.clone())
+        };
+
+        let mut closed_windows = Vec::new();
+        let result = Self::render_windows(
+            &windows,
+            &mut dock_state,
+            &mut closed_windows,
+            ctx,
+            context,
+            &editor_commands,
+            universe,
+        );
+
+        let mut state = self.state.lock();
+        for id in closed_windows {
+            if let Some(window) = state.window_states.get_mut(&id) {
+                window.open = false;
+            }
+        }
+        state.dock_state = dock_state;
+        // Callbacks may have added or removed windows while the snapshot was
+        // rendered. Reconcile those changes before applying open commands.
+        let new_viewport = state.windows.iter().any(|window| {
+            window.descriptor.category == VIEWPORT_CATEGORY
+                && !windows.iter().any(|rendered| rendered.id == window.id)
+                && state
+                    .window_states
+                    .get(&window.id)
+                    .is_some_and(|window| window.open)
+        });
+        if new_viewport && state.find_dock_tab_by_category(VIEWPORT_CATEGORY).is_none() {
+            state.rebuild_default_dock_layout();
+        } else {
+            state.sync_dock_tabs_with_open_windows();
+        }
+        state.apply_commands(command_receiver.try_iter());
+        result
+    }
+    fn render_menus(
+        menus: &[RegisteredMenu],
+        windows: &[EditorWindowInfo],
+        ctx: &egui::Context,
+        context: &EditorRenderContext<'_>,
+        editor_commands: &EditorCommandSender,
+        universe: &Universe,
+    ) -> anyhow::Result<()> {
+        if menus.is_empty() {
+            return Ok(());
+        }
+
+        let mut menu_context = EditorMenuContext::new(windows, (*editor_commands).clone());
+        let mut context = EditorUiContext {
+            delta_time: context.delta_time(),
+            commands: (*editor_commands).clone(),
+            handle: context.handle,
+            universe,
+        };
+
+        let mut result = Ok(());
+        egui::TopBottomPanel::top("dirk_editor_menu_bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                for menu in menus {
+                    ui.push_id(menu.id.raw(), |ui| {
+                        ui.menu_button(menu.title.clone(), |ui| {
+                            if result.is_ok() {
+                                result = menu
+                                    .menu
+                                    .lock()
+                                    .ui(ui, &mut context, &mut menu_context)
+                                    .with_context(|| {
+                                        format!("menu `{}` failed to render", menu.title)
+                                    });
+                            }
+                        });
+                    });
+                }
+            });
+        });
+
+        result
+    }
+
+    fn render_windows(
+        windows: &[RegisteredWindow],
+        dock_state: &mut DockState<EditorWindowId>,
+        closed_windows: &mut Vec<EditorWindowId>,
+        ctx: &egui::Context,
+        context: &EditorRenderContext<'_>,
+        editor_commands: &EditorCommandSender,
+        universe: &Universe,
+    ) -> anyhow::Result<()> {
+        let mut result = Ok(());
+        let mut ui_context = EditorUiContext {
+            delta_time: context.delta_time(),
+            commands: (*editor_commands).clone(),
+            handle: context.handle,
+            universe,
+        };
+        let mut tab_viewer = EditorDockTabViewer {
+            windows,
+            closed_windows,
+            context: &mut ui_context,
+            result: &mut result,
+        };
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            DockArea::new(dock_state)
+                .style(egui_dock::Style::from_egui(ui.style()))
+                .show_leaf_collapse_buttons(false)
+                .show_inside(ui, &mut tab_viewer);
+        });
+
+        result
     }
 }
 
@@ -524,95 +658,6 @@ impl EditorServicesState {
             menus: Vec::new(),
             styles: Vec::new(),
         }
-    }
-
-    fn render(
-        &mut self,
-        ctx: &egui::Context,
-        context: &EditorRenderContext<'_>,
-        universe: &Universe,
-    ) -> anyhow::Result<()> {
-        let (editor_commands, command_receiver) = mpsc::channel();
-        let editor_commands = EditorCommandSender::new(editor_commands);
-
-        self.render_menus(ctx, context, &editor_commands, universe)?;
-        self.apply_commands(command_receiver.try_iter());
-        self.render_windows(ctx, context, &editor_commands, universe)?;
-        self.apply_commands(command_receiver.try_iter());
-        Ok(())
-    }
-
-    fn render_menus(
-        &mut self,
-        ctx: &egui::Context,
-        context: &EditorRenderContext<'_>,
-        editor_commands: &EditorCommandSender,
-        universe: &Universe,
-    ) -> anyhow::Result<()> {
-        if self.menus.is_empty() {
-            return Ok(());
-        }
-
-        let windows = self.windows();
-        let mut menu_context = EditorMenuContext::new(&windows, (*editor_commands).clone());
-        let mut context = EditorUiContext {
-            delta_time: context.delta_time(),
-            commands: (*editor_commands).clone(),
-            handle: context.handle,
-            universe,
-        };
-
-        let mut result = Ok(());
-        egui::TopBottomPanel::top("dirk_editor_menu_bar").show(ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for menu in &mut self.menus {
-                    ui.menu_button(menu.title.clone(), |ui| {
-                        if result.is_ok() {
-                            result = menu
-                                .menu
-                                .ui(ui, &mut context, &mut menu_context)
-                                .with_context(|| format!("menu `{}` failed to render", menu.title));
-                        }
-                    });
-                }
-            });
-        });
-
-        result
-    }
-
-    fn render_windows(
-        &mut self,
-        ctx: &egui::Context,
-        context: &EditorRenderContext<'_>,
-        editor_commands: &EditorCommandSender,
-        universe: &Universe,
-    ) -> anyhow::Result<()> {
-        self.bootstrap_default_dock_layout();
-        self.sync_dock_tabs_with_open_windows();
-
-        let mut result = Ok(());
-        let mut ui_context = EditorUiContext {
-            delta_time: context.delta_time(),
-            commands: (*editor_commands).clone(),
-            handle: context.handle,
-            universe,
-        };
-        let mut tab_viewer = EditorDockTabViewer {
-            windows: &mut self.windows,
-            window_states: &mut self.window_states,
-            context: &mut ui_context,
-            result: &mut result,
-        };
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            DockArea::new(&mut self.dock_state)
-                .style(egui_dock::Style::from_egui(ui.style()))
-                .show_leaf_collapse_buttons(false)
-                .show_inside(ui, &mut tab_viewer);
-        });
-
-        result
     }
 
     fn windows(&self) -> Vec<EditorWindowInfo> {
@@ -748,7 +793,7 @@ impl EditorServicesState {
             return;
         }
 
-        if self.dock_tab_count() == 0 {
+        if self.dock_state.main_surface().is_empty() {
             self.dock_state.push_to_first_leaf(id);
             return;
         }
@@ -793,6 +838,7 @@ impl EditorServicesState {
         self.dock_state.find_tab(&id).is_some()
     }
 
+    #[cfg(test)]
     fn dock_tab_count(&self) -> usize {
         self.dock_state
             .iter_all_tabs()
@@ -827,10 +873,11 @@ impl EditorServicesState {
     }
 }
 
+#[derive(Clone)]
 struct RegisteredWindow {
     id: EditorWindowId,
     descriptor: EditorWindowDescriptor,
-    window: Box<dyn EditorWindow>,
+    window: Arc<Mutex<Box<dyn EditorWindow>>>,
 }
 
 struct WindowState {
@@ -838,14 +885,18 @@ struct WindowState {
 }
 
 struct EditorDockTabViewer<'a, 'b> {
-    windows: &'a mut [RegisteredWindow],
-    window_states: &'a mut HashMap<EditorWindowId, WindowState>,
+    windows: &'a [RegisteredWindow],
+    closed_windows: &'a mut Vec<EditorWindowId>,
     context: &'a mut EditorUiContext<'b>,
     result: &'a mut anyhow::Result<()>,
 }
 
 impl TabViewer for EditorDockTabViewer<'_, '_> {
     type Tab = EditorWindowId;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(("dirk_editor_window", tab.raw()))
+    }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         self.windows
@@ -862,7 +913,7 @@ impl TabViewer for EditorDockTabViewer<'_, '_> {
             return;
         }
 
-        let Some(window) = self.windows.iter_mut().find(|window| window.id == *tab) else {
+        let Some(window) = self.windows.iter().find(|window| window.id == *tab) else {
             ui.label("Window is no longer registered");
             return;
         };
@@ -870,6 +921,7 @@ impl TabViewer for EditorDockTabViewer<'_, '_> {
         let title = window.descriptor.title.clone();
         *self.result = window
             .window
+            .lock()
             .ui(ui, self.context)
             .with_context(|| format!("window `{title}` failed to render"));
     }
@@ -879,9 +931,7 @@ impl TabViewer for EditorDockTabViewer<'_, '_> {
     }
 
     fn on_close(&mut self, tab: &mut Self::Tab) -> OnCloseResponse {
-        if let Some(state) = self.window_states.get_mut(tab) {
-            state.open = false;
-        }
+        self.closed_windows.push(*tab);
         OnCloseResponse::Close
     }
 }
@@ -921,21 +971,27 @@ impl EditorRuntime {
     }
 
     pub(crate) fn shutdown(&mut self, engine: &EngineHandle) -> crate::Result<()> {
+        let mut first_error = None;
         while let Some(mut subsystem) = self.subsystems.pop() {
             let name = subsystem.name();
-            subsystem
-                .shutdown(engine, &self.services)
-                .map_err(|source| Error::EditorSubsystemFailedShutdown { name, source })?;
+            if let Err(source) = subsystem.shutdown(engine, &self.services) {
+                let err = Error::EditorSubsystemFailedShutdown { name, source };
+                if first_error.is_none() {
+                    first_error = Some(err);
+                } else {
+                    tracing::error!("additional editor shutdown failure: {err:#}");
+                }
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
+#[derive(Clone)]
 struct RegisteredMenu {
-    #[allow(dead_code)]
     id: EditorMenuId,
     title: String,
-    menu: Box<dyn EditorMenu>,
+    menu: Arc<Mutex<Box<dyn EditorMenu>>>,
 }
 
 struct FnEditorWindow<F> {

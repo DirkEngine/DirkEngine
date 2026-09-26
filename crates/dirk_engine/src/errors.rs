@@ -8,6 +8,27 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// All errors that could be emitted by the engine.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// An operation was attempted after the engine entered a terminal state.
+    #[error("cannot {operation} engine in {status:?} state")]
+    InvalidLifecycleState {
+        /// The requested operation.
+        operation: &'static str,
+        /// The current engine status.
+        status: crate::EngineStatus,
+    },
+    /// A plugin failed earlier and its partial builder mutations cannot be retried safely.
+    #[error("engine builder cannot be reused after plugin `{name}` failed")]
+    PluginBuilderPoisoned {
+        /// The plugin whose registration failed.
+        name: &'static str,
+    },
+    /// A subsystem reported a terminal runtime failure through its engine handle.
+    #[error("engine reported a runtime failure: {source}")]
+    RuntimeFailed {
+        /// The reported failure.
+        #[source]
+        source: anyhow::Error,
+    },
     /// An error occurred when initializing the logger.
     #[error("failed to initialize logging")]
     LoggerFailure(#[from] piquel_log::InitError),
