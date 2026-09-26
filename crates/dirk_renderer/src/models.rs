@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::Context;
 use dirk_rhi::IndexFormat;
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
 use crate::{
     Error, Result,
@@ -283,20 +283,13 @@ impl ModelRegistry {
             material_handles =
                 self.create_materials(device, gltf.materials().collect(), &texture_handles)?;
 
-            for (mesh, transform) in Self::scene_meshes(&gltf)? {
-                let normal = transform.inverse().transpose();
+            // World placement is supplied by entity transforms; mesh coordinates
+            // stay in the units used by existing worlds and movement speeds.
+            for mesh in gltf.meshes() {
                 let primitives = mesh
                     .primitives()
                     .map(|prim| {
-                        Self::upload_primitive(
-                            device,
-                            uploads,
-                            &prim,
-                            &buffers,
-                            &material_handles,
-                            transform,
-                            normal,
-                        )
+                        Self::upload_primitive(device, uploads, &prim, &buffers, &material_handles)
                     })
                     .collect::<Result<Vec<_>>>()?;
                 mesh_handles.push(Handle::new(self.meshes.insert(Mesh { primitives })));
@@ -369,52 +362,6 @@ impl ModelRegistry {
             .collect())
     }
 
-    /// Resolve all instances in the selected scene. Nodes outside the scene
-    /// must not render, even when their mesh definitions exist in the asset.
-    fn scene_meshes(gltf: &gltf::Document) -> Result<Vec<(gltf::Mesh<'_>, Mat4)>> {
-        let scene = gltf
-            .default_scene()
-            .or_else(|| gltf.scenes().next())
-            .context("glTF model has no scene")?;
-        let mut meshes = Vec::new();
-        let mut nodes = scene
-            .nodes()
-            .map(|node| (node, Mat4::IDENTITY))
-            .collect::<Vec<_>>();
-        nodes.reverse();
-        let mut seen = HashSet::new();
-        while let Some((node, parent)) = nodes.pop() {
-            model_ensure!(
-                seen.insert(node.index()),
-                "glTF scene contains a cyclic or multiply parented node {}",
-                node.index()
-            );
-            let transform = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-            model_ensure!(
-                transform.is_finite(),
-                "glTF node {} has a non-finite transform",
-                node.index()
-            );
-            if let Some(mesh) = node.mesh() {
-                let determinant = transform.determinant();
-                model_ensure!(
-                    determinant.is_finite() && determinant != 0.0,
-                    "glTF node {} has a singular mesh transform",
-                    node.index()
-                );
-                meshes.push((mesh, transform));
-            }
-            nodes.extend(
-                node.children()
-                    .map(|child| (child, transform))
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev(),
-            );
-        }
-        Ok(meshes)
-    }
-
     fn validate_primitive(primitive: &gltf::Primitive) -> Result<()> {
         model_ensure!(
             primitive.mode() == gltf::mesh::Mode::Triangles,
@@ -422,12 +369,9 @@ impl ModelRegistry {
             primitive.index(),
             primitive.mode()
         );
+        // This pipeline renders all materials as opaque and back-face culled,
+        // matching the model rendering behavior before the RHI migration.
         let material = primitive.material();
-        model_ensure!(
-            material.alpha_mode() == gltf::material::AlphaMode::Opaque && !material.double_sided(),
-            "glTF primitive {} uses unsupported alpha mode or double-sided material",
-            primitive.index()
-        );
         if let Some(texture) = material.pbr_metallic_roughness().base_color_texture() {
             let sampler = texture.texture().sampler();
             model_ensure!(
@@ -485,8 +429,6 @@ impl ModelRegistry {
         primitive: &gltf::Primitive,
         buffers: &[gltf::buffer::Data],
         mat_refs: &[Handle<Material>],
-        transform: Mat4,
-        normal_transform: Mat4,
     ) -> Result<Primitive> {
         Self::validate_primitive(primitive)?;
         let material = primitive.material();
@@ -511,7 +453,7 @@ impl ModelRegistry {
         model_ensure!(!positions.is_empty(), "glTF primitive has no positions");
         let vertex_count = u32::try_from(positions.len())
             .context("glTF primitive has too many vertices for indexed drawing")?;
-        let mut indices: Vec<_> = reader.read_indices().map_or_else(
+        let indices: Vec<_> = reader.read_indices().map_or_else(
             || (0..vertex_count).collect(),
             |iter| iter.into_u32().collect(),
         );
@@ -524,24 +466,14 @@ impl ModelRegistry {
         let normals = Self::primitive_normals(&positions, &indices, normals)?;
         let index_count = u32::try_from(indices.len())
             .context("glTF primitive has too many indices for indexed drawing")?;
-        if transform.determinant() < 0.0 {
-            for triangle in indices.as_chunks_mut::<3>().0 {
-                triangle.swap(1, 2);
-            }
-        }
         let factor = material.pbr_metallic_roughness().base_color_factor();
 
         let vertices: Vec<Vertex> = positions
             .iter()
             .enumerate()
             .map(|(i, &position)| Vertex {
-                position: transform
-                    .transform_point3(Vec3::from_array(position))
-                    .to_array(),
-                normal: normal_transform
-                    .transform_vector3(Vec3::from_array(normals[i]))
-                    .normalize_or_zero()
-                    .to_array(),
+                position,
+                normal: normals[i],
                 texcoord: texcoords.get(i).copied().unwrap_or([0.0, 0.0]),
                 color: {
                     let color = colors.get(i).copied().unwrap_or([1.0; 4]);
@@ -624,39 +556,5 @@ mod tests {
         )
         .expect("triangle normals");
         assert_eq!(normals, vec![[0.0, 0.0, 1.0]; 3]);
-    }
-
-    #[test]
-    fn scene_meshes_compose_transforms_and_keep_instances() {
-        let source = br#"{
-          "asset":{"version":"2.0"},
-          "scene":0,
-          "scenes":[{"nodes":[0,2]}],
-          "nodes":[
-            {"translation":[1,0,0],"children":[1]},
-            {"mesh":0,"translation":[0,2,0]},
-            {"mesh":0,"translation":[0,0,3]},
-            {"mesh":1}
-          ],
-          "meshes":[
-            {"primitives":[{"attributes":{"POSITION":0}}]},
-            {"primitives":[{"attributes":{"POSITION":0}}]}
-          ],
-          "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
-          "bufferViews":[{"buffer":0,"byteLength":36}],
-          "buffers":[{"byteLength":36}]
-        }"#;
-        let gltf = gltf::Gltf::from_slice(source).expect("valid glTF scene");
-        let meshes = ModelRegistry::scene_meshes(&gltf.document).expect("scene traversal");
-        assert_eq!(meshes.len(), 2);
-        assert!(meshes.iter().all(|(mesh, _)| mesh.index() == 0));
-        assert_eq!(
-            meshes[0].1.transform_point3(glam::Vec3::ZERO),
-            glam::Vec3::new(1.0, 2.0, 0.0)
-        );
-        assert_eq!(
-            meshes[1].1.transform_point3(glam::Vec3::ZERO),
-            glam::Vec3::new(0.0, 0.0, 3.0)
-        );
     }
 }
