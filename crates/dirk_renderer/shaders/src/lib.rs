@@ -71,11 +71,56 @@ pub fn egui_fs(
     *out_color = if frame.output_is_srgb > 0.5 {
         color
     } else {
-        Vec4::new(
-            Float::powf(color.x, 1.0 / 2.2),
-            Float::powf(color.y, 1.0 / 2.2),
-            Float::powf(color.z, 1.0 / 2.2),
-            color.w,
-        )
+        encode_srgb(color)
     };
+}
+
+// Scene textures are sampled as linear colors. Encode once when the target does
+// not provide the sRGB conversion itself; editor and standalone share this rule.
+fn encode_srgb(color: Vec4) -> Vec4 {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.003_130_8 {
+            12.92 * value
+        } else {
+            1.055 * Float::powf(value, 1.0 / 2.4) - 0.055
+        }
+    }
+    Vec4::new(
+        channel(color.x),
+        channel(color.y),
+        channel(color.z),
+        color.w,
+    )
+}
+
+#[spirv(vertex)]
+pub fn present_vs(
+    #[spirv(vertex_index)] index: u32,
+    #[spirv(position)] position: &mut Vec4,
+    #[spirv(location = 0)] uv: &mut Vec2,
+) {
+    *uv = match index {
+        0 => Vec2::new(0.0, 0.0),
+        1 => Vec2::new(2.0, 0.0),
+        _ => Vec2::new(0.0, 2.0),
+    };
+    *position = Vec4::new(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0);
+}
+
+#[spirv(fragment)]
+pub fn present_fs(
+    #[spirv(descriptor_set = 0, binding = 0)] texture: &SampledImage<Image2d>,
+    #[spirv(location = 0)] uv: Vec2,
+    #[spirv(location = 0)] color: &mut Vec4,
+) {
+    *color = texture.sample(uv);
+}
+
+#[spirv(fragment)]
+pub fn present_unorm_fs(
+    #[spirv(descriptor_set = 0, binding = 0)] texture: &SampledImage<Image2d>,
+    #[spirv(location = 0)] uv: Vec2,
+    #[spirv(location = 0)] color: &mut Vec4,
+) {
+    *color = encode_srgb(texture.sample(uv));
 }
