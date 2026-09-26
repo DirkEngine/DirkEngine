@@ -7,22 +7,33 @@ use dirk_rhi::{
 };
 
 /// One tick's uploads. Native copies record immediately; staging drops into the current cycle.
+#[derive(Default)]
 pub struct UploadBatch {
+    encoders: Option<UploadEncoders>,
+}
+
+struct UploadEncoders {
     transfer: CommandEncoder<CopyQueue>,
     acquire: CommandEncoder<Graphics>,
-    empty: bool,
 }
 impl UploadBatch {
     /// Starts a batch independently of renderer state.
-    ///
-    /// # Errors
-    /// Returns allocation, interface validation, or native device errors with their details.
-    pub fn new(rhi: &Rhi) -> Result<Self> {
-        Ok(Self {
-            transfer: rhi.create_encoder("uploads")?,
-            acquire: rhi.create_encoder("upload acquisitions")?,
-            empty: true,
-        })
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn encoders(&mut self, rhi: &Rhi) -> Result<&mut UploadEncoders> {
+        if self.encoders.is_none() {
+            self.encoders = Some(UploadEncoders {
+                transfer: rhi.create_encoder("uploads")?,
+                acquire: rhi.create_encoder("upload acquisitions")?,
+            });
+        }
+        Ok(self
+            .encoders
+            .as_mut()
+            .expect("upload encoders were created"))
     }
     /// Allocates and uploads immutable buffer data for subsequent graphics use.
     ///
@@ -46,9 +57,10 @@ impl UploadBatch {
             usage: usage | BufferUsages::COPY_DST,
             memory: MemoryDomain::Device,
         })?;
+        let encoders = self.encoders(rhi)?;
         // SAFETY: both ranges are fresh allocations, and both recordings submit in this cycle.
         unsafe {
-            self.transfer.copy_buffer(
+            encoders.transfer.copy_buffer(
                 &staging,
                 &buffer,
                 &[BufferCopy {
@@ -70,10 +82,9 @@ impl UploadBatch {
                 buffer_barriers: &barrier,
                 image_barriers: &[],
             };
-            self.transfer.barrier(&dependency)?;
-            self.acquire.barrier(&dependency)?;
+            encoders.transfer.barrier(&dependency)?;
+            encoders.acquire.barrier(&dependency)?;
         }
-        self.empty = false;
         Ok(buffer)
     }
     /// Uploads all mip levels of a new color image and makes it readable by fragment shaders.
@@ -87,9 +98,10 @@ impl UploadBatch {
         if levels.len() != image.description().mip_levels as usize {
             return Err(dirk_rhi::InvalidResourceKind::Mismatch.into());
         }
+        let encoders = self.encoders(rhi)?;
         unsafe {
             Self::image_barrier(
-                &mut self.transfer,
+                &mut encoders.transfer,
                 image,
                 ImageState::Undefined,
                 ImageState::CopyDestination,
@@ -107,27 +119,26 @@ impl UploadBatch {
                     extent,
                     pixels,
                 }
-                .record(rhi, &mut self.transfer)?;
+                .record(rhi, &mut encoders.transfer)?;
             }
         }
         let final_state = ImageState::ShaderRead(ShaderStages::FRAGMENT);
         unsafe {
             Self::image_barrier(
-                &mut self.transfer,
+                &mut encoders.transfer,
                 image,
                 ImageState::CopyDestination,
                 final_state,
                 Some(Self::handoff()),
             )?;
             Self::image_barrier(
-                &mut self.acquire,
+                &mut encoders.acquire,
                 image,
                 ImageState::CopyDestination,
                 final_state,
                 Some(Self::handoff()),
             )?;
         }
-        self.empty = false;
         Ok(())
     }
     /// Submits the transfer batch and returns graphics acquisitions and their GPU dependency.
@@ -135,11 +146,11 @@ impl UploadBatch {
     /// # Errors
     /// Returns allocation, interface validation, or native device errors with their details.
     pub fn submit(self, rhi: &mut Rhi) -> Result<Option<(RecordedCommands, Completion)>> {
-        if self.empty {
+        let Some(encoders) = self.encoders else {
             return Ok(None);
-        }
-        let transfer = self.transfer.finish()?;
-        let acquire = self.acquire.finish()?;
+        };
+        let transfer = encoders.transfer.finish()?;
+        let acquire = encoders.acquire.finish()?;
         // SAFETY: this batch records complete copy dependencies and submits once in its recording cycle.
         let completion = unsafe {
             rhi.queue::<CopyQueue>()
