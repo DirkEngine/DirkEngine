@@ -1,6 +1,6 @@
 //! Backend-neutral render graph executed through the renderer RHI.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dirk_rhi::{
     Color, DependencyInfo, Extent3d, ImageBarrier, ImageDesc, ImageState, ImageUsages, LoadOp,
     RenderingInfo, SampleCount, ShaderStages, StoreOp, TextureFormat,
@@ -40,12 +40,45 @@ pub struct TextureDesc<'a> {
     pub imported: Option<ImportedTexture<'a>>,
 }
 
+impl TextureDesc<'_> {
+    fn image_info(&self) -> dirk_rhi::ImageInfo {
+        self.imported.as_ref().map_or(
+            dirk_rhi::ImageInfo {
+                dimension: dirk_rhi::ImageDimension::TwoD,
+                extent: Extent3d::new_2d(self.width, self.height),
+                format: self.format,
+                samples: self.samples,
+                usage: ImageUsages::NONE,
+                mip_levels: 1,
+                array_layers: 1,
+            },
+            |imported| imported.image.description(),
+        )
+    }
+
+    fn attachment_extent(&self, range: SubresourceRange) -> Result<Extent3d> {
+        anyhow::ensure!(
+            range.mip_level_count == 1 && range.array_layer_count == 1,
+            "graph attachments must select one mip and one layer"
+        );
+        if let Some(imported) = &self.imported {
+            anyhow::ensure!(
+                imported.view.info().range == range,
+                "attachment view must match its declared subresource range"
+            );
+        }
+        let extent = self.image_info().mip_extent(range.base_mip_level)?;
+        Ok(Extent3d::new_2d(extent.width, extent.height))
+    }
+}
+
 /// Externally owned image and its graph-boundary states.
 #[derive(Clone)]
 pub struct ImportedTexture<'a> {
     /// Image allocation used by the graph.
     pub image: &'a RhiImage,
     /// View of the paired image covering the attachment or sampling range.
+    /// Attachment declarations must match this view's single mip and layer.
     pub view: &'a ImageView,
     /// Actual access state before graph execution.
     pub initial_state: ImageState,
@@ -394,6 +427,26 @@ struct PassNode<'a> {
 }
 
 impl PassNode<'_> {
+    fn attachment_extent(&self, textures: &[TextureDesc<'_>]) -> Result<Option<Extent3d>> {
+        let mut extent = None;
+        for usage in &self.writes {
+            if matches!(
+                usage.state,
+                ImageState::ColorAttachment | ImageState::DepthStencilAttachment
+            ) {
+                let size = textures[usage.handle.index()]
+                    .attachment_extent(usage.range)
+                    .with_context(|| format!("{}: invalid attachment", self.name))?;
+                anyhow::ensure!(
+                    *extent.get_or_insert(size) == size,
+                    "{}: attachment mip extents must match",
+                    self.name
+                );
+            }
+        }
+        Ok(extent)
+    }
+
     /// Derive one dependency for overlapping reads before changing tracked state.
     /// All accesses cover the same aspects/layers after validation, so overlapping
     /// mip spans can be combined. The stage union may conservatively cover extra mips.
@@ -486,6 +539,8 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declares a write access with an explicit subresource range.
+    /// Attachments select one mip and layer matching the imported view, and all
+    /// attachments in a pass must have the same mip extent.
     pub fn write_range(
         &mut self,
         handle: TextureHandle,
@@ -652,7 +707,7 @@ impl<'a> RenderGraph<'a> {
     /// Imports allocation metadata from the image itself.
     ///
     /// # Errors
-    /// Rejects conflicting boundary states for an already imported allocation.
+    /// Rejects conflicting boundary states or view ranges for an already imported allocation.
     pub fn import_texture(&mut self, imported: ImportedTexture<'a>) -> Result<TextureHandle> {
         for (index, desc) in self.textures.iter().enumerate() {
             if let Some(existing) = &desc.imported
@@ -660,8 +715,9 @@ impl<'a> RenderGraph<'a> {
             {
                 anyhow::ensure!(
                     existing.initial_state == imported.initial_state
-                        && existing.final_state == imported.final_state,
-                    "conflicting states for duplicate image import"
+                        && existing.final_state == imported.final_state
+                        && existing.view.info().range == imported.view.info().range,
+                    "conflicting states or view ranges for duplicate image import"
                 );
                 return Ok(texture_handle(index));
             }
@@ -732,18 +788,7 @@ impl<'a> RenderGraph<'a> {
                 let desc = self.textures.get(usage.handle.index()).ok_or_else(|| {
                     anyhow::anyhow!("{}: texture handle is outside this graph", pass.name)
                 })?;
-                let info = desc.imported.as_ref().map_or(
-                    dirk_rhi::ImageInfo {
-                        dimension: dirk_rhi::ImageDimension::TwoD,
-                        extent: Extent3d::new_2d(desc.width, desc.height),
-                        format: desc.format,
-                        samples: desc.samples,
-                        usage: ImageUsages::NONE,
-                        mip_levels: 1,
-                        array_layers: 1,
-                    },
-                    |i| i.image.description(),
-                );
+                let info = desc.image_info();
                 usage.range = usage.range.resolve(&info)?;
                 anyhow::ensure!(
                     usage.range.aspects == info.format.aspects()
@@ -878,13 +923,11 @@ impl<'a> RenderGraph<'a> {
 
             let mut colors = Vec::new();
             let mut depth = None;
-            let mut extent = None;
+            let extent = pass.attachment_extent(&self.textures)?;
             for usage in &pass.writes {
                 let Some(info) = usage.attachment else {
                     continue;
                 };
-                let desc = &self.textures[usage.handle.index()];
-                extent.get_or_insert(Extent3d::new_2d(desc.width, desc.height));
                 match usage.state {
                     ImageState::ColorAttachment => colors.push(CompiledColorAttachment {
                         handle: usage.handle,
@@ -1397,6 +1440,42 @@ mod tests {
             .read_transfer_src(color);
         let error = graph.compile().err().expect("incompatible read layouts");
         assert!(error.to_string().contains("compatible read-only states"));
+    }
+
+    #[test]
+    fn attachments_and_resolve_targets_require_matching_extents() {
+        for resolve in [false, true] {
+            let mut graph = RenderGraph::new();
+            let color = graph.create_texture(color_desc());
+            let smaller = graph.create_texture(TextureDesc {
+                width: 32,
+                ..color_desc()
+            });
+            let mut pass = graph.add_pass("mismatched attachment extents");
+            if resolve {
+                pass.write_color_attachment_with_resolve(
+                    color,
+                    smaller,
+                    AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
+                );
+            } else {
+                for handle in [color, smaller] {
+                    pass.write_color_attachment(
+                        handle,
+                        AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
+                    );
+                }
+            }
+            let error = graph
+                .compile()
+                .err()
+                .expect("mismatched attachment extents");
+            assert!(
+                error
+                    .to_string()
+                    .contains("attachment mip extents must match")
+            );
+        }
     }
 
     #[test]
