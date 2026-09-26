@@ -159,6 +159,12 @@ unsafe impl Backend for VulkanBackend {
         self.context.capabilities
     }
 
+    fn validation_error_count(&self) -> usize {
+        self.context
+            .validation_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn supported_depth_formats(&self) -> &[TextureFormat] {
         self.context.supported_depth_formats
     }

@@ -8,6 +8,10 @@
 //! Exact-region filtered blits are currently unsupported. Callers query this
 //! before recording and select an explicit fallback; whole-chain native mipmap
 //! generation is not substituted for a regional operation.
+//!
+//! Operations creating autoreleased Objective-C objects provide their own
+//! draining pools. Objects that escape those operations must be retained Rust
+//! owners; callers do not need an `AppKit` event loop or an autorelease pool.
 
 #![cfg(target_vendor = "apple")]
 

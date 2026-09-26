@@ -10,6 +10,10 @@ use std::num::NonZeroU32;
 pub struct Limits {
     /// Maximum buffer allocation in bytes.
     pub max_buffer_size: u64,
+    /// Maximum byte range exposed by one uniform-buffer binding.
+    pub max_uniform_buffer_binding_size: u64,
+    /// Maximum byte range exposed by one storage-buffer binding.
+    pub max_storage_buffer_binding_size: u64,
     /// Maximum width/height of a 2D image.
     pub max_image_dimension_2d: u32,
     /// Maximum dimension of a 3D image.
@@ -33,6 +37,8 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_buffer_size: 1 << 27,
+            max_uniform_buffer_binding_size: 1 << 16,
+            max_storage_buffer_binding_size: 1 << 27,
             max_image_dimension_2d: 4096,
             max_image_dimension_3d: 256,
             max_image_array_layers: 256,

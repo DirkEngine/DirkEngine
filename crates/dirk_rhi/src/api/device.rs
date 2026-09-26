@@ -75,6 +75,15 @@ impl<B: Backend> Rhi<B> {
     pub fn capabilities(&self) -> crate::Capabilities {
         self.device.backend.capabilities()
     }
+    /// Number of native validation errors reported since device creation.
+    ///
+    /// Vulkan validation messages are also logged through `tracing`. Returns
+    /// zero when validation is disabled or the backend has no error counter;
+    /// this does not indicate that validation is available.
+    #[must_use]
+    pub fn validation_error_count(&self) -> usize {
+        self.device.backend.validation_error_count()
+    }
     /// Per-format support, queried before allocation or command recording.
     #[must_use]
     pub fn format_capabilities(&self, format: TextureFormat) -> crate::FormatCapabilities {
@@ -352,6 +361,19 @@ impl<B: Backend> Rhi<B> {
                 .resolve(buffer.size())?;
                 let uniform = matches!(ty, BindingType::UniformBuffer { .. });
                 let caps = self.capabilities();
+                let max_size = if uniform {
+                    caps.limits.max_uniform_buffer_binding_size
+                } else {
+                    caps.limits.max_storage_buffer_binding_size
+                };
+                if range.size > max_size {
+                    return Err(Ir::OutOfRange
+                        .with_detail(format!(
+                            "buffer binding range {} exceeds device limit {max_size}",
+                            range.size
+                        ))
+                        .into());
+                }
                 let alignment = if uniform {
                     caps.min_uniform_buffer_offset_alignment
                 } else {
@@ -481,6 +503,17 @@ impl<B: Backend> Rhi<B> {
                 .supports(desc.samples)
         {
             return Err(crate::UnsupportedOperation::TextureFormat(depth.format).into());
+        }
+        if desc.depth.is_some_and(|depth| {
+            depth.stencil.is_some()
+                && !depth
+                    .format
+                    .aspects()
+                    .contains(crate::ImageAspects::STENCIL)
+        }) {
+            return Err(Ir::Mismatch
+                .with_detail("stencil testing requires a format with a stencil aspect")
+                .into());
         }
         let raw = GraphicsPipelineDesc::<B> {
             label: desc.label,

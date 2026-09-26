@@ -92,31 +92,35 @@ impl crate::Api for MetalBackend {
 // SAFETY: native resources own their parent objects; the shared RHI validates calls and retains GPU use.
 unsafe impl Backend for MetalBackend {
     unsafe fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
-        let device = Device::system_default().ok_or(crate::Error::NoDevice)?;
-        let queue = device.new_command_queue();
-        queue.set_label(&format!("{} graphics queue", info.application_name));
-        let max_buffer_size = device.max_buffer_length();
-        let context = Arc::new(Context {
-            device,
-            queue,
-            garbage: parking_lot::Mutex::new(crate::retirement::RetirementQueue::default()),
-        });
-        Ok(Self {
-            context,
-            capabilities: Capabilities {
-                limits: crate::Limits {
-                    max_buffer_size,
-                    ..crate::Limits::default()
+        metal::objc::rc::autoreleasepool(|| {
+            let device = Device::system_default().ok_or(crate::Error::NoDevice)?;
+            let queue = device.new_command_queue();
+            queue.set_label(&format!("{} graphics queue", info.application_name));
+            let max_buffer_size = device.max_buffer_length();
+            let context = Arc::new(Context {
+                device,
+                queue,
+                garbage: parking_lot::Mutex::new(crate::retirement::RetirementQueue::default()),
+            });
+            Ok(Self {
+                context,
+                capabilities: Capabilities {
+                    limits: crate::Limits {
+                        max_buffer_size,
+                        max_uniform_buffer_binding_size: max_buffer_size,
+                        max_storage_buffer_binding_size: max_buffer_size,
+                        ..crate::Limits::default()
+                    },
+                    depth_bias_clamp: true,
+                    max_sampler_anisotropy: 16,
+                    min_uniform_buffer_offset_alignment: 256,
+                    min_storage_buffer_offset_alignment: 16,
+                    buffer_copy_offset_alignment: 4,
+                    buffer_copy_row_pitch_alignment: 256,
+                    dedicated_compute_queue: false,
+                    dedicated_copy_queue: false,
                 },
-                depth_bias_clamp: true,
-                max_sampler_anisotropy: 16,
-                min_uniform_buffer_offset_alignment: 256,
-                min_storage_buffer_offset_alignment: 16,
-                buffer_copy_offset_alignment: 4,
-                buffer_copy_row_pitch_alignment: 256,
-                dedicated_compute_queue: false,
-                dedicated_copy_queue: false,
-            },
+            })
         })
     }
 
@@ -210,11 +214,13 @@ unsafe impl Backend for MetalBackend {
     }
 
     unsafe fn wait_idle(&self) -> Result<()> {
-        let command = self.context.queue.new_command_buffer();
-        command.commit();
-        command.wait_until_completed();
-        command_result(command)?;
-        Ok(())
+        metal::objc::rc::autoreleasepool(|| {
+            let command = self.context.queue.new_command_buffer();
+            command.commit();
+            command.wait_until_completed();
+            command_result(command)?;
+            Ok(())
+        })
     }
 
     fn seal_garbage(&self) {
@@ -229,23 +235,23 @@ unsafe impl Backend for MetalBackend {
     }
 
     unsafe fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<MetalBuffer> {
-        MetalBuffer::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalBuffer::create(&self.context, desc))
     }
 
     unsafe fn create_image(&self, desc: &ImageDesc<'_>) -> Result<MetalImage> {
-        MetalImage::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalImage::create(&self.context, desc))
     }
 
     unsafe fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<MetalImageView> {
-        MetalImageView::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalImageView::create(&self.context, desc))
     }
 
     unsafe fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<MetalSampler> {
-        Ok(MetalSampler::create(&self.context, desc))
+        metal::objc::rc::autoreleasepool(|| Ok(MetalSampler::create(&self.context, desc)))
     }
 
     unsafe fn create_shader(&self, desc: &ShaderDesc<'_>) -> Result<MetalShader> {
-        MetalShader::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalShader::create(&self.context, desc))
     }
 
     unsafe fn create_bind_group_layout(
@@ -270,7 +276,7 @@ unsafe impl Backend for MetalBackend {
         &self,
         desc: &GraphicsPipelineDesc<'_, Self>,
     ) -> Result<MetalGraphicsPipeline> {
-        MetalGraphicsPipeline::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalGraphicsPipeline::create(&self.context, desc))
     }
 
     unsafe fn create_command_pool(&self, queue: QueueType) -> Result<MetalCommandPool> {
@@ -305,64 +311,66 @@ unsafe impl Backend for MetalBackend {
     }
 
     unsafe fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
-        if let Some(fence) = submission.fence {
-            require_context(&self.context, &fence.context)?;
-        }
-        let mut commands = submission
-            .command_buffers
-            .iter()
-            .map(|command| {
-                require_context(&self.context, &command.context)?;
-                if command.queue != queue {
-                    return Err(crate::InvalidResourceKind::Mismatch.into());
-                }
-                command.command_for_submit()
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if commands.is_empty() {
-            commands.push(self.context.queue(queue).new_command_buffer().to_owned());
-        }
-        for point in submission
-            .wait_timelines
-            .iter()
-            .chain(submission.signal_timelines)
-        {
-            require_context(&self.context, &point.semaphore.context)?;
-        }
-        for frame in submission.surface_frames {
-            require_context(&self.context, &frame.context)?;
-        }
-        // Waits must precede recorded work, not be appended after its encoders.
-        if !submission.wait_timelines.is_empty() {
-            let prelude = self.context.queue(queue).new_command_buffer().to_owned();
-            for point in submission.wait_timelines {
-                prelude.encode_wait_for_event(&point.semaphore.event, point.value);
+        metal::objc::rc::autoreleasepool(|| {
+            if let Some(fence) = submission.fence {
+                require_context(&self.context, &fence.context)?;
             }
-            commands.insert(0, prelude);
-        }
-        let last = &commands[commands.len() - 1];
-        for frame in submission.surface_frames {
-            frame.mark_submitted()?;
-            last.present_drawable(&frame.drawable);
-        }
-        for point in submission.signal_timelines {
-            last.encode_signal_event(&point.semaphore.event, point.value);
-        }
-        if let Some(fence) = submission.fence {
-            fence.track(&commands);
-        }
-        for command in commands {
-            command.commit();
-        }
-        Ok(())
+            let mut commands = submission
+                .command_buffers
+                .iter()
+                .map(|command| {
+                    require_context(&self.context, &command.context)?;
+                    if command.queue != queue {
+                        return Err(crate::InvalidResourceKind::Mismatch.into());
+                    }
+                    command.command_for_submit()
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if commands.is_empty() {
+                commands.push(self.context.queue(queue).new_command_buffer().to_owned());
+            }
+            for point in submission
+                .wait_timelines
+                .iter()
+                .chain(submission.signal_timelines)
+            {
+                require_context(&self.context, &point.semaphore.context)?;
+            }
+            for frame in submission.surface_frames {
+                require_context(&self.context, &frame.context)?;
+            }
+            // Waits must precede recorded work, not be appended after its encoders.
+            if !submission.wait_timelines.is_empty() {
+                let prelude = self.context.queue(queue).new_command_buffer().to_owned();
+                for point in submission.wait_timelines {
+                    prelude.encode_wait_for_event(&point.semaphore.event, point.value);
+                }
+                commands.insert(0, prelude);
+            }
+            let last = &commands[commands.len() - 1];
+            for frame in submission.surface_frames {
+                frame.mark_submitted()?;
+                last.present_drawable(&frame.drawable);
+            }
+            for point in submission.signal_timelines {
+                last.encode_signal_event(&point.semaphore.event, point.value);
+            }
+            if let Some(fence) = submission.fence {
+                fence.track(&commands);
+            }
+            for command in commands {
+                command.commit();
+            }
+            Ok(())
+        })
     }
 
     unsafe fn create_surface(&self, info: SurfaceCreateInfo) -> Result<MetalSurface> {
-        MetalSurface::create(&self.context, &info)
+        metal::objc::rc::autoreleasepool(|| MetalSurface::create(&self.context, &info))
     }
 
     unsafe fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<MetalSwapchain> {
-        MetalSwapchain::create(&self.context, desc)
+        metal::objc::rc::autoreleasepool(|| MetalSwapchain::create(&self.context, desc))
     }
 }
 
@@ -378,9 +386,11 @@ pub(crate) fn command_result(command: &metal::CommandBufferRef) -> Result<()> {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        let command = self.queue.new_command_buffer();
-        command.commit();
-        command.wait_until_completed();
-        self.drain();
+        metal::objc::rc::autoreleasepool(|| {
+            let command = self.queue.new_command_buffer();
+            command.commit();
+            command.wait_until_completed();
+            self.drain();
+        });
     }
 }

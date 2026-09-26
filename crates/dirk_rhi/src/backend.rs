@@ -29,6 +29,7 @@ pub struct RhiCreateInfo<'a> {
     ///
     /// Headless users may leave this unset and create a surface later, at
     /// which point presentation support can still be rejected by the backend.
+    /// Vulkan requires these handles up front to enable presentation extensions.
     pub compatible_surface: Option<(DisplayHandle<'a>, WindowHandle<'a>)>,
 }
 
@@ -243,6 +244,11 @@ pub unsafe trait Backend:
     unsafe fn new(info: &RhiCreateInfo<'_>) -> Result<Self>;
     /// Returns selected device capabilities.
     fn capabilities(&self) -> Capabilities;
+    /// Number of errors observed by native validation since device creation.
+    /// Backends without a diagnostic counter return zero.
+    fn validation_error_count(&self) -> usize {
+        0
+    }
     /// Returns the depth attachment formats supported by the selected
     /// device, ordered from most to least preferred.
     fn supported_depth_formats(&self) -> &[TextureFormat];

@@ -78,15 +78,17 @@ impl MetalCommandBuffer {
     }
 
     fn with_blit(&mut self, encode: impl FnOnce(&metal::BlitCommandEncoderRef)) -> Result<()> {
-        let state = self.state.get_mut();
-        if state.render.is_some() {
-            return Err(Ir::BadState.into());
-        }
-        let command = state.command.as_ref().ok_or(Ir::BadState)?;
-        let encoder = command.new_blit_command_encoder();
-        encode(encoder);
-        encoder.end_encoding();
-        Ok(())
+        metal::objc::rc::autoreleasepool(|| {
+            let state = self.state.get_mut();
+            if state.render.is_some() {
+                return Err(Ir::BadState.into());
+            }
+            let command = state.command.as_ref().ok_or(Ir::BadState)?;
+            let encoder = command.new_blit_command_encoder();
+            encode(encoder);
+            encoder.end_encoding();
+            Ok(())
+        })
     }
 }
 
@@ -96,25 +98,27 @@ unsafe impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
     }
 
     unsafe fn begin(&mut self, label: &str, _one_time_submit: bool) -> Result<()> {
-        let state = self.state.get_mut();
-        if state.command.is_some() && !state.submitted {
-            return Err(Ir::BadState.into());
-        }
-        let command = self
-            .context
-            .queue(self.queue)
-            .new_command_buffer()
-            .to_owned();
-        command.set_label(label);
-        *state = CommandState {
-            command: Some(command),
-            render: None,
-            pipeline: None,
-            index: None,
-            ended: false,
-            submitted: false,
-        };
-        Ok(())
+        metal::objc::rc::autoreleasepool(|| {
+            let state = self.state.get_mut();
+            if state.command.is_some() && !state.submitted {
+                return Err(Ir::BadState.into());
+            }
+            let command = self
+                .context
+                .queue(self.queue)
+                .new_command_buffer()
+                .to_owned();
+            command.set_label(label);
+            *state = CommandState {
+                command: Some(command),
+                render: None,
+                pipeline: None,
+                index: None,
+                ended: false,
+                submitted: false,
+            };
+            Ok(())
+        })
     }
 
     unsafe fn end(&mut self) -> Result<()> {
@@ -130,73 +134,75 @@ unsafe impl RhiCommandBuffer<MetalBackend> for MetalCommandBuffer {
     }
 
     unsafe fn begin_rendering(&mut self, info: &RenderingInfo<'_, MetalBackend>) -> Result<()> {
-        let state = self.state.get_mut();
-        if state.render.is_some() {
-            return Err(Ir::BadState.into());
-        }
-        let command = state
-            .command
-            .as_ref()
-            .ok_or_else(|| crate::Error::from(Ir::BadState))?;
-        let descriptor = RenderPassDescriptor::new();
-        for (index, attachment) in info.color_attachments.iter().enumerate() {
-            require_context(&self.context, &attachment.view.context)?;
-            let metal_attachment = descriptor
-                .color_attachments()
-                .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
-                .ok_or_else(|| crate::Error::from(Ir::OutOfRange))?;
-            metal_attachment.set_texture(Some(&attachment.view.raw));
-            metal_attachment.set_load_action(convert::load(&attachment.load));
-            if let crate::LoadOp::Clear(color) = attachment.load {
-                metal_attachment.set_clear_color(MTLClearColor::new(
-                    f64::from(color.r),
-                    f64::from(color.g),
-                    f64::from(color.b),
-                    f64::from(color.a),
+        metal::objc::rc::autoreleasepool(|| {
+            let state = self.state.get_mut();
+            if state.render.is_some() {
+                return Err(Ir::BadState.into());
+            }
+            let command = state
+                .command
+                .as_ref()
+                .ok_or_else(|| crate::Error::from(Ir::BadState))?;
+            let descriptor = RenderPassDescriptor::new();
+            for (index, attachment) in info.color_attachments.iter().enumerate() {
+                require_context(&self.context, &attachment.view.context)?;
+                let metal_attachment = descriptor
+                    .color_attachments()
+                    .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
+                    .ok_or_else(|| crate::Error::from(Ir::OutOfRange))?;
+                metal_attachment.set_texture(Some(&attachment.view.raw));
+                metal_attachment.set_load_action(convert::load(&attachment.load));
+                if let crate::LoadOp::Clear(color) = attachment.load {
+                    metal_attachment.set_clear_color(MTLClearColor::new(
+                        f64::from(color.r),
+                        f64::from(color.g),
+                        f64::from(color.b),
+                        f64::from(color.a),
+                    ));
+                }
+                if let Some(resolve) = attachment.resolve {
+                    require_context(&self.context, &resolve.context)?;
+                    metal_attachment.set_resolve_texture(Some(&resolve.raw));
+                }
+                metal_attachment.set_store_action(convert::store(
+                    attachment.store,
+                    attachment.resolve.is_some(),
                 ));
             }
-            if let Some(resolve) = attachment.resolve {
-                require_context(&self.context, &resolve.context)?;
-                metal_attachment.set_resolve_texture(Some(&resolve.raw));
-            }
-            metal_attachment.set_store_action(convert::store(
-                attachment.store,
-                attachment.resolve.is_some(),
-            ));
-        }
-        if let Some(attachment) = &info.depth_attachment {
-            require_context(&self.context, &attachment.view.context)?;
-            if attachment.view.aspects.contains(crate::ImageAspects::DEPTH) {
-                let depth = descriptor
-                    .depth_attachment()
-                    .ok_or_else(|| crate::Error::from(Ir::BadState))?;
-                depth.set_texture(Some(&attachment.view.raw));
-                depth.set_load_action(convert::load(&attachment.depth_load));
-                depth.set_store_action(convert::store(attachment.depth_store, false));
-                if let crate::LoadOp::Clear(value) = attachment.depth_load {
-                    depth.set_clear_depth(f64::from(value));
+            if let Some(attachment) = &info.depth_attachment {
+                require_context(&self.context, &attachment.view.context)?;
+                if attachment.view.aspects.contains(crate::ImageAspects::DEPTH) {
+                    let depth = descriptor
+                        .depth_attachment()
+                        .ok_or_else(|| crate::Error::from(Ir::BadState))?;
+                    depth.set_texture(Some(&attachment.view.raw));
+                    depth.set_load_action(convert::load(&attachment.depth_load));
+                    depth.set_store_action(convert::store(attachment.depth_store, false));
+                    if let crate::LoadOp::Clear(value) = attachment.depth_load {
+                        depth.set_clear_depth(f64::from(value));
+                    }
+                }
+                if attachment
+                    .view
+                    .aspects
+                    .contains(crate::ImageAspects::STENCIL)
+                {
+                    let stencil = descriptor
+                        .stencil_attachment()
+                        .ok_or_else(|| crate::Error::from(Ir::BadState))?;
+                    stencil.set_texture(Some(&attachment.view.raw));
+                    stencil.set_load_action(convert::load(&attachment.stencil_load));
+                    stencil.set_store_action(convert::store(attachment.stencil_store, false));
+                    if let crate::LoadOp::Clear(value) = attachment.stencil_load {
+                        stencil.set_clear_stencil(value);
+                    }
                 }
             }
-            if attachment
-                .view
-                .aspects
-                .contains(crate::ImageAspects::STENCIL)
-            {
-                let stencil = descriptor
-                    .stencil_attachment()
-                    .ok_or_else(|| crate::Error::from(Ir::BadState))?;
-                stencil.set_texture(Some(&attachment.view.raw));
-                stencil.set_load_action(convert::load(&attachment.stencil_load));
-                stencil.set_store_action(convert::store(attachment.stencil_store, false));
-                if let crate::LoadOp::Clear(value) = attachment.stencil_load {
-                    stencil.set_clear_stencil(value);
-                }
-            }
-        }
-        let encoder = command.new_render_command_encoder(descriptor).to_owned();
-        encoder.set_label(info.label);
-        state.render = Some(encoder);
-        Ok(())
+            let encoder = command.new_render_command_encoder(descriptor).to_owned();
+            encoder.set_label(info.label);
+            state.render = Some(encoder);
+            Ok(())
+        })
     }
 
     unsafe fn end_rendering(&mut self) -> Result<()> {

@@ -594,6 +594,12 @@ impl<B: Backend> CommandEncoder<B, Graphics> {
         }
         let depth = if let Some(depth) = &info.depth_attachment {
             Self::attachment(depth.view, info, &mut samples)?;
+            let view = depth.view.info();
+            if view.range.aspects != view.image.format.aspects() {
+                return Err(Ir::Mismatch
+                    .with_detail("depth/stencil attachments must select every aspect of their pipeline format")
+                    .into());
+            }
             Some(crate::DepthAttachment::<B> {
                 view: depth.view.raw(),
                 depth_load: depth.depth_load,
