@@ -1,10 +1,10 @@
-//! Systems run in registration order, once per entity matching their queries.
+//! Systems run in registration order, once per tick.
 //!
 //! Functions and stateful [`System`] implementations declare the data they
 //! receive. The universe fetches those parameters before each run.
 
 use std::{
-    any::type_name,
+    any::{TypeId, type_name},
     cell::{RefCell, RefMut},
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -12,64 +12,32 @@ use std::{
 
 use crate::{
     CommandBuffer, Entity, Universe,
-    changes::{Change, ComponentChange},
     components::Component,
-    query::{
-        Query, QueryAccess, QueryParameter, QueryView, ReadOnlyQueryParameter, filter::Filter,
-    },
+    lifecycle::LifecycleEvent,
+    query::{Query, QueryAccess, QueryParameter, filter::Filter},
 };
 
 /// Data supplied to one system invocation.
 pub trait SystemParam {
-    /// Whether this parameter requires one invocation per matching entity.
-    const PER_ENTITY: bool = false;
-
     /// The value supplied while the universe is borrowed for this invocation.
     type Item<'u>;
 
-    /// Fetches a parameter, or skips the invocation if the entity does not match.
+    /// Fetches a parameter using this system's previous execution counter.
     fn fetch<'u>(
         universe: &'u Universe,
-        entity: Option<Entity>,
+        last_run: u64,
         delta_time: f64,
         commands: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>>;
+    ) -> Self::Item<'u>;
 
     /// Registers this parameter's accesses before the system runs.
     fn register_access(access: &mut QueryAccess);
-
-    /// Calls a system for each match, or once when it has no entity query.
-    fn for_each(
-        universe: &Universe,
-        delta_time: f64,
-        commands: &RefCell<CommandBuffer>,
-        mut run: impl FnMut(Self::Item<'_>),
-    ) {
-        let mut invoke = |entity| {
-            if let Some(params) = Self::fetch(universe, entity, delta_time, commands) {
-                run(params);
-            }
-        };
-        if Self::PER_ENTITY {
-            for entity in universe.entities.keys().copied() {
-                invoke(Some(entity));
-            }
-        } else {
-            invoke(None);
-        }
-    }
 }
 
 impl SystemParam for () {
     type Item<'u> = ();
 
-    fn fetch<'u>(
-        _: &'u Universe,
-        _: Option<Entity>,
-        _: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Some(())
+    fn fetch<'u>(_: &'u Universe, _: u64, _: f64, _: &'u RefCell<CommandBuffer>) -> Self::Item<'u> {
     }
 
     fn register_access(_: &mut QueryAccess) {}
@@ -78,16 +46,15 @@ impl SystemParam for () {
 macro_rules! impl_system_param_tuple {
     ($($param:ident),+) => {
         impl<$($param: SystemParam),+> SystemParam for ($($param,)+) {
-            const PER_ENTITY: bool = false $(|| $param::PER_ENTITY)+;
             type Item<'u> = ($($param::Item<'u>,)+);
 
             fn fetch<'u>(
                 universe: &'u Universe,
-                entity: Option<Entity>,
+                last_run: u64,
                 delta_time: f64,
                 commands: &'u RefCell<CommandBuffer>,
-            ) -> Option<Self::Item<'u>> {
-                Some(($($param::fetch(universe, entity, delta_time, commands)?,)+))
+            ) -> Self::Item<'u> {
+                ($($param::fetch(universe, last_run, delta_time, commands),)+)
             }
 
             fn register_access(access: &mut QueryAccess) {
@@ -103,33 +70,15 @@ impl_system_param_tuple!(A, B, C);
 impl_system_param_tuple!(A, B, C, D);
 
 impl<P: QueryParameter, F: Filter> SystemParam for Query<'_, P, F> {
-    const PER_ENTITY: bool = true;
     type Item<'u> = Query<'u, P, F>;
 
     fn fetch<'u>(
         universe: &'u Universe,
-        entity: Option<Entity>,
+        last_run: u64,
         _: f64,
         _: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Query::matches(entity?, universe)
-    }
-
-    fn register_access(access: &mut QueryAccess) {
-        P::register_access(access);
-    }
-}
-
-impl<P: ReadOnlyQueryParameter, F: Filter> SystemParam for QueryView<'_, P, F> {
-    type Item<'u> = QueryView<'u, P, F>;
-
-    fn fetch<'u>(
-        universe: &'u Universe,
-        _: Option<Entity>,
-        _: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Some(QueryView::new(universe))
+    ) -> Self::Item<'u> {
+        Query::for_system(universe, last_run)
     }
 
     fn register_access(access: &mut QueryAccess) {
@@ -162,13 +111,13 @@ impl SystemParam for Commands<'_> {
 
     fn fetch<'u>(
         _: &'u Universe,
-        _: Option<Entity>,
+        _: u64,
         _: f64,
         commands: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Some(Commands {
+    ) -> Self::Item<'u> {
+        Commands {
             buffer: commands.borrow_mut(),
-        })
+        }
     }
 
     fn register_access(access: &mut QueryAccess) {
@@ -176,33 +125,69 @@ impl SystemParam for Commands<'_> {
     }
 }
 
-/// Ordered changes applied at the start of this tick.
-pub struct Changes<'u> {
+/// Structural notifications for this tick. Ordinary component updates use
+/// `Changed<C>` queries. Records contain IDs and types, never component values.
+pub struct Lifecycle<'u> {
     universe: &'u Universe,
 }
 
-impl<'u> Changes<'u> {
-    /// Iterates over every change in command order.
-    pub fn iter(&self) -> impl Iterator<Item = &'u Change> {
-        self.universe.changes()
-    }
-
-    /// Iterates over changes for one component type.
-    pub fn components<C: Component>(&self) -> impl Iterator<Item = ComponentChange<'u, C>> {
-        self.universe.component_changes::<C>()
+impl<'u> Lifecycle<'u> {
+    /// Iterates over structural transitions in command order.
+    pub fn iter(&self) -> impl Iterator<Item = &'u LifecycleEvent> {
+        self.universe.lifecycle()
     }
 }
 
-impl SystemParam for Changes<'_> {
-    type Item<'u> = Changes<'u>;
+impl SystemParam for Lifecycle<'_> {
+    type Item<'u> = Lifecycle<'u>;
 
     fn fetch<'u>(
         universe: &'u Universe,
-        _: Option<Entity>,
+        _: u64,
         _: f64,
         _: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Some(Changes { universe })
+    ) -> Self::Item<'u> {
+        Lifecycle { universe }
+    }
+
+    fn register_access(_: &mut QueryAccess) {}
+}
+
+/// Entities whose component was removed during this tick, including despawns.
+/// Every system can read the same records. Values are dropped on removal, and
+/// records expire at the next tick. An entity may have re-added the component.
+pub struct RemovedComponents<'u, C: Component> {
+    universe: &'u Universe,
+    _marker: PhantomData<C>,
+}
+
+impl<C: Component> RemovedComponents<'_, C> {
+    /// Iterates over removed entity IDs, in command order.
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.universe.lifecycle().filter_map(|event| match *event {
+            LifecycleEvent::ComponentRemoved { entity, type_id }
+                if type_id == TypeId::of::<C>() =>
+            {
+                Some(entity)
+            }
+            _ => None,
+        })
+    }
+}
+
+impl<C: Component> SystemParam for RemovedComponents<'_, C> {
+    type Item<'u> = RemovedComponents<'u, C>;
+
+    fn fetch<'u>(
+        universe: &'u Universe,
+        _: u64,
+        _: f64,
+        _: &'u RefCell<CommandBuffer>,
+    ) -> Self::Item<'u> {
+        RemovedComponents {
+            universe,
+            _marker: PhantomData,
+        }
     }
 
     fn register_access(_: &mut QueryAccess) {}
@@ -217,11 +202,11 @@ impl SystemParam for DeltaTime {
 
     fn fetch<'u>(
         _: &'u Universe,
-        _: Option<Entity>,
+        _: u64,
         delta_time: f64,
         _: &'u RefCell<CommandBuffer>,
-    ) -> Option<Self::Item<'u>> {
-        Some(Self(delta_time))
+    ) -> Self::Item<'u> {
+        Self(delta_time)
     }
 
     fn register_access(_: &mut QueryAccess) {}
@@ -229,10 +214,10 @@ impl SystemParam for DeltaTime {
 
 /// A stateful system declaring its inputs in the trait's type parameter.
 ///
-/// Each query supplies one matching entity. Multiple queries must all match the
-/// same entity. Systems without `Query` parameters run once per tick, even in an
-/// empty universe. Mutable edits are visible to later systems in the same tick;
-/// structural commands apply on the next tick.
+/// Systems run once per tick, even when their queries are empty. Queries are
+/// independent collections; their contents are iterated explicitly. Mutable
+/// edits are visible to later systems in the same tick; structural commands
+/// apply on the next tick.
 pub trait System<Params: SystemParam>: 'static {
     /// Returns the type name for diagnostics.
     fn name(&self) -> &'static str {
@@ -255,7 +240,7 @@ pub trait ToSystem<Marker>: 'static {
 /// Internal execution interface used by the universe's system list.
 #[doc(hidden)]
 pub trait ErasedSystem: 'static {
-    /// Runs a system for every match of its declared parameters.
+    /// Runs a system once and advances its change-detection counter.
     fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
 }
 
@@ -265,14 +250,16 @@ pub struct SystemMarker<Params>(PhantomData<fn() -> Params>);
 
 struct SystemRunner<S, Params> {
     system: S,
+    last_run: u64,
     _marker: PhantomData<fn() -> Params>,
 }
 
 impl<S: System<Params>, Params: SystemParam + 'static> ErasedSystem for SystemRunner<S, Params> {
     fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
-        Params::for_each(universe, delta_time, commands, |params| {
-            self.system.run(params);
-        });
+        let this_run = universe.advance_change_tick();
+        self.system
+            .run(Params::fetch(universe, self.last_run, delta_time, commands));
+        self.last_run = this_run;
     }
 }
 
@@ -281,6 +268,7 @@ impl<S: System<Params>, Params: SystemParam + 'static> ToSystem<SystemMarker<Par
         Params::register_access(&mut QueryAccess::default());
         Box::new(SystemRunner::<_, Params> {
             system: self,
+            last_run: 0,
             _marker: PhantomData,
         })
     }

@@ -6,7 +6,7 @@ use crate::{
     Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
     query::{
-        Query, QueryItem, Read,
+        Query,
         filter::{With, Without},
     },
     systems::ToSystem,
@@ -94,12 +94,12 @@ fn query_filters_by_components_and_world_membership() {
             .with_component(Mana(5)),
     );
 
-    let matched: Vec<_> = QueryItem::<Read<Health>, Without<Mana>>::iter(&universe)
+    let matched: Vec<_> = Query::<(Entity, &Health), Without<Mana>>::new(&universe)
+        .iter()
         .filter(|item| {
-            universe.is_in_world(world_a, item.entity())
-                && !universe.is_in_world(world_b, item.entity())
+            universe.is_in_world(world_a, item.0) && !universe.is_in_world(world_b, item.0)
         })
-        .map(|item| item.entity())
+        .map(|(entity, _)| entity)
         .collect();
     assert_eq!(matched, vec![e1]);
     assert!(!matched.contains(&e2));
@@ -244,7 +244,7 @@ fn inspection_helpers_update_after_despawn_and_world_destruction() {
 }
 
 #[test]
-fn query_item_iter_applies_filters() {
+fn query_iter_applies_filters() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
@@ -271,15 +271,16 @@ fn query_item_iter_applies_filters() {
         Entity::builder().with_component(Mana(15)),
     );
 
-    let matched: Vec<_> = QueryItem::<Read<Health>, Without<Mana>>::iter(&universe)
-        .map(|query| (query.entity().raw(), query.params().0))
+    let matched: Vec<_> = Query::<(Entity, &Health), Without<Mana>>::new(&universe)
+        .iter()
+        .map(|(entity, health)| (entity.raw(), health.0))
         .collect();
 
     assert_eq!(matched, vec![(e1.raw(), 10)]);
 }
 
 #[test]
-fn query_item_tuple_params_require_every_component() {
+fn query_tuple_params_require_every_component() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
     let world = crate::WorldId::default();
@@ -297,19 +298,16 @@ fn query_item_tuple_params_require_every_component() {
             .with_component(Mana(5)),
     );
 
-    let matched: Vec<_> = QueryItem::<(Read<Health>, Read<Mana>)>::iter(&universe)
-        .map(|query| {
-            let entity = query.entity();
-            let (health, mana) = query.into_params();
-            (entity.raw(), health.0, mana.0)
-        })
+    let matched: Vec<_> = Query::<(Entity, &Health, &Mana)>::new(&universe)
+        .iter()
+        .map(|(entity, health, mana)| (entity.raw(), health.0, mana.0))
         .collect();
 
     assert_eq!(matched, vec![(both.raw(), 20, 5)]);
 }
 
 #[test]
-fn query_item_fetch_skips_entities_missing_parameters() {
+fn query_fetch_skips_entities_missing_parameters() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
     let world = crate::WorldId::default();
@@ -332,8 +330,9 @@ fn query_item_fetch_skips_entities_missing_parameters() {
             .with_component(Mana(2)),
     );
 
-    let mut matched: Vec<_> = QueryItem::<Read<Mana>>::iter(&universe)
-        .map(|query| query.entity().raw())
+    let mut matched: Vec<_> = Query::<(Entity, &Mana)>::new(&universe)
+        .iter()
+        .map(|(entity, _)| entity.raw())
         .collect();
     matched.sort_unstable();
 
@@ -341,7 +340,7 @@ fn query_item_fetch_skips_entities_missing_parameters() {
 }
 
 #[test]
-fn query_item_matches_entities_across_all_worlds() {
+fn query_matches_entities_across_all_worlds() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
@@ -361,8 +360,9 @@ fn query_item_matches_entities_across_all_worlds() {
         Entity::builder().with_component(Health(20)),
     );
 
-    let mut matched: Vec<_> = QueryItem::<Read<Health>>::iter(&universe)
-        .map(|query| query.entity().raw())
+    let mut matched: Vec<_> = Query::<(Entity, &Health)>::new(&universe)
+        .iter()
+        .map(|(entity, _)| entity.raw())
         .collect();
     matched.sort_unstable();
 
@@ -370,16 +370,16 @@ fn query_item_matches_entities_across_all_worlds() {
 }
 
 #[test]
-fn query_item_on_empty_universe_yields_nothing() {
+fn query_on_empty_universe_yields_nothing() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
 
-    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 0);
-    assert_eq!(QueryItem::<()>::iter(&universe).count(), 0);
+    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 0);
+    assert_eq!(Query::<Entity>::new(&universe).iter().count(), 0);
 }
 
 #[test]
-fn query_item_excludes_despawned_entities() {
+fn query_excludes_despawned_entities() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
     let world = crate::WorldId::default();
@@ -389,14 +389,14 @@ fn query_item_excludes_despawned_entities() {
         world,
         Entity::builder().with_component(Health(10)),
     );
-    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 1);
+    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 1);
 
     let mut command_buffer = universe.handle().command_buffer();
     command_buffer.despawn(despawned);
     command_buffer.submit();
     universe.tick(0.016);
 
-    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 0);
+    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 0);
 }
 
 #[test]
@@ -424,29 +424,34 @@ fn with_and_without_filters_compose() {
     );
     let neither = spawn_entity(&mut universe, world, Entity::builder());
 
-    let mut with_health: Vec<_> = QueryItem::<(), With<Health>>::iter(&universe)
-        .map(|query| query.entity().raw())
+    let mut with_health: Vec<_> = Query::<Entity, With<Health>>::new(&universe)
+        .iter()
+        .map(Entity::raw)
         .collect();
     with_health.sort_unstable();
     assert_eq!(with_health, vec![health_only.raw(), both.raw()]);
 
-    let mut without_health: Vec<_> = QueryItem::<(), Without<Health>>::iter(&universe)
-        .map(|query| query.entity().raw())
+    let mut without_health: Vec<_> = Query::<Entity, Without<Health>>::new(&universe)
+        .iter()
+        .map(Entity::raw)
         .collect();
     without_health.sort_unstable();
     assert_eq!(without_health, vec![mana_only.raw(), neither.raw()]);
 
-    let combined: Vec<_> = QueryItem::<(), (With<Health>, Without<Mana>)>::iter(&universe)
-        .map(|query| query.entity())
+    let combined: Vec<_> = Query::<Entity, (With<Health>, Without<Mana>)>::new(&universe)
+        .iter()
         .collect();
     assert_eq!(combined, vec![health_only]);
     assert_eq!(
-        QueryItem::<(), (With<Health>, Without<Health>)>::iter(&universe).count(),
+        Query::<Entity, (With<Health>, Without<Health>)>::new(&universe)
+            .iter()
+            .count(),
         0
     );
 
-    let mut everything: Vec<_> = QueryItem::<(), ()>::iter(&universe)
-        .map(|query| query.entity().raw())
+    let mut everything: Vec<_> = Query::<Entity, ()>::new(&universe)
+        .iter()
+        .map(Entity::raw)
         .collect();
     everything.sort_unstable();
     assert_eq!(
@@ -461,7 +466,7 @@ fn with_and_without_filters_compose() {
 }
 
 #[test]
-fn function_system_runs_for_matching_queries_only() {
+fn function_system_iterates_filtered_query() {
     use std::{cell::RefCell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
@@ -483,8 +488,10 @@ fn function_system_runs_for_matching_queries_only() {
 
     let seen = Rc::new(RefCell::new(Vec::new()));
     let system_seen = Rc::clone(&seen);
-    let mut system = (move |query: Query<'_, Read<Health>, Without<Mana>>| {
-        system_seen.borrow_mut().push(query.params().0);
+    let mut system = (move |query: Query<'_, &Health, Without<Mana>>| {
+        system_seen
+            .borrow_mut()
+            .extend(query.iter().map(|health| health.0));
     })
     .to_system();
 
@@ -498,7 +505,7 @@ fn function_system_runs_for_matching_queries_only() {
 }
 
 #[test]
-fn function_system_default_filter_runs_for_every_matching_entity() {
+fn function_system_sums_all_matching_entities() {
     use std::{cell::Cell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
@@ -520,8 +527,8 @@ fn function_system_default_filter_runs_for_every_matching_entity() {
 
     let total = Rc::new(Cell::new(0));
     let system_total = Rc::clone(&total);
-    let mut system = (move |query: Query<'_, Read<Health>>| {
-        system_total.set(system_total.get() + query.params().0);
+    let mut system = (move |query: Query<'_, &Health>| {
+        system_total.set(system_total.get() + query.iter().map(|health| health.0).sum::<u32>());
     })
     .to_system();
 

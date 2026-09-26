@@ -2,7 +2,7 @@
 
 use std::{
     any::TypeId,
-    cell::RefCell,
+    cell::{Cell, Ref, RefCell},
     collections::HashMap,
     fmt::Debug,
     sync::mpsc::{self, Receiver, Sender},
@@ -10,10 +10,10 @@ use std::{
 use tracing::warn;
 
 pub mod components;
-use components::{AnyComponent, Component, ComponentValue, Components};
+use components::{AnyComponent, Component, Components};
 
-pub mod changes;
-use changes::{Change, ComponentChange};
+pub mod lifecycle;
+use lifecycle::LifecycleEvent;
 
 pub mod query;
 
@@ -40,7 +40,7 @@ pub struct ComponentInfo<'a> {
     /// Fully-qualified Rust component type name.
     pub type_name: &'static str,
     /// Debug view of the component value.
-    pub debug: &'a dyn Debug,
+    pub debug: Ref<'a, dyn Debug>,
 }
 
 /// A cheap clonable handle for access to the [`Universe`].
@@ -75,10 +75,8 @@ pub struct Universe {
     systems: RefCell<Vec<Box<dyn ErasedSystem>>>,
 
     components: Components,
-    changes: Vec<Change>,
-    pending_changes: Vec<Change>,
-    edit_order: RefCell<Vec<(Entity, TypeId)>>,
-    prepared_order: RefCell<Vec<(Entity, TypeId)>>,
+    lifecycle: Vec<LifecycleEvent>,
+    change_tick: Cell<u64>,
 }
 
 impl Universe {
@@ -97,10 +95,8 @@ impl Universe {
             buffer_receiver: builder.buffer_receiver,
             systems: RefCell::new(builder.systems),
             components: Components::default(),
-            changes: Vec::new(),
-            pending_changes: Vec::new(),
-            edit_order: RefCell::new(Vec::new()),
-            prepared_order: RefCell::new(Vec::new()),
+            lifecycle: Vec::new(),
+            change_tick: Cell::new(0),
         };
 
         let mut cmd = universe.handle.command_buffer();
@@ -137,21 +133,12 @@ impl Universe {
             commands.append(&mut sub.commands());
         }
 
-        self.changes.clear();
-        self.changes.append(&mut self.pending_changes);
+        self.lifecycle.clear();
+        self.advance_change_tick();
         self.run_commands(commands);
 
         for system in self.systems.borrow_mut().iter_mut() {
             system.run(self, delta_time, &cmd);
-            self.pending_changes.extend(
-                self.components
-                    .finish_edits(
-                        &mut self.edit_order.borrow_mut(),
-                        &mut self.prepared_order.borrow_mut(),
-                    )
-                    .into_iter()
-                    .map(|(entity, old, new)| Change::ComponentUpdated { entity, old, new }),
-            );
         }
 
         cmd.into_inner().submit();
@@ -171,7 +158,8 @@ impl Universe {
                     return;
                 }
                 self.worlds.insert(id, World::new(id, name));
-                self.changes.push(Change::WorldCreated { world: id });
+                self.lifecycle
+                    .push(LifecycleEvent::WorldCreated { world: id });
             }
             Command::DestroyWorld(id) => {
                 let Some(world) = self.worlds.get(&id) else {
@@ -182,7 +170,8 @@ impl Universe {
                     self.despawn(entity);
                 }
                 self.worlds.remove(&id);
-                self.changes.push(Change::WorldDestroyed { world: id });
+                self.lifecycle
+                    .push(LifecycleEvent::WorldDestroyed { world: id });
             }
             Command::Spawn(entity, builder, world) => {
                 if self.is_alive(entity) {
@@ -195,7 +184,8 @@ impl Universe {
                 };
                 world_ref.alive.insert(entity);
                 self.entities.insert(entity, world);
-                self.changes.push(Change::EntitySpawned { entity, world });
+                self.lifecycle
+                    .push(LifecycleEvent::EntitySpawned { entity, world });
                 for component in builder.components.into_values() {
                     self.set_component(entity, component);
                 }
@@ -224,7 +214,8 @@ impl Universe {
                     .alive
                     .insert(entity);
                 self.entities.insert(entity, to);
-                self.changes.push(Change::EntityMoved { entity, from, to });
+                self.lifecycle
+                    .push(LifecycleEvent::EntityMoved { entity, from, to });
             }
             Command::SetComponent(entity, component) => {
                 if self.is_alive(entity) {
@@ -236,21 +227,14 @@ impl Universe {
     }
 
     fn set_component(&mut self, entity: Entity, component: Box<dyn AnyComponent>) {
-        let new = ComponentValue(component.into());
-        let change = match self.components.insert(entity, new.clone()) {
-            Some(old) => Change::ComponentUpdated { entity, old, new },
-            None => Change::ComponentAdded {
-                entity,
-                component: new,
-            },
-        };
-        self.changes.push(change);
+        self.components
+            .insert(entity, component, self.change_tick.get());
     }
 
     fn remove_component(&mut self, entity: Entity, type_id: TypeId) {
-        if let Some(component) = self.components.remove(entity, type_id) {
-            self.changes
-                .push(Change::ComponentRemoved { entity, component });
+        if self.components.remove(entity, type_id) {
+            self.lifecycle
+                .push(LifecycleEvent::ComponentRemoved { entity, type_id });
         }
     }
 
@@ -268,20 +252,25 @@ impl Universe {
             .alive
             .remove(&entity);
         self.entities.remove(&entity);
-        self.changes.push(Change::EntityDespawned { entity, world });
+        self.lifecycle
+            .push(LifecycleEvent::EntityDespawned { entity, world });
     }
 
-    /// Returns this tick's changes in command application order.
-    ///
-    /// All systems see the same log. Values survive removal and intermediate
-    /// replacements; the log is replaced at the start of the next tick.
-    pub fn changes(&self) -> impl Iterator<Item = &Change> {
-        self.changes.iter()
+    /// Returns structural notifications in command order for the current tick.
+    /// All systems can read them; they expire at the start of the next tick.
+    pub fn lifecycle(&self) -> impl Iterator<Item = &LifecycleEvent> {
+        self.lifecycle.iter()
     }
 
-    /// Returns typed changes for `C`, preserving their application order.
-    pub fn component_changes<C: Component>(&self) -> impl Iterator<Item = ComponentChange<'_, C>> {
-        self.changes.iter().filter_map(Change::component::<C>)
+    // A separate counter for each invocation makes same-frame ordering visible.
+    fn advance_change_tick(&self) -> u64 {
+        let tick = self
+            .change_tick
+            .get()
+            .checked_add(1)
+            .expect("change counter exhausted");
+        self.change_tick.set(tick);
+        tick
     }
 
     // UTILITIES & GETTERS
@@ -324,7 +313,7 @@ impl Universe {
             .map(|(type_id, component)| ComponentInfo {
                 type_id,
                 type_name: component.component_type_name(),
-                debug: component,
+                debug: Ref::map(component, |value| value as &dyn Debug),
             })
     }
 
@@ -352,10 +341,10 @@ impl Universe {
         self.entities.contains_key(&entity)
     }
 
-    /// Returns a shared reference to a component, or `None` if the entity
+    /// Returns a shared borrow of a component, or `None` if the entity
     /// does not have one.
     #[must_use]
-    pub fn component<C: Component>(&self, entity: Entity) -> Option<&C> {
+    pub fn component<C: Component>(&self, entity: Entity) -> Option<Ref<'_, C>> {
         self.components.get(entity)
     }
 }
@@ -404,9 +393,10 @@ impl UniverseBuilder {
 
     /// Adds a system to run on each tick, in registration order.
     ///
-    /// Functions declare the queries, changes, and delta time they need in
-    /// their arguments. Stateful [`systems::System`] implementations use
-    /// the same parameters. Writes are applied on the following tick.
+    /// Functions declare queries, lifecycle notifications, and delta time
+    /// through their arguments. Stateful [`systems::System`] implementations use
+    /// the same parameters. Component edits are immediate; structural commands
+    /// are applied on the following tick.
     #[must_use]
     pub fn with_system<Marker>(mut self, system: impl ToSystem<Marker>) -> Self {
         self.systems.push(system.to_system());
