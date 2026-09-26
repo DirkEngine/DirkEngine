@@ -119,7 +119,7 @@ impl MetalSwapchain {
                 && !desc.usage.contains(ImageUsages::STORAGE),
         );
         set_extent(&desc.surface.0.layer, desc.width.get(), desc.height.get());
-        let image_count = desc.desired_image_count.unwrap_or(NonZeroU32::MIN);
+        let image_count = Self::select_image_count(desc.desired_image_count);
         desc.surface
             .0
             .layer
@@ -131,6 +131,13 @@ impl MetalSwapchain {
             extent: Extent3d::new_2d(desc.width.get(), desc.height.get()),
             image_count,
         })
+    }
+
+    fn select_image_count(desired: Option<NonZeroU32>) -> NonZeroU32 {
+        // CAMetalLayer only supports two or three drawables. The requested
+        // count is a preference, as on Vulkan, and image_count reports our choice.
+        NonZeroU32::new(desired.map_or(3, NonZeroU32::get).clamp(2, 3))
+            .expect("the selected drawable count is nonzero")
     }
 }
 
@@ -148,26 +155,28 @@ unsafe impl NativeSwapchain<MetalBackend> for MetalSwapchain {
     }
 
     unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<MetalSurfaceFrame> {
-        if timeout_ns == 0 {
-            return Err(crate::Error::Timeout);
-        }
-        let drawable = self
-            .surface
-            .0
-            .layer
-            .next_drawable()
-            .ok_or(crate::Error::SwapchainOutOfDate)?
-            .to_owned();
-        let texture = drawable.texture().to_owned();
-        let image = MetalImage::surface(&self.context, texture.clone(), self.format.texture);
-        let view = MetalImageView::surface(&self.context, texture);
-        Ok(MetalSurfaceFrame {
-            context: self.context.clone(),
-            drawable,
-            resources: Some((image, view)),
-            format: self.format,
-            extent: self.extent,
-            submitted: AtomicBool::new(false),
+        metal::objc::rc::autoreleasepool(|| {
+            if timeout_ns == 0 {
+                return Err(crate::Error::Timeout);
+            }
+            let drawable = self
+                .surface
+                .0
+                .layer
+                .next_drawable()
+                .ok_or(crate::Error::SwapchainOutOfDate)?
+                .to_owned();
+            let texture = drawable.texture().to_owned();
+            let image = MetalImage::surface(&self.context, texture.clone(), self.format.texture);
+            let view = MetalImageView::surface(&self.context, texture);
+            Ok(MetalSurfaceFrame {
+                context: self.context.clone(),
+                drawable,
+                resources: Some((image, view)),
+                format: self.format,
+                extent: self.extent,
+                submitted: AtomicBool::new(false),
+            })
         })
     }
 
@@ -240,4 +249,20 @@ unsafe impl NativeSurfaceFrame<MetalBackend> for MetalSurfaceFrame {
 
 fn set_extent(layer: &metal::MetalLayerRef, width: u32, height: u32) {
     layer.set_drawable_size(CGSize::new(f64::from(width), f64::from(height)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawable_count_defaults_to_three_and_clamps_preferences() {
+        assert_eq!(MetalSwapchain::select_image_count(None).get(), 3);
+        for (desired, selected) in [(1, 2), (2, 2), (3, 3), (4, 3), (u32::MAX, 3)] {
+            assert_eq!(
+                MetalSwapchain::select_image_count(NonZeroU32::new(desired)).get(),
+                selected
+            );
+        }
+    }
 }

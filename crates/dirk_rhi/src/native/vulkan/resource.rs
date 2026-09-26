@@ -382,6 +382,9 @@ impl VulkanImageView {
         context: &Arc<Context>,
         desc: &ImageViewDesc<'_, VulkanBackend>,
     ) -> Result<Self> {
+        if desc.view_type == crate::ImageViewType::CubeArray && !context.image_cube_array {
+            return Err(crate::UnsupportedOperation::Capability("cube array image views").into());
+        }
         let create_info = vk::ImageViewCreateInfo::default()
             .image(desc.image.raw())
             .view_type(convert::view_type(desc.view_type))
@@ -850,6 +853,17 @@ impl VulkanGraphicsPipeline {
         context: &Arc<Context>,
         desc: &GraphicsPipelineDesc<'_, VulkanBackend>,
     ) -> Result<Self> {
+        if !context.independent_blend
+            && desc.color_targets.windows(2).any(|targets| {
+                targets[0].blend != targets[1].blend
+                    || targets[0].write_mask != targets[1].write_mask
+            })
+        {
+            return Err(crate::UnsupportedOperation::Capability(
+                "independent color attachment blending",
+            )
+            .into());
+        }
         if !Arc::ptr_eq(context, desc.layout.context())
             || !Arc::ptr_eq(context, desc.vertex.context())
             || desc
@@ -988,6 +1002,16 @@ impl VulkanGraphicsPipeline {
             .color_attachment_formats(&color_formats)
             .depth_attachment_format(
                 desc.depth
+                    .map_or(vk::Format::UNDEFINED, |depth| convert::format(depth.format)),
+            )
+            .stencil_attachment_format(
+                desc.depth
+                    .filter(|depth| {
+                        depth
+                            .format
+                            .aspects()
+                            .contains(crate::ImageAspects::STENCIL)
+                    })
                     .map_or(vk::Format::UNDEFINED, |depth| convert::format(depth.format)),
             );
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()

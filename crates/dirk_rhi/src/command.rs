@@ -185,7 +185,9 @@ pub struct ColorAttachment<'a, B: Api = crate::Rhi> {
 
 /// Depth/stencil attachment used by a dynamic rendering pass.
 pub struct DepthAttachment<'a, B: Api = crate::Rhi> {
-    /// Depth target view.
+    /// Depth target view, selecting every aspect of its format.
+    /// Combined depth/stencil formats require both aspects even when stencil
+    /// testing is disabled in the pipeline.
     pub view: &'a B::ImageView,
     /// Initial depth operation.
     pub depth_load: LoadOp<f32>,

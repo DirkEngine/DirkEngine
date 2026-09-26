@@ -270,8 +270,7 @@ pub struct DepthState {
     pub write_enabled: bool,
     /// Depth comparison operation.
     pub compare: CompareOp,
-    /// Optional stencil state applied when the attachment has stencil
-    /// aspects.
+    /// Optional stencil state. Requires a format with a stencil aspect.
     pub stencil: Option<StencilState>,
 }
 
@@ -321,7 +320,7 @@ pub struct DepthBiasState {
 }
 
 /// One color or alpha blend equation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlendComponent {
     /// Multiplier applied to the shader output.
     pub source: BlendFactor,
@@ -332,7 +331,7 @@ pub struct BlendComponent {
 }
 
 /// Color attachment blending state for one pipeline color target.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlendState {
     /// RGB blend equation.
     pub color: BlendComponent,

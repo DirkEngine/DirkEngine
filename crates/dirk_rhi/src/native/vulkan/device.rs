@@ -1,7 +1,10 @@
 use std::{
     collections::HashSet,
     ffi::{CStr, CString, c_void},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use crate::{
@@ -89,6 +92,9 @@ pub(crate) struct Context {
     pub(crate) capabilities: Capabilities,
     pub(crate) supported_depth_formats: &'static [TextureFormat],
     pub(crate) sampler_anisotropy: bool,
+    pub(crate) image_cube_array: bool,
+    pub(crate) independent_blend: bool,
+    pub(crate) validation_errors: Box<AtomicUsize>,
     pub(crate) non_coherent_atom_size: u64,
     pub(crate) enabled_instance_extensions: HashSet<String>,
     allocator: Mutex<Option<Allocator>>,
@@ -147,6 +153,8 @@ impl Context {
         reason = "Vulkan instance and device setup is kept linear so borrowed create-info data remains auditable"
     )]
     pub(crate) fn new(info: &RhiCreateInfo<'_>) -> Result<Arc<Self>> {
+        // Stable storage outlives every callback, including bootstrap cleanup.
+        let validation_errors = Box::new(AtomicUsize::new(0));
         let entry = unsafe { ash::Entry::load() }.map_err(backend_error)?;
         let application_name = CString::new(info.application_name).map_err(|_| {
             Ir::Malformed.with_detail("application name contains an interior NUL byte")
@@ -217,6 +225,10 @@ impl Context {
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&layers);
+        let mut debug_info = debug_create_info(&validation_errors);
+        if info.validation {
+            create_info = create_info.push_next(&mut debug_info);
+        }
         if extensions
             .iter()
             .any(|&extension| extension == ash::khr::portability_enumeration::NAME.as_ptr())
@@ -239,9 +251,10 @@ impl Context {
                 .any(|&extension| extension == debug_utils::NAME.as_ptr())
         {
             let loader = debug_utils::Instance::new(&entry, instance);
-            let messenger =
-                unsafe { loader.create_debug_utils_messenger(&debug_create_info(), None) }
-                    .map_err(vk_error)?;
+            let messenger = unsafe {
+                loader.create_debug_utils_messenger(&debug_create_info(&validation_errors), None)
+            }
+            .map_err(vk_error)?;
             Some((loader, messenger))
         } else {
             None
@@ -277,7 +290,8 @@ impl Context {
             "selected Vulkan physical device"
         );
 
-        let (device, queues) = create_device(instance, &selected)?;
+        let (device, queues) =
+            create_device(instance, &selected, info.compatible_surface.is_some())?;
         bootstrap.device = Some(device);
         let device = bootstrap
             .device
@@ -311,6 +325,9 @@ impl Context {
             capabilities: selected.capabilities,
             supported_depth_formats: selected.supported_depth_formats,
             sampler_anisotropy: selected.sampler_anisotropy,
+            image_cube_array: selected.image_cube_array,
+            independent_blend: selected.independent_blend,
+            validation_errors,
             non_coherent_atom_size: selected.non_coherent_atom_size,
             enabled_instance_extensions,
             allocator: Mutex::new(Some(allocator)),
@@ -453,6 +470,8 @@ struct SelectedDevice {
     capabilities: Capabilities,
     supported_depth_formats: &'static [crate::TextureFormat],
     sampler_anisotropy: bool,
+    image_cube_array: bool,
+    independent_blend: bool,
     non_coherent_atom_size: u64,
     extensions: Vec<vk::ExtensionProperties>,
 }
@@ -487,7 +506,7 @@ fn inspect_device(
     }
 
     let extensions = unsafe { instance.enumerate_device_extension_properties(raw) }.ok()?;
-    if !extension_available(&extensions, swapchain::NAME) {
+    if surface.is_some() && !extension_available(&extensions, swapchain::NAME) {
         return None;
     }
 
@@ -528,11 +547,11 @@ fn inspect_device(
         return None;
     }
 
-    if unsafe { instance.get_physical_device_features(raw) }.robust_buffer_access != vk::TRUE {
+    let features = unsafe { instance.get_physical_device_features(raw) };
+    if features.robust_buffer_access != vk::TRUE {
         return None;
     }
-    let sampler_anisotropy =
-        unsafe { instance.get_physical_device_features(raw) }.sampler_anisotropy == vk::TRUE;
+    let sampler_anisotropy = features.sampler_anisotropy == vk::TRUE;
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -572,6 +591,12 @@ fn inspect_device(
             capabilities: Capabilities {
                 limits: crate::Limits {
                     max_buffer_size: u64::from(properties.limits.max_storage_buffer_range),
+                    max_uniform_buffer_binding_size: u64::from(
+                        properties.limits.max_uniform_buffer_range,
+                    ),
+                    max_storage_buffer_binding_size: u64::from(
+                        properties.limits.max_storage_buffer_range,
+                    ),
                     max_image_dimension_2d: properties.limits.max_image_dimension2_d,
                     max_image_dimension_3d: properties.limits.max_image_dimension3_d,
                     max_image_array_layers: properties.limits.max_image_array_layers,
@@ -588,9 +613,7 @@ fn inspect_device(
                     max_shader_samplers: properties.limits.max_per_stage_descriptor_samplers,
                     max_vertex_buffers: properties.limits.max_vertex_input_bindings,
                 },
-                depth_bias_clamp: unsafe { instance.get_physical_device_features(raw) }
-                    .depth_bias_clamp
-                    == vk::TRUE,
+                depth_bias_clamp: features.depth_bias_clamp == vk::TRUE,
                 max_sampler_anisotropy,
                 min_uniform_buffer_offset_alignment: properties
                     .limits
@@ -606,6 +629,8 @@ fn inspect_device(
             },
             supported_depth_formats,
             sampler_anisotropy,
+            image_cube_array: features.image_cube_array == vk::TRUE,
+            independent_blend: features.independent_blend == vk::TRUE,
             non_coherent_atom_size: properties.limits.non_coherent_atom_size,
             extensions,
         },
@@ -663,6 +688,7 @@ fn queue_index(
 fn create_device(
     instance: &ash::Instance,
     selected: &SelectedDevice,
+    presentation: bool,
 ) -> Result<(ash::Device, Queues)> {
     let unique_families = HashSet::from([
         selected.families.graphics,
@@ -679,12 +705,17 @@ fn create_device(
                 .queue_priorities(&priorities)
         })
         .collect::<Vec<_>>();
-    let mut extensions = vec![swapchain::NAME.as_ptr()];
+    let mut extensions = Vec::new();
+    if presentation {
+        extensions.push(swapchain::NAME.as_ptr());
+    }
     if extension_available(&selected.extensions, ash::khr::portability_subset::NAME) {
         extensions.push(ash::khr::portability_subset::NAME.as_ptr());
     }
     let features = vk::PhysicalDeviceFeatures::default()
         .sampler_anisotropy(selected.sampler_anisotropy)
+        .image_cube_array(selected.image_cube_array)
+        .independent_blend(selected.independent_blend)
         .robust_buffer_access(true)
         .depth_bias_clamp(selected.capabilities.depth_bias_clamp);
     let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
@@ -722,7 +753,7 @@ const fn version((major, minor, patch): (u32, u32, u32)) -> u32 {
     vk::make_api_version(0, major, minor, patch)
 }
 
-fn debug_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+fn debug_create_info(errors: &AtomicUsize) -> vk::DebugUtilsMessengerCreateInfoEXT<'_> {
     vk::DebugUtilsMessengerCreateInfoEXT::default()
         .message_severity(
             vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
@@ -734,13 +765,14 @@ fn debug_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
                 | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
         )
         .pfn_user_callback(Some(debug_callback))
+        .user_data(std::ptr::from_ref(errors).cast_mut().cast())
 }
 
 unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _message_types: vk::DebugUtilsMessageTypeFlagsEXT,
     callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
 ) -> vk::Bool32 {
     let message = unsafe {
         callback_data
@@ -752,6 +784,11 @@ unsafe extern "system" fn debug_callback(
     };
     let message = message.to_string_lossy();
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        // SAFETY: Context owns this stable allocation until after destroying
+        // the messenger. Bootstrap also destroys the messenger before it drops.
+        if let Some(errors) = unsafe { user_data.cast::<AtomicUsize>().as_ref() } {
+            errors.fetch_add(1, Ordering::Relaxed);
+        }
         error!(target: "vulkan::validation", %message);
     } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
         warn!(target: "vulkan::validation", %message);
@@ -759,4 +796,33 @@ unsafe extern "system" fn debug_callback(
         debug!(target: "vulkan::validation", %message);
     }
     vk::FALSE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_errors_are_counted_without_a_tracing_subscriber() {
+        let errors = AtomicUsize::new(0);
+        let info = debug_create_info(&errors);
+        let message =
+            vk::DebugUtilsMessengerCallbackDataEXT::default().message(c"test validation message");
+        for (severity, expected) in [
+            (vk::DebugUtilsMessageSeverityFlagsEXT::WARNING, 0),
+            (vk::DebugUtilsMessageSeverityFlagsEXT::ERROR, 1),
+            (vk::DebugUtilsMessageSeverityFlagsEXT::ERROR, 2),
+        ] {
+            // SAFETY: the callback only borrows the live message and counter.
+            unsafe {
+                debug_callback(
+                    severity,
+                    vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
+                    &raw const message,
+                    info.p_user_data,
+                );
+            }
+            assert_eq!(errors.load(Ordering::Relaxed), expected);
+        }
+    }
 }
