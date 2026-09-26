@@ -3,13 +3,13 @@
 use std::any::TypeId;
 
 use crate::{
-    CommandBuffer, Entity, EntityBuilder, Universe, World, WorldId,
+    Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
     query::{
-        QueryItem, Read,
+        Query, QueryItem, Read,
         filter::{With, Without},
     },
-    systems::{FuncSystem, System},
+    systems::ToSystem,
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -461,7 +461,7 @@ fn with_and_without_filters_compose() {
 }
 
 #[test]
-fn func_system_runs_for_matching_queries_only() {
+fn function_system_runs_for_matching_queries_only() {
     use std::{cell::RefCell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
@@ -483,19 +483,22 @@ fn func_system_runs_for_matching_queries_only() {
 
     let seen = Rc::new(RefCell::new(Vec::new()));
     let system_seen = Rc::clone(&seen);
-    let mut system = FuncSystem::new(move |_: &mut CommandBuffer, universe: &Universe, _| {
-        for query in QueryItem::<Read<Health>, Without<Mana>>::iter(universe) {
-            system_seen.borrow_mut().push(query.params().0);
-        }
-    });
+    let mut system = (move |query: Query<'_, Read<Health>, Without<Mana>>| {
+        system_seen.borrow_mut().push(query.params().0);
+    })
+    .to_system();
 
-    system.run(&mut universe.handle().command_buffer(), &universe, 0.016);
+    system.run(
+        &universe,
+        0.016,
+        &std::cell::RefCell::new(universe.handle().command_buffer()),
+    );
 
     assert_eq!(*seen.borrow(), vec![10]);
 }
 
 #[test]
-fn func_system_default_filter_runs_for_every_matching_entity() {
+fn function_system_default_filter_runs_for_every_matching_entity() {
     use std::{cell::Cell, rc::Rc};
 
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
@@ -517,13 +520,16 @@ fn func_system_default_filter_runs_for_every_matching_entity() {
 
     let total = Rc::new(Cell::new(0));
     let system_total = Rc::clone(&total);
-    let mut system = FuncSystem::new(move |_: &mut CommandBuffer, universe: &Universe, _| {
-        for query in QueryItem::<Read<Health>>::iter(universe) {
-            system_total.set(system_total.get() + query.params().0);
-        }
-    });
+    let mut system = (move |query: Query<'_, Read<Health>>| {
+        system_total.set(system_total.get() + query.params().0);
+    })
+    .to_system();
 
-    system.run(&mut universe.handle().command_buffer(), &universe, 0.016);
+    system.run(
+        &universe,
+        0.016,
+        &std::cell::RefCell::new(universe.handle().command_buffer()),
+    );
 
     assert_eq!(total.get(), 6);
 }

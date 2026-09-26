@@ -5,8 +5,9 @@ worlds, entities, components, and systems. Submitted command buffers queue
 changes for the next call to `Universe::tick`.
 
 The query and system APIs use Rust types to describe the
-data each system needs. `Read<C>` borrows a component and skips entities without
-it. Tuples fetch multiple components. `With<C>` and `Without<C>` filter by
+data each system needs. `&C` reads a component and `&mut C` edits it; both
+skip entities without that component. Tuples fetch multiple components.
+`With<C>` and `Without<C>` filter by
 component presence; tuples combine filters with AND. The default filter, `()`,
 accepts every entity.
 
@@ -14,11 +15,11 @@ accepts every entity.
 use dirk_universe::{
     Entity, Universe, World,
     components::Component,
-    query::{QueryItem, Read, filter::Without},
-    systems::FuncSystem,
+    query::{Query, QueryItem, filter::Without},
+    systems::DeltaTime,
 };
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Position(f64);
 
 #[derive(Debug, Component)]
@@ -27,15 +28,11 @@ struct Velocity(f64);
 #[derive(Debug, Component)]
 struct Frozen;
 
-let movement = FuncSystem::new(|commands, universe, delta_time| {
-    for item in QueryItem::<(Read<Position>, Read<Velocity>), Without<Frozen>>::iter(universe) {
-        let (position, velocity) = item.params();
-        commands.set_component(
-            item.entity(),
-            Position(position.0 + velocity.0 * delta_time),
-        );
-    }
-});
+let movement = |query: Query<'_, (&Velocity, &mut Position), Without<Frozen>>,
+                DeltaTime(delta_time)| {
+    let (velocity, mut position) = query.into_params();
+    position.0 += velocity.0 * delta_time;
+};
 
 let mut universe = Universe::builder()
     .with_world(World::builder("simulation").with_entity(
@@ -46,25 +43,55 @@ let mut universe = Universe::builder()
     .with_system(movement)
     .build();
 
-universe.tick(0.5); // Creates the entity and queues its first movement.
-let entity = QueryItem::<Read<Position>>::iter(&universe)
+universe.tick(0.5); // Creates the entity and updates its position.
+let entity = QueryItem::<&Position>::iter(&universe)
     .next().unwrap().entity();
-assert_eq!(universe.component::<Position>(entity).unwrap().0, 0.0);
-
-universe.tick(0.5); // Applies the previous tick's movement.
 assert_eq!(universe.component::<Position>(entity).unwrap().0, 1.0);
+
+universe.tick(0.5);
+assert_eq!(universe.component::<Position>(entity).unwrap().0, 2.0);
 ```
 
-Every system implements the same `System` trait and registers with
-`UniverseBuilder::with_system`. `FuncSystem::new` adapts functions and `FnMut`
-closures to that trait. Each system runs once per tick, even in an empty
-universe, and may iterate any number of typed queries. Entity iteration order
-is unspecified. Use standard iterator filters with `Universe::is_in_world`
-when a query should be restricted to a runtime world ID.
+`UniverseBuilder::with_system` accepts functions and `FnMut` closures directly.
+Their argument types declare the queries, changes, and delta time they need;
+the universe supplies those values before each run. `Query<&C>` reads a
+component and `Query<&mut C>` edits one; mutable components must implement
+`Clone` so the change log retains their prior value. Stateful types implement
+`System<Params>`, for example:
+
+```rust
+use dirk_universe::{components::Component, query::Query, systems::{DeltaTime, System}};
+
+#[derive(Debug, Clone, Component)]
+struct Position(f64);
+
+struct Movement { speed: f64 }
+
+impl System<(Query<'_, &mut Position>, DeltaTime)> for Movement {
+    fn run(&mut self, (query, DeltaTime(dt)): (Query<'_, &mut Position>, DeltaTime)) {
+        query.into_params().0 += self.speed * dt;
+    }
+}
+```
+
+The engine invokes a query system once per matching entity. Multiple `Query`
+parameters must match the same entity (intersection); no matches means no calls.
+Entity order is unspecified. Systems without `Query` parameters run once per
+tick, including in an empty universe. A `QueryView<&C>` provides read-only
+iteration and entity lookups for aggregate or lifecycle work without triggering
+per-entity invocation. It supports `iter_in_world` for a runtime world ID.
+
+This differs from Bevy's execution model: Bevy calls a system once and lets it
+iterate its query. Here, the engine owns that loop. Put work that must happen
+once per tick in a separate system without a `Query` parameter.
+
+Mutable query edits are visible to later systems in the same tick. Structural
+changes use an optional `Commands` parameter and take effect on the next tick.
+Overlapping read/write or write/write component access is rejected when the
+system is registered, including across `Query` and `QueryView` parameters.
 
 Systems run sequentially in registration order. `UniverseBuilder::with_other`
-appends the other builder's systems. Systems read the same live state and
-queue updates in the shared command buffer for the next tick.
+appends the other builder's systems.
 
 Lifecycle and component changes use this same execution path. `Universe::changes`
 returns the current tick's ordered log; `Universe::component_changes::<C>` returns
@@ -73,14 +100,14 @@ and removed values remain readable even when the entity no longer exists.
 
 ```rust
 use dirk_universe::{
-    Universe, components::Component, changes::ComponentChange, systems::FuncSystem,
+    Universe, components::Component, changes::ComponentChange, systems::Changes,
 };
 
 #[derive(Debug, Component)]
 struct Health(u32);
 
-let observer = FuncSystem::new(|_, universe, _| {
-    for change in universe.component_changes::<Health>() {
+let observer = |changes: Changes<'_>| {
+    for change in changes.components::<Health>() {
         match change {
             ComponentChange::Added { entity, component } => {
                 println!("{entity:?} starts with {} health", component.0);
@@ -93,7 +120,7 @@ let observer = FuncSystem::new(|_, universe, _| {
             }
         }
     }
-});
+};
 let universe = Universe::builder().with_system(observer).build();
 ```
 
@@ -112,7 +139,7 @@ until the next tick. Interior mutations through types such as `Cell` are not
 tracked by the command log. Queries always inspect the final live state, while
 the log describes how that state was reached.
 
-The old system traits and experimental module paths have been removed. Move
-entity loops into `System::run` or a `FuncSystem` closure, and use the change log
-for lifecycle work. Keep writes in the supplied command buffer. Parallel
-execution and mutable component queries are outside this API.
+The old system traits and experimental module paths have been removed. Declare
+queries and changes in each system's signature. Mutable query edits are
+coalesced into an update visible in the following tick's change log. Parallel
+execution is outside this API.
