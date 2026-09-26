@@ -18,16 +18,6 @@ impl GraphicsPipelineSpec for MainPipelineSpec {
     const NAME: &'static str = "main";
 }
 
-#[cfg(test)]
-mod test {
-    use crate::pipeline::{MainPipelineSpec, graphics::GraphicsPipelineSpec};
-
-    #[test]
-    fn validate_main_pipeline_spec() {
-        MainPipelineSpec::validate().expect("main pipeline spec should match shader reflection");
-    }
-}
-
 impl MainPipelineSpec {
     pub fn settings(properties: crate::RendererProperties) -> super::graphics::PipelineSettings {
         super::graphics::PipelineSettings {
@@ -40,5 +30,15 @@ impl MainPipelineSpec {
             }),
             samples: properties.msaa_samples,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::pipeline::{MainPipelineSpec, graphics::GraphicsPipelineSpec};
+
+    #[test]
+    fn validate_main_pipeline_spec() {
+        MainPipelineSpec::validate().expect("main pipeline spec should match shader reflection");
     }
 }
