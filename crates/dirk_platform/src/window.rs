@@ -119,7 +119,7 @@ impl Deref for Windows<'_> {
 /// Internal platform representation of a window. Holds the
 /// [`winit::window::Window`] and other state.
 pub struct Window {
-    raw: Box<dyn winit::window::Window>,
+    raw: Arc<WindowSurfaceTarget>,
     focused: bool,
     theme: Theme,
     /// If the window is completely hidden (minized or covered by another
@@ -135,25 +135,31 @@ impl Window {
             focused: false,
             theme: window.theme().unwrap_or(Theme::Dark),
             occluded: false,
-            raw: window,
+            raw: Arc::new(WindowSurfaceTarget { raw: window }),
         }
     }
     /// Returns the unique ID of the window
     #[must_use]
     pub fn id(&self) -> WindowId {
-        self.raw.id()
+        self.raw.raw.id()
     }
     /// Returns the size of the window's renderable surface. Used by
     /// renderer to create correct surface sizes
     #[must_use]
     pub fn size(&self) -> PhysicalSize<u32> {
-        self.raw.surface_size()
+        self.raw.raw.surface_size()
+    }
+
+    /// Returns an owned native-handle provider suitable for a graphics surface.
+    #[must_use]
+    pub fn surface_target(&self) -> Arc<WindowSurfaceTarget> {
+        self.raw.clone()
     }
 
     /// Returns the native scale factor for this window.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
-        self.raw.scale_factor()
+        self.raw.raw.scale_factor()
     }
 
     /// Returns whether this window is focused.
@@ -185,7 +191,12 @@ impl Window {
     }
 }
 
-impl HasWindowHandle for Window {
+/// Owned native window handles retained by presentation backends.
+pub struct WindowSurfaceTarget {
+    raw: Box<dyn winit::window::Window>,
+}
+
+impl HasWindowHandle for WindowSurfaceTarget {
     fn window_handle(
         &self,
     ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
@@ -194,7 +205,7 @@ impl HasWindowHandle for Window {
     }
 }
 
-impl HasDisplayHandle for Window {
+impl HasDisplayHandle for WindowSurfaceTarget {
     fn display_handle(
         &self,
     ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
