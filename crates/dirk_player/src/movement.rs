@@ -1,12 +1,12 @@
 //! Player movement systems.
 
 use dirk_universe::{
-    CommandBuffer, Universe,
-    query::{QueryItem, Read},
-    systems::System,
+    query::Query,
+    systems::{DeltaTime, System},
 };
 
 use crate::{PlayerId, PlayerInputState};
+use dirk_world::components::Transform;
 
 /// Default movement speed in world units per second.
 pub const DEFAULT_PLAYER_MOVE_SPEED: f64 = 350.0;
@@ -33,34 +33,29 @@ impl PlayerMovementSystem {
     }
 }
 
-impl System for PlayerMovementSystem {
-    fn run(&mut self, cmd: &mut CommandBuffer, universe: &Universe, delta_time: f64) {
-        for query in
-            QueryItem::<(Read<PlayerId>, Read<dirk_world::components::Transform>)>::iter(universe)
-        {
-            let entity = query.entity();
-            let (player, transform) = query.into_params();
-            let player = *player;
-            let input = self.input_state.get(player);
-            if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
-                continue;
-            }
+impl System<(Query<'_, (&PlayerId, &mut Transform)>, DeltaTime)> for PlayerMovementSystem {
+    fn run(
+        &mut self,
+        (query, DeltaTime(delta_time)): (Query<'_, (&PlayerId, &mut Transform)>, DeltaTime),
+    ) {
+        let (player, mut transform) = query.into_params();
+        let player = *player;
+        let input = self.input_state.get(player);
+        if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
+            return;
+        }
 
-            let mut transform = transform.clone();
-            if input.look != glam::DVec2::ZERO {
-                transform.rotate_by_pointer_delta(input.look, self.look_sensitivity);
-            }
+        if input.look != glam::DVec2::ZERO {
+            transform.rotate_by_pointer_delta(input.look, self.look_sensitivity);
+        }
 
-            if input.movement != glam::Vec3::ZERO {
-                let movement = transform.movement_direction(input.movement);
-                if movement != glam::Vec3::ZERO {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let distance = (self.speed * delta_time) as f32;
-                    transform.location += movement * distance;
-                }
+        if input.movement != glam::Vec3::ZERO {
+            let movement = transform.movement_direction(input.movement);
+            if movement != glam::Vec3::ZERO {
+                #[allow(clippy::cast_possible_truncation)]
+                let distance = (self.speed * delta_time) as f32;
+                transform.location += movement * distance;
             }
-
-            cmd.set_component(entity, transform);
         }
     }
 }
@@ -69,11 +64,10 @@ impl System for PlayerMovementSystem {
 mod tests {
     use super::*;
     use crate::PlayerInputFrame;
-    use dirk_universe::{Entity, World};
-    use dirk_world::components::Transform;
+    use dirk_universe::{Entity, Universe, World};
 
     #[test]
-    fn registered_movement_uses_typed_queries_and_defers_updates() {
+    fn registered_movement_updates_components_in_the_same_tick() {
         let input = PlayerInputState::default();
         let player = PlayerId::default();
         input.set(
@@ -88,12 +82,14 @@ mod tests {
             .build();
         let mut cmd = universe.handle().command_buffer();
         let world = cmd.create_world(World::builder("movement"));
-        let moving = cmd.spawn(
-            world,
-            Entity::builder()
-                .with_component(player)
-                .with_component(Transform::default()),
-        );
+        let moving = [0, 1].map(|_| {
+            cmd.spawn(
+                world,
+                Entity::builder()
+                    .with_component(player)
+                    .with_component(Transform::default()),
+            )
+        });
         let stationary = cmd.spawn(
             world,
             Entity::builder().with_component(Transform::default()),
@@ -101,22 +97,26 @@ mod tests {
         cmd.spawn(world, Entity::builder().with_component(player));
         cmd.submit();
         universe.tick(0.5);
-        assert_eq!(
-            universe
-                .component::<Transform>(moving)
-                .expect("transform")
-                .location,
-            glam::Vec3::ZERO
-        );
+        for entity in moving {
+            assert_eq!(
+                universe
+                    .component::<Transform>(entity)
+                    .expect("transform")
+                    .location,
+                glam::Vec3::new(175.0, 0.0, 0.0)
+            );
+        }
         input.set(player, PlayerInputFrame::default());
         universe.tick(0.0);
-        assert_eq!(
-            universe
-                .component::<Transform>(moving)
-                .expect("transform")
-                .location,
-            glam::Vec3::new(175.0, 0.0, 0.0)
-        );
+        for entity in moving {
+            assert_eq!(
+                universe
+                    .component::<Transform>(entity)
+                    .expect("transform")
+                    .location,
+                glam::Vec3::new(175.0, 0.0, 0.0)
+            );
+        }
         assert_eq!(
             universe
                 .component::<Transform>(stationary)

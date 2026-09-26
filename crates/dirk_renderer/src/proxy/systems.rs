@@ -3,9 +3,8 @@
 use crate::{Error, render_commands::RenderCommandSender};
 use dirk_player::PlayerId;
 use dirk_universe::{
-    CommandBuffer, Universe,
     changes::{Change, ComponentChange},
-    systems::System,
+    systems::{Changes, System},
 };
 use dirk_world::components::{Renderable, Transform};
 
@@ -81,11 +80,11 @@ impl RendererSystem {
     }
 }
 
-impl System for RendererSystem {
-    fn run(&mut self, _: &mut CommandBuffer, universe: &Universe, _: f64) {
+impl System<Changes<'_>> for RendererSystem {
+    fn run(&mut self, changes: Changes<'_>) {
         // One ordered stream ensures that scenes/proxies exist before updates,
         // and component cleanup precedes proxy/scene destruction.
-        for change in universe.changes() {
+        for change in changes.iter() {
             match *change {
                 Change::WorldCreated { world } => self.sender.enqueue_command(move |renderer| {
                     renderer.scene_manager.create_scene(world)?;
