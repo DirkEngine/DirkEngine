@@ -546,7 +546,7 @@ impl Renderer {
         self.update_non_editor_presentation()?;
 
         self.rhi.collect_garbage()?;
-        let mut uploads = dirk_render_utils::upload::UploadBatch::new(&self.rhi)?;
+        let mut uploads = dirk_render_utils::upload::UploadBatch::new();
         self.models.tick(&self.rhi, &mut uploads)?;
         let upload_submission = uploads.submit(&mut self.rhi)?;
         self.scene_manager
