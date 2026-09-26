@@ -475,7 +475,7 @@ mod tests {
             modifiers: Modifiers::default(),
         });
 
-        assert_eq!(map.movement(&input).x, 0.0);
+        assert!(map.movement(&input).x.abs() < f32::EPSILON);
     }
 
     #[test]
