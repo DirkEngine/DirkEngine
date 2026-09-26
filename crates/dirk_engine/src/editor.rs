@@ -62,6 +62,9 @@ pub trait EditorSubsystem: Send + 'static {
 
     /// Shuts the editor subsystem down.
     ///
+    /// Engine shutdown calls this even if startup failed or this subsystem's
+    /// [`Self::start`] was never called. Clean up only resources acquired so far.
+    ///
     /// # Errors
     ///
     /// Returns an error if shutdown fails.

@@ -2,11 +2,11 @@
 
 use dirk_events::Event;
 
-/// An event emitted after the engine has accepted an exit request.
+/// An event emitted when the engine begins exiting.
 ///
 /// Systems request exit through [`EngineHandle::exit`] or
 /// [`EngineHandle::exit_with_error`]. The engine dispatches this event once it
-/// transitions into an exiting state.
+/// transitions into an exiting state, including when subsystem startup fails.
 ///
 /// [`EngineHandle::exit`]: crate::EngineHandle::exit
 /// [`EngineHandle::exit_with_error`]: crate::EngineHandle::exit_with_error

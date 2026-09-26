@@ -96,6 +96,9 @@ pub trait Subsystem {
 
     /// Shuts the subsystem down before the engine releases core services.
     ///
+    /// Engine shutdown calls this even if startup failed or this subsystem's
+    /// [`Self::start`] was never called. Clean up only resources acquired so far.
+    ///
     /// The default implementation is a no-op.
     ///
     /// # Errors

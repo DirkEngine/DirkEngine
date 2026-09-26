@@ -204,7 +204,9 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns an error if a subsystem fails to start.
+    /// Returns an error if a subsystem fails to start. The engine emits
+    /// [`events::Exiting`] and cannot be restarted; call [`Self::shutdown`] or
+    /// drop it to clean up all constructed subsystems.
     pub fn start(&mut self) -> Result<()> {
         match self.lifecycle {
             EngineLifecycle::Running => return Ok(()),
@@ -237,6 +239,7 @@ impl Engine {
 
         if result.is_err() {
             self.lifecycle = EngineLifecycle::Failed;
+            self.request_exit(None);
             self.state.set_status(EngineStatus::Error);
             return result;
         }

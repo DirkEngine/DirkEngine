@@ -424,6 +424,58 @@ fn failed_start_cannot_repeat_subsystem_start() {
 }
 
 #[test]
+fn failed_start_notifies_exit_and_shutdown_cleans_up_all_subsystems() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subsystems = [
+        ("started", false, false),
+        ("failed", true, false),
+        ("never-started", false, true),
+    ]
+    .into_iter()
+    .map(|(name, fail_start, fail_shutdown)| {
+        Box::new(RecordedSubsystem {
+            name,
+            events: Arc::clone(&events),
+            fail_start,
+            fail_shutdown,
+        }) as Box<dyn Subsystem>
+    })
+    .collect();
+    let mut engine = engine_with_subsystems(subsystems);
+    let mut exiting = engine.handle.events().subscribe::<events::Exiting>();
+    let (notification_tx, notification_rx) = mpsc::channel();
+    let listener = engine.handle.workers().spawn(async move {
+        let received = exiting.consume().await.is_some();
+        notification_tx
+            .send(received)
+            .expect("notification receiver should remain alive");
+    });
+
+    assert!(matches!(
+        engine.start(),
+        Err(Error::SubsystemFailedStart { name: "failed", .. })
+    ));
+    assert_eq!(engine.status(), EngineStatus::Error);
+    let notification = notification_rx.recv_timeout(std::time::Duration::from_secs(2));
+    listener.abort();
+    assert!(notification.expect("startup failure must notify exit"));
+
+    assert!(matches!(
+        engine.shutdown(),
+        Err(Error::SubsystemFailedShutdown {
+            name: "never-started",
+            ..
+        })
+    ));
+    assert_eq!(
+        *events.lock(),
+        vec!["started", "failed", "never-started", "failed", "started"]
+    );
+    engine.shutdown().expect("repeated shutdown is a no-op");
+    assert_eq!(events.lock().len(), 5);
+}
+
+#[test]
 fn shutdown_before_start_cannot_restart_engine() -> Result<()> {
     let mut engine = engine_with_subsystems(Vec::new());
     engine.shutdown()?;
