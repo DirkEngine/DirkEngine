@@ -393,6 +393,33 @@ struct PassNode<'a> {
     callback: Option<Callback<'a>>,
 }
 
+impl PassNode<'_> {
+    /// Derive one dependency for overlapping reads before changing tracked state.
+    /// All accesses cover the same aspects/layers after validation, so overlapping
+    /// mip spans can be combined. The stage union may conservatively cover extra mips.
+    fn merge_reads(&mut self) {
+        let mut merged: Vec<AccessDecl> = Vec::with_capacity(self.reads.len());
+        for mut usage in self.reads.drain(..) {
+            while let Some(index) = merged.iter().position(|other| {
+                other.handle == usage.handle && other.range.overlaps_mips(usage.range)
+            }) {
+                let other = merged.swap_remove(index);
+                if let (ImageState::ShaderRead(stages), ImageState::ShaderRead(other_stages)) =
+                    (&mut usage.state, other.state)
+                {
+                    *stages |= other_stages;
+                }
+                let start = usage.range.base_mip_level.min(other.range.base_mip_level);
+                let end = (usage.range.base_mip_level + usage.range.mip_level_count)
+                    .max(other.range.base_mip_level + other.range.mip_level_count);
+                usage.range = usage.range.with_mips(start, end - start);
+            }
+            merged.push(usage);
+        }
+        self.reads = merged;
+    }
+}
+
 /// Declares accesses and recording work for one graph pass.
 pub struct PassBuilder<'graph, 'a> {
     pass: &'graph mut PassNode<'a>,
@@ -741,8 +768,14 @@ impl<'a> RenderGraph<'a> {
                     anyhow::ensure!(
                         *handle != usage.handle
                             || !range.overlaps_mips(usage.range)
-                            || (!state.writes() && !usage.state.writes()),
-                        "{}: overlapping read/write image uses in one pass",
+                            || (!state.writes()
+                                && !usage.state.writes()
+                                && (*state == usage.state
+                                    || matches!(
+                                        (state, usage.state),
+                                        (ImageState::ShaderRead(_), ImageState::ShaderRead(_))
+                                    ))),
+                        "{}: overlapping image uses require compatible read-only states",
                         pass.name
                     );
                 }
@@ -764,6 +797,7 @@ impl<'a> RenderGraph<'a> {
                     }
                 }
             }
+            pass.merge_reads();
         }
         Ok(())
     }
@@ -1286,6 +1320,83 @@ mod tests {
                 array_layer_count: 1
             }
         );
+    }
+
+    #[test]
+    fn overlapping_sampled_reads_share_all_stages_in_both_dependencies() {
+        for stages in [
+            [ShaderStages::VERTEX, ShaderStages::FRAGMENT],
+            [ShaderStages::FRAGMENT, ShaderStages::VERTEX],
+        ] {
+            let mut graph = RenderGraph::new();
+            let color = graph.create_texture(color_desc());
+            graph
+                .add_pass("producer")
+                .write_color_attachment(color, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0));
+            graph
+                .add_pass("both shader stages")
+                .read_sampled(color, stages[0])
+                .read_sampled(color, stages[1]);
+            graph.add_pass("overwrite").write_transfer_dst(color);
+
+            let compiled = graph.compile().expect("compatible sampled reads");
+            let union = ImageState::ShaderRead(ShaderStages::VERTEX | ShaderStages::FRAGMENT);
+            let reads = &compiled.passes[1].barriers;
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].old_state, ImageState::ColorAttachment);
+            assert_eq!(reads[0].new_state, union);
+            assert_eq!(compiled.passes[2].barriers[0].old_state, union);
+        }
+    }
+
+    #[test]
+    fn partially_overlapping_sampled_ranges_merge_without_covering_disjoint_mips() {
+        let mut graph = RenderGraph::new();
+        let color = graph.create_texture(color_desc());
+        let mut pass = graph.add_pass("overlapping mips");
+        for (base, count, stages) in [
+            (0, 2, ShaderStages::VERTEX),
+            (5, 1, ShaderStages::FRAGMENT),
+            (1, 2, ShaderStages::FRAGMENT),
+        ] {
+            pass.read_range(
+                color,
+                TextureRead::Sampled { stages },
+                SubresourceRange::WHOLE.with_mips(base, count),
+            );
+        }
+        pass.pass.merge_reads();
+        assert_eq!(pass.pass.reads.len(), 2);
+        let combined = pass
+            .pass
+            .reads
+            .iter()
+            .find(|read| read.range.base_mip_level == 0)
+            .expect("combined overlapping range");
+        assert_eq!(combined.range.mip_level_count, 3);
+        assert_eq!(
+            combined.state,
+            ImageState::ShaderRead(ShaderStages::VERTEX | ShaderStages::FRAGMENT)
+        );
+        assert!(
+            pass.pass
+                .reads
+                .iter()
+                .any(|read| read.range.base_mip_level == 5 && read.range.mip_level_count == 1)
+        );
+    }
+
+    #[test]
+    fn overlapping_reads_with_incompatible_layouts_are_rejected() {
+        let mut graph = RenderGraph::new();
+        let color = graph.create_texture(color_desc());
+        graph.add_pass("producer").write_transfer_dst(color);
+        graph
+            .add_pass("incompatible reads")
+            .read_sampled(color, ShaderStages::FRAGMENT)
+            .read_transfer_src(color);
+        let error = graph.compile().err().expect("incompatible read layouts");
+        assert!(error.to_string().contains("compatible read-only states"));
     }
 
     #[test]
