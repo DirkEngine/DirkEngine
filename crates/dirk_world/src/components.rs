@@ -2,15 +2,14 @@
 //!
 //! [`Component`]: dirk_universe::components::Component
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dirk_assets::{AssetHandle, AssetLoad, AssetRegistry, Handle, Model};
 use dirk_universe::{
     Entity,
-    changes::ComponentChange,
     components::Component,
-    query::QueryView,
-    systems::{Changes, System},
+    query::{Query, filter::Changed},
+    systems::{RemovedComponents, System},
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::{error, warn};
@@ -18,7 +17,7 @@ use tracing::{error, warn};
 /// Marks an entity as having a renderable mesh.
 ///
 /// The `model` field is resolved by [`ModelUploadSystem`] against the engine's
-/// asset registry. Changing it requests the new model on the next tick.
+/// asset registry. Changing it requests the new model when the upload system next runs.
 ///
 /// # Examples
 /// ```
@@ -94,38 +93,36 @@ impl ModelUploadSystem {
     }
 }
 
-impl System<(Changes<'_>, QueryView<'_, &Renderable>)> for ModelUploadSystem {
-    fn run(&mut self, (changes, renderables): (Changes<'_>, QueryView<'_, &Renderable>)) {
-        let mut affected_entities = HashSet::new();
-        for change in changes.components::<Renderable>() {
-            let entity = match change {
-                ComponentChange::Added { entity, .. }
-                | ComponentChange::Updated { entity, .. }
-                | ComponentChange::Removed { entity, .. } => entity,
-            };
-            affected_entities.insert(entity);
+impl
+    System<(
+        Query<'_, (Entity, &Renderable), Changed<Renderable>>,
+        RemovedComponents<'_, Renderable>,
+    )> for ModelUploadSystem
+{
+    fn run(
+        &mut self,
+        (renderables, removed): (
+            Query<'_, (Entity, &Renderable), Changed<Renderable>>,
+            RemovedComponents<'_, Renderable>,
+        ),
+    ) {
+        // Remove first, then reconcile current values so remove/reinsert in one
+        // tick starts a request for the final component rather than losing it.
+        for entity in removed.iter() {
+            self.requests.remove(&entity);
         }
-
-        // Reconcile once against the final component value, even if it changed
-        // several times in this command batch.
-        for entity in affected_entities {
-            if let Some(component) = renderables.get(entity) {
-                let component = component.into_params();
-                if self
-                    .requests
-                    .get(&entity)
-                    .is_none_or(|request| request.model != component.model)
-                {
-                    self.requests.insert(
-                        entity,
-                        ModelRequest::new(&self.assets, component.model.clone()),
-                    );
-                }
-            } else {
-                self.requests.remove(&entity);
+        for (entity, component) in &renderables {
+            if self
+                .requests
+                .get(&entity)
+                .is_none_or(|request| request.model != component.model)
+            {
+                self.requests.insert(
+                    entity,
+                    ModelRequest::new(&self.assets, component.model.clone()),
+                );
             }
         }
-
         for (entity, request) in &mut self.requests {
             request.poll(*entity);
         }

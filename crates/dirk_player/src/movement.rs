@@ -36,25 +36,26 @@ impl PlayerMovementSystem {
 impl System<(Query<'_, (&PlayerId, &mut Transform)>, DeltaTime)> for PlayerMovementSystem {
     fn run(
         &mut self,
-        (query, DeltaTime(delta_time)): (Query<'_, (&PlayerId, &mut Transform)>, DeltaTime),
+        (mut query, DeltaTime(delta_time)): (Query<'_, (&PlayerId, &mut Transform)>, DeltaTime),
     ) {
-        let (player, mut transform) = query.into_params();
-        let player = *player;
-        let input = self.input_state.get(player);
-        if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
-            return;
-        }
+        for (player, mut transform) in &mut query {
+            let player = *player;
+            let input = self.input_state.get(player);
+            if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
+                continue;
+            }
 
-        if input.look != glam::DVec2::ZERO {
-            transform.rotate_by_pointer_delta(input.look, self.look_sensitivity);
-        }
+            if input.look != glam::DVec2::ZERO {
+                transform.rotate_by_pointer_delta(input.look, self.look_sensitivity);
+            }
 
-        if input.movement != glam::Vec3::ZERO {
-            let movement = transform.movement_direction(input.movement);
-            if movement != glam::Vec3::ZERO {
-                #[allow(clippy::cast_possible_truncation)]
-                let distance = (self.speed * delta_time) as f32;
-                transform.location += movement * distance;
+            if input.movement != glam::Vec3::ZERO {
+                let movement = transform.movement_direction(input.movement);
+                if movement != glam::Vec3::ZERO {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let distance = (self.speed * delta_time) as f32;
+                    transform.location += movement * distance;
+                }
             }
         }
     }
