@@ -3,7 +3,7 @@
 use std::{
     future::Future,
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -37,10 +37,10 @@ impl WorkerPool {
     ///
     /// # Panics
     ///
-    /// Panics if the runtime cannot be built.
+    /// Panics if the coordinator thread cannot start or the runtime cannot be built.
     #[must_use]
     pub fn new(name: &str) -> Self {
-        let (handle_tx, handle_rx) = oneshot::channel::<Handle>();
+        let (handle_tx, handle_rx) = mpsc::sync_channel::<Handle>(1);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let thread_name = name.to_owned();
 
@@ -67,7 +67,7 @@ impl WorkerPool {
             .expect("failed to spawn worker coordinator thread");
 
         let handle = handle_rx
-            .blocking_recv()
+            .recv()
             .expect("worker pool runtime should initialize");
 
         Self {
@@ -111,7 +111,18 @@ impl Drop for Inner {
         }
 
         if let Some(coordinator) = self.coordinator.get_mut().take() {
-            let _ = coordinator.join();
+            // Joining from a task running on this pool would wait for itself.
+            let on_own_runtime =
+                Handle::try_current().is_ok_and(|current| current.id() == self.handle.id());
+            if on_own_runtime {
+                let _ = thread::Builder::new()
+                    .name("dirk-pool-join".into())
+                    .spawn(move || {
+                        let _ = coordinator.join();
+                    });
+            } else {
+                let _ = coordinator.join();
+            }
         }
     }
 }
@@ -173,5 +184,53 @@ mod tests {
         }
 
         assert_eq!(counter.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn constructor_works_inside_async_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(async {
+            let pool = WorkerPool::new("nested");
+            pool.spawn(async {}).await.expect("worker should run");
+        });
+    }
+
+    #[test]
+    fn last_handle_can_drop_inside_async_task() {
+        let pool = WorkerPool::new("async-drop");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task_pool = pool.clone();
+        pool.spawn(async move {
+            let _ = release_rx.await;
+            drop(task_pool);
+            done_tx.send(()).expect("test receiver should remain open");
+        });
+        drop(pool);
+        release_tx.send(()).expect("task should remain alive");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker-side drop should not deadlock");
+    }
+
+    #[test]
+    fn last_handle_can_drop_inside_blocking_task() {
+        let pool = WorkerPool::new("blocking-drop");
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task_pool = pool.clone();
+        pool.spawn_blocking(move || {
+            release_rx.recv().expect("test sender should remain open");
+            drop(task_pool);
+            done_tx.send(()).expect("test receiver should remain open");
+        });
+        drop(pool);
+        release_tx.send(()).expect("task should remain alive");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker-side drop should not deadlock");
     }
 }
