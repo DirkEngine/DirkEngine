@@ -24,8 +24,5 @@ dirk_universe.workspace = true
 
 glam.workspace = true
 
-[build-dependencies]
-dirk_build.workspace = true
-
 [lints]
 workspace = true
