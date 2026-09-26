@@ -25,3 +25,9 @@ let engine = builder.build()?;
 engine.run()?;
 # Ok(()) }
 ```
+
+CI debug artifacts contain a `dirkengine-debug.tar.gz` bundle with the
+executable, `assets/`, and `run.sh`. Extract the archive, then run `run.sh`
+from any directory; it starts the executable with the bundled asset directory
+as its working directory. Launching the executable directly currently requires
+setting the working directory to the bundle root.
