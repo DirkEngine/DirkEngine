@@ -921,7 +921,11 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
 
         #[cfg(not(feature = "editor"))]
         mod presentation {
-            use super::*;
+            use super::{
+                BindGroupLayoutEntry, BindingType, FragmentShader, Shader, ShaderCode,
+                ShaderStage, ShaderStages, VertexAttribute, VertexBufferLayout, VertexShader,
+                VertexStepMode,
+            };
             #(#presentation_shaders)*
         }
         #[cfg(not(feature = "editor"))]

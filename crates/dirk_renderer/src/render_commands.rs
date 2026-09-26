@@ -51,8 +51,12 @@ impl RenderChanges {
                     model: universe
                         .component::<Renderable>(entity)
                         .map(|r| r.model.clone()),
-                    transform: universe.component::<Transform>(entity).cloned(),
-                    player: universe.component::<dirk_player::PlayerId>(entity).copied(),
+                    transform: universe
+                        .component::<Transform>(entity)
+                        .map(|value| value.clone()),
+                    player: universe
+                        .component::<dirk_player::PlayerId>(entity)
+                        .map(|value| *value),
                 }),
             })
             .collect()
