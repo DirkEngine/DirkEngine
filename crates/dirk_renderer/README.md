@@ -6,6 +6,13 @@ updates, per-viewport cameras, uploads, graph execution, and presentation.
 buffer, and pipeline helpers. RHI backend selection is internal and compile-time:
 Metal on Apple platforms, Vulkan elsewhere.
 
+Model loading renders the selected glTF scene, including nested transforms and
+repeated mesh instances. It supports triangle primitives, base-color textures
+with the default repeat/trilinear sampler and UV set 0, base-color factors, and
+vertex colors. Other topology, alpha modes, double-sided materials, and custom
+base-color sampler settings return a load error. Base-color images in 8- or
+16-bit integer formats are converted to RGBA8; float images are unsupported.
+
 Two frame slots wait for completion before GPU buffer preparation. Resource drops
 enter the RHI retirement queue, normally collected after three completed cycles.
 Asset uploads are batched on the transfer queue and acquired on graphics. Asset

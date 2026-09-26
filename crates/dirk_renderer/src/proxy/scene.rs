@@ -1,7 +1,7 @@
 //! CPU scene proxies and frame-slot GPU preparation.
 use crate::{
     MAX_FRAMES_IN_FLIGHT, RendererProperties, Result,
-    frame_graph::{AttachmentInfo, RenderGraph, TextureDesc, TextureHandle},
+    frame_graph::{AttachmentInfo, RenderGraph, TextureHandle},
     models::ModelRegistry,
     pipeline::{MainPipelineSpec, graphics::GraphicsPipeline},
     render_commands::RenderDelta,
@@ -12,21 +12,15 @@ use crate::{
     viewport::Viewport,
 };
 use dirk_player::PlayerId;
-use dirk_rhi::{Extent3d, Rect, Rhi, SampleCount, TextureFormat};
+use dirk_rhi::{Rect, Rhi};
 use dirk_shaders::types::ProxyUbo;
 use dirk_universe::{Entity, WorldId};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) struct SceneRenderSettings {
-    pub extent: Extent3d,
-    pub format: TextureFormat,
-    pub clear_color: [f32; 4],
-}
 pub struct SceneManager {
     proxies: HashMap<Entity, SceneProxy>,
     graphics_pipeline: GraphicsPipeline<MainPipelineSpec>,
     proxy_alloc: BindingLayout<ObjectSet>,
-    properties: RendererProperties,
     ambiguous: HashMap<PlayerId, HashSet<Entity>>,
 }
 impl SceneManager {
@@ -38,7 +32,6 @@ impl SceneManager {
                 MainPipelineSpec::settings(properties),
             )?,
             proxy_alloc: BindingLayout::new(rhi)?,
-            properties,
             ambiguous: HashMap::new(),
         })
     }
@@ -58,7 +51,10 @@ impl SceneManager {
                 .transform
                 .as_ref()
                 .map(dirk_world::components::Transform::matrix)
-                .filter(glam::Mat4::is_finite);
+                .filter(|m| {
+                    let determinant = m.determinant();
+                    m.is_finite() && determinant.is_finite() && determinant != 0.0
+                });
             let view = data
                 .transform
                 .as_ref()
@@ -152,7 +148,10 @@ impl SceneManager {
             // SAFETY: this frame slot's previous submission has completed.
             if let Some(gpu) = &mut proxy.gpu {
                 unsafe {
-                    gpu.ubo[frame].write(&ProxyUbo { model })?;
+                    gpu.ubo[frame].write(&ProxyUbo {
+                        model,
+                        normal: model.inverse().transpose(),
+                    })?;
                 }
             }
         }
@@ -179,11 +178,7 @@ impl SceneManager {
             return Ok(());
         };
         let scene_set = viewport.camera_set(frame);
-        let settings = SceneRenderSettings {
-            extent: viewport.settings().extent,
-            format: viewport.settings().format,
-            clear_color: viewport.settings().clear_color,
-        };
+        let settings = *viewport.settings();
         let uniform_state = dirk_rhi::ImageState::Uniform(dirk_rhi::ShaderStages::VERTEX);
         let mut uniforms = vec![graph.import_buffer(crate::frame_graph::ImportedBuffer {
             buffer: viewport.camera_buffer(frame),
@@ -203,22 +198,11 @@ impl SceneManager {
                 })?);
             }
         }
-        let depth = graph.create_texture(TextureDesc {
-            width: settings.extent.width,
-            height: settings.extent.height,
-            format: self.properties.depth_format,
-            samples: self.properties.msaa_samples,
-            imported: None,
-        });
-        let color = (self.properties.msaa_samples != SampleCount::One).then(|| {
-            graph.create_texture(TextureDesc {
-                width: settings.extent.width,
-                height: settings.extent.height,
-                format: settings.format,
-                samples: self.properties.msaa_samples,
-                imported: None,
-            })
-        });
+        let depth = graph.import_texture(viewport.import_depth(frame))?;
+        let color = viewport
+            .import_msaa_color(frame)
+            .map(|image| graph.import_texture(image))
+            .transpose()?;
         let mut pass = graph.add_pass("scene");
         for uniform in uniforms {
             pass.read_buffer(uniform, uniform_state);
@@ -228,7 +212,7 @@ impl SceneManager {
             pass.write_color_attachment_with_resolve(
                 color,
                 target,
-                AttachmentInfo::clear_color(r, g, b, a),
+                AttachmentInfo::clear_discard_color(r, g, b, a),
             );
         } else {
             pass.write_color_attachment(target, AttachmentInfo::clear_color(r, g, b, a));

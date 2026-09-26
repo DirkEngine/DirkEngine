@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use dirk_input::{
-    ButtonState, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition,
-    PointerButton, ScrollUnit,
+    ButtonState, ImeEvent, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta,
+    NormalizedPosition, PointerButton, ScrollUnit,
 };
 use tracing::{debug, trace};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey as WinitNamedKey},
     window::{WindowAttributes, WindowId},
@@ -131,6 +131,10 @@ impl PlatformHandler {
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
                 trace!("Modifiers changed to {:?}", self.modifiers);
+                self.dispatch_input(
+                    id,
+                    InputEvent::ModifiersChanged(modifiers_from_winit(self.modifiers)),
+                );
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -149,7 +153,18 @@ impl PlatformHandler {
                 ..
             } => self.dispatch_pointer_button(id, button, *state, position),
             WindowEvent::MouseWheel { delta, .. } => self.dispatch_mouse_wheel(id, delta),
-            WindowEvent::Ime(_) => {}
+            WindowEvent::Ime(event) => {
+                let event = match event {
+                    Ime::Enabled => Some(ImeEvent::Enabled),
+                    Ime::Preedit(text, _) => Some(ImeEvent::Preedit(text.clone())),
+                    Ime::Commit(text) => Some(ImeEvent::Commit(text.clone())),
+                    Ime::Disabled => Some(ImeEvent::Disabled),
+                    Ime::DeleteSurrounding { .. } => None,
+                };
+                if let Some(event) = event {
+                    self.dispatch_input(id, InputEvent::Ime(event));
+                }
+            }
             _ => return false,
         }
 
@@ -237,9 +252,6 @@ impl PlatformHandler {
     }
 
     fn dispatch_keyboard_input(&self, id: WindowId, event: &winit::event::KeyEvent) {
-        let Some(key) = logical_key_from_winit(&event.logical_key) else {
-            return;
-        };
         let state = match event.state {
             ElementState::Pressed => ButtonState::Pressed,
             ElementState::Released => ButtonState::Released,
@@ -248,15 +260,25 @@ impl PlatformHandler {
             "Key {:?} {state:?} (repeat={})",
             event.logical_key, event.repeat
         );
-        self.dispatch_input(
-            id,
-            InputEvent::Key {
-                key,
-                state,
-                repeat: event.repeat,
-                modifiers: modifiers_from_winit(self.modifiers),
-            },
-        );
+        if let Some(key) = logical_key_from_winit(&event.logical_key) {
+            self.dispatch_input(
+                id,
+                InputEvent::Key {
+                    key,
+                    state,
+                    repeat: event.repeat,
+                    modifiers: modifiers_from_winit(self.modifiers),
+                },
+            );
+        }
+        if state == ButtonState::Pressed
+            && (!self.modifiers.control_key() || self.modifiers.alt_key())
+            && !self.modifiers.meta_key()
+            && let Some(text) = event.text.as_ref()
+            && !text.chars().any(char::is_control)
+        {
+            self.dispatch_input(id, InputEvent::Text(text.to_string()));
+        }
     }
 
     fn dispatch_input(&self, window: WindowId, event: InputEvent) {
