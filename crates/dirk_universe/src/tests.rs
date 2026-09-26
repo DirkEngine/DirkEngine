@@ -2,7 +2,15 @@
 
 use std::any::TypeId;
 
-use crate::{Entity, EntityBuilder, Universe, World, WorldId, components::Component, query::Query};
+use crate::{
+    Entity, EntityBuilder, Universe, World, WorldId,
+    components::Component,
+    query::{
+        Query, QueryItem, Read,
+        filter::{With, Without},
+    },
+    systems::ToSystem,
+};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
 struct Health(u32);
@@ -86,14 +94,15 @@ fn query_filters_by_components_and_world_membership() {
             .with_component(Mana(5)),
     );
 
-    let q = Query::empty()
-        .with_component::<Health>()
-        .without_component::<Mana>()
-        .with_world(world_a)
-        .without_world(world_b);
-
-    assert!(q.matches(&universe, e1));
-    assert!(!q.matches(&universe, e2));
+    let matched: Vec<_> = QueryItem::<Read<Health>, Without<Mana>>::iter(&universe)
+        .filter(|item| {
+            universe.is_in_world(world_a, item.entity())
+                && !universe.is_in_world(world_b, item.entity())
+        })
+        .map(|item| item.entity())
+        .collect();
+    assert_eq!(matched, vec![e1]);
+    assert!(!matched.contains(&e2));
 }
 
 #[test]
@@ -232,4 +241,295 @@ fn inspection_helpers_update_after_despawn_and_world_destruction() {
     assert!(!universe.entities().any(|(entity, _)| entity == despawned));
     assert!(!universe.entities().any(|(entity, _)| entity == destroyed));
     assert!(!universe.worlds().any(|world| world.id() == second_world));
+}
+
+#[test]
+fn query_item_iter_applies_filters() {
+    let mut universe = Universe::builder()
+        .with_world(World::builder("alpha"))
+        .with_world(World::builder("beta"))
+        .build();
+    universe.tick(0.0);
+
+    let world_a = crate::WorldId::default();
+    let world_b = world_a + 1;
+    let e1 = spawn_entity(
+        &mut universe,
+        world_a,
+        Entity::builder().with_component(Health(10)),
+    );
+    let _e2 = spawn_entity(
+        &mut universe,
+        world_b,
+        Entity::builder()
+            .with_component(Health(20))
+            .with_component(Mana(5)),
+    );
+    let _e3 = spawn_entity(
+        &mut universe,
+        world_b,
+        Entity::builder().with_component(Mana(15)),
+    );
+
+    let matched: Vec<_> = QueryItem::<Read<Health>, Without<Mana>>::iter(&universe)
+        .map(|query| (query.entity().raw(), query.params().0))
+        .collect();
+
+    assert_eq!(matched, vec![(e1.raw(), 10)]);
+}
+
+#[test]
+fn query_item_tuple_params_require_every_component() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    let _health_only = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Health(10)),
+    );
+    let both = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder()
+            .with_component(Health(20))
+            .with_component(Mana(5)),
+    );
+
+    let matched: Vec<_> = QueryItem::<(Read<Health>, Read<Mana>)>::iter(&universe)
+        .map(|query| {
+            let entity = query.entity();
+            let (health, mana) = query.into_params();
+            (entity.raw(), health.0, mana.0)
+        })
+        .collect();
+
+    assert_eq!(matched, vec![(both.raw(), 20, 5)]);
+}
+
+#[test]
+fn query_item_fetch_skips_entities_missing_parameters() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Health(10)),
+    );
+    let mana_1 = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Mana(1)),
+    );
+    let mana_2 = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder()
+            .with_component(Health(20))
+            .with_component(Mana(2)),
+    );
+
+    let mut matched: Vec<_> = QueryItem::<Read<Mana>>::iter(&universe)
+        .map(|query| query.entity().raw())
+        .collect();
+    matched.sort_unstable();
+
+    assert_eq!(matched, vec![mana_1.raw(), mana_2.raw()]);
+}
+
+#[test]
+fn query_item_matches_entities_across_all_worlds() {
+    let mut universe = Universe::builder()
+        .with_world(World::builder("alpha"))
+        .with_world(World::builder("beta"))
+        .build();
+    universe.tick(0.0);
+
+    let first_world = crate::WorldId::default();
+    let second_world = first_world + 1;
+    let first = spawn_entity(
+        &mut universe,
+        first_world,
+        Entity::builder().with_component(Health(10)),
+    );
+    let second = spawn_entity(
+        &mut universe,
+        second_world,
+        Entity::builder().with_component(Health(20)),
+    );
+
+    let mut matched: Vec<_> = QueryItem::<Read<Health>>::iter(&universe)
+        .map(|query| query.entity().raw())
+        .collect();
+    matched.sort_unstable();
+
+    assert_eq!(matched, vec![first.raw(), second.raw()]);
+}
+
+#[test]
+fn query_item_on_empty_universe_yields_nothing() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+
+    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 0);
+    assert_eq!(QueryItem::<()>::iter(&universe).count(), 0);
+}
+
+#[test]
+fn query_item_excludes_despawned_entities() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    let despawned = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Health(10)),
+    );
+    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 1);
+
+    let mut command_buffer = universe.handle().command_buffer();
+    command_buffer.despawn(despawned);
+    command_buffer.submit();
+    universe.tick(0.016);
+
+    assert_eq!(QueryItem::<Read<Health>>::iter(&universe).count(), 0);
+}
+
+#[test]
+fn with_and_without_filters_compose() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    let health_only = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Health(10)),
+    );
+    let both = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder()
+            .with_component(Health(20))
+            .with_component(Mana(5)),
+    );
+    let mana_only = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Mana(15)),
+    );
+    let neither = spawn_entity(&mut universe, world, Entity::builder());
+
+    let mut with_health: Vec<_> = QueryItem::<(), With<Health>>::iter(&universe)
+        .map(|query| query.entity().raw())
+        .collect();
+    with_health.sort_unstable();
+    assert_eq!(with_health, vec![health_only.raw(), both.raw()]);
+
+    let mut without_health: Vec<_> = QueryItem::<(), Without<Health>>::iter(&universe)
+        .map(|query| query.entity().raw())
+        .collect();
+    without_health.sort_unstable();
+    assert_eq!(without_health, vec![mana_only.raw(), neither.raw()]);
+
+    let combined: Vec<_> = QueryItem::<(), (With<Health>, Without<Mana>)>::iter(&universe)
+        .map(|query| query.entity())
+        .collect();
+    assert_eq!(combined, vec![health_only]);
+    assert_eq!(
+        QueryItem::<(), (With<Health>, Without<Health>)>::iter(&universe).count(),
+        0
+    );
+
+    let mut everything: Vec<_> = QueryItem::<(), ()>::iter(&universe)
+        .map(|query| query.entity().raw())
+        .collect();
+    everything.sort_unstable();
+    assert_eq!(
+        everything,
+        vec![
+            health_only.raw(),
+            both.raw(),
+            mana_only.raw(),
+            neither.raw()
+        ]
+    );
+}
+
+#[test]
+fn function_system_runs_for_matching_queries_only() {
+    use std::{cell::RefCell, rc::Rc};
+
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    let _included = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Health(10)),
+    );
+    let _excluded = spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder()
+            .with_component(Health(20))
+            .with_component(Mana(5)),
+    );
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let system_seen = Rc::clone(&seen);
+    let mut system = (move |query: Query<'_, Read<Health>, Without<Mana>>| {
+        system_seen.borrow_mut().push(query.params().0);
+    })
+    .to_system();
+
+    system.run(
+        &universe,
+        0.016,
+        &std::cell::RefCell::new(universe.handle().command_buffer()),
+    );
+
+    assert_eq!(*seen.borrow(), vec![10]);
+}
+
+#[test]
+fn function_system_default_filter_runs_for_every_matching_entity() {
+    use std::{cell::Cell, rc::Rc};
+
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let world = crate::WorldId::default();
+
+    for health in [1, 2, 3] {
+        spawn_entity(
+            &mut universe,
+            world,
+            Entity::builder().with_component(Health(health)),
+        );
+    }
+    spawn_entity(
+        &mut universe,
+        world,
+        Entity::builder().with_component(Mana(4)),
+    );
+
+    let total = Rc::new(Cell::new(0));
+    let system_total = Rc::clone(&total);
+    let mut system = (move |query: Query<'_, Read<Health>>| {
+        system_total.set(system_total.get() + query.params().0);
+    })
+    .to_system();
+
+    system.run(
+        &universe,
+        0.016,
+        &std::cell::RefCell::new(universe.handle().command_buffer()),
+    );
+
+    assert_eq!(total.get(), 6);
 }

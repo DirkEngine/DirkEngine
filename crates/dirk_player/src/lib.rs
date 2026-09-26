@@ -43,7 +43,7 @@ impl EnginePlugin for PlayerPlugin {
             ctx.add_resource(players.presentation_assignments())?;
             ctx.extend_universe(
                 dirk_universe::Universe::builder()
-                    .with_ticking_system(PlayerMovementSystem::new(players.registry.input_state())),
+                    .with_system(PlayerMovementSystem::new(players.registry.input_state())),
             );
             Ok(players)
         });
