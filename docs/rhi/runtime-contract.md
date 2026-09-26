@@ -77,4 +77,4 @@ memory. Camera uniforms belong to each viewport, not the world. Missing or inval
 cameras make a viewport unavailable; duplicate player cameras report the conflicting
 IDs when the conflict changes. Missing-transform and unloaded renderables are skipped.
 Camera space is +Y up, +Z forward, with full quaternion rotation including roll;
-view transforms ignore scale. Projection uses left-handed Vulkan depth 0..1.
+view transforms ignore scale. Projection preserves the existing right-handed Vulkan depth 0..1 convention.
