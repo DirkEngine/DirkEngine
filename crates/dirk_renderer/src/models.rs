@@ -393,34 +393,28 @@ impl ModelRegistry {
         Ok(())
     }
 
-    /// glTF normals are optional; generate smooth vertex normals when absent.
-    fn primitive_normals(
-        positions: &[[f32; 3]],
-        indices: &[u32],
-        normals: Vec<[f32; 3]>,
-    ) -> Result<Vec<[f32; 3]>> {
-        if !normals.is_empty() {
-            model_ensure!(
-                normals.len() == positions.len(),
-                "glTF primitive normal count does not match its positions"
-            );
-            return Ok(normals);
+    /// glTF requires flat normals when NORMAL is absent. Split shared vertices
+    /// before assigning face normals, preserving their UVs and vertex colors.
+    fn flat_vertices(vertices: &[Vertex], indices: &[u32]) -> Result<Vec<Vertex>> {
+        let mut expanded = indices
+            .iter()
+            .map(|&index| {
+                let index = usize::try_from(index)
+                    .context("glTF vertex index exceeds host address space")?;
+                vertices
+                    .get(index)
+                    .copied()
+                    .context("glTF vertex index is out of range")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for triangle in expanded.as_chunks_mut::<3>().0 {
+            let [a, b, c] = triangle.map(|vertex| Vec3::from_array(vertex.position));
+            let normal = (b - a).cross(c - a).normalize_or_zero().to_array();
+            for vertex in triangle {
+                vertex.normal = normal;
+            }
         }
-        let mut accumulated = vec![Vec3::ZERO; positions.len()];
-        for &[a, b, c] in indices.as_chunks::<3>().0 {
-            let a = usize::try_from(a).context("glTF vertex index exceeds host address space")?;
-            let b = usize::try_from(b).context("glTF vertex index exceeds host address space")?;
-            let c = usize::try_from(c).context("glTF vertex index exceeds host address space")?;
-            let face = (Vec3::from_array(positions[b]) - Vec3::from_array(positions[a]))
-                .cross(Vec3::from_array(positions[c]) - Vec3::from_array(positions[a]));
-            accumulated[a] += face;
-            accumulated[b] += face;
-            accumulated[c] += face;
-        }
-        Ok(accumulated
-            .into_iter()
-            .map(|normal| normal.normalize_or_zero().to_array())
-            .collect())
+        Ok(expanded)
     }
 
     fn upload_primitive(
@@ -453,7 +447,7 @@ impl ModelRegistry {
         model_ensure!(!positions.is_empty(), "glTF primitive has no positions");
         let vertex_count = u32::try_from(positions.len())
             .context("glTF primitive has too many vertices for indexed drawing")?;
-        let indices: Vec<_> = reader.read_indices().map_or_else(
+        let mut indices: Vec<_> = reader.read_indices().map_or_else(
             || (0..vertex_count).collect(),
             |iter| iter.into_u32().collect(),
         );
@@ -463,17 +457,20 @@ impl ModelRegistry {
                 && indices.iter().all(|&i| i < vertex_count),
             "glTF triangle primitive has empty, incomplete, or out-of-range indices"
         );
-        let normals = Self::primitive_normals(&positions, &indices, normals)?;
+        model_ensure!(
+            normals.is_empty() || normals.len() == positions.len(),
+            "glTF primitive normal count does not match its positions"
+        );
         let index_count = u32::try_from(indices.len())
             .context("glTF primitive has too many indices for indexed drawing")?;
         let factor = material.pbr_metallic_roughness().base_color_factor();
 
-        let vertices: Vec<Vertex> = positions
+        let mut vertices: Vec<Vertex> = positions
             .iter()
             .enumerate()
             .map(|(i, &position)| Vertex {
                 position,
-                normal: normals[i],
+                normal: normals.get(i).copied().unwrap_or([0.0; 3]),
                 texcoord: texcoords.get(i).copied().unwrap_or([0.0, 0.0]),
                 color: {
                     let color = colors.get(i).copied().unwrap_or([1.0; 4]);
@@ -482,6 +479,10 @@ impl ModelRegistry {
             })
             .collect();
 
+        if normals.is_empty() {
+            vertices = Self::flat_vertices(&vertices, &indices)?;
+            indices = (0..index_count).collect();
+        }
         let vertex_buffer = VertexBuffer::upload(device, uploads, &vertices)?;
         let index_buffer = uploads.buffer(
             device,
@@ -545,16 +546,53 @@ impl Drop for ModelRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::ModelRegistry;
+    use super::{ModelRegistry, Vertex};
+
+    #[test]
+    fn missing_normals_split_shared_vertices_and_preserve_attributes() {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let vertices: Vec<_> = positions
+            .into_iter()
+            .map(|position| Vertex {
+                position,
+                normal: [0.0; 3],
+                texcoord: [position[0], position[1]],
+                color: [position[0], position[1], position[2], 0.5],
+            })
+            .collect();
+        let indices = [0, 1, 2, 0, 3, 1];
+        let flat = ModelRegistry::flat_vertices(&vertices, &indices).expect("flat normals");
+        assert_eq!(flat.len(), 6);
+        for (i, vertex) in flat.iter().enumerate() {
+            assert_eq!(
+                vertex.normal,
+                if i < 3 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 1.0, 0.0]
+                }
+            );
+            let original = &vertices[usize::try_from(indices[i]).expect("small index")];
+            assert_eq!(vertex.position, original.position);
+            assert_eq!(vertex.texcoord, original.texcoord);
+            assert_eq!(vertex.color, original.color);
+        }
+    }
 
     #[test]
     fn non_indexed_triangle_can_generate_normals() {
-        let normals = ModelRegistry::primitive_normals(
-            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            &[0, 1, 2],
-            Vec::new(),
-        )
-        .expect("triangle normals");
-        assert_eq!(normals, vec![[0.0, 0.0, 1.0]; 3]);
+        let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]].map(|position| Vertex {
+            position,
+            normal: [0.0; 3],
+            texcoord: [0.0; 2],
+            color: [1.0; 4],
+        });
+        let flat = ModelRegistry::flat_vertices(&vertices, &[0, 1, 2]).expect("triangle normals");
+        assert!(flat.iter().all(|vertex| vertex.normal == [0.0, 0.0, 1.0]));
     }
 }
