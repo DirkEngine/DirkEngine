@@ -148,5 +148,6 @@ fn nonzero_attachment_mip_validates_ranges_and_clears_its_full_extent() -> anyho
     }
     drop((full_view, target, readback));
     rhi.flush()?;
+    assert_eq!(rhi.validation_error_count(), 0, "native validation errors");
     Ok(())
 }
