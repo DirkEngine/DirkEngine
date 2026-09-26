@@ -10,6 +10,8 @@ use std::num::NonZeroU32;
 pub struct Window {
     id: WindowId,
     swapchain: Swapchain,
+    #[cfg(not(feature = "editor"))]
+    pub(crate) presenter: crate::presentation::Presenter,
     requested_extent: Extent3d,
     occluded: bool,
     recreate: bool,
@@ -22,11 +24,11 @@ impl Window {
         let extent = Extent3d::new_2d(size.width, size.height);
         let preferred_formats = [
             SurfaceFormat {
-                texture: TextureFormat::Bgra8Unorm,
+                texture: TextureFormat::Bgra8Srgb,
                 color_space: ColorSpace::Srgb,
             },
             SurfaceFormat {
-                texture: TextureFormat::Rgba8Unorm,
+                texture: TextureFormat::Rgba8Srgb,
                 color_space: ColorSpace::Srgb,
             },
         ];
@@ -42,7 +44,11 @@ impl Window {
             desired_image_count: NonZeroU32::new(3),
             present_mode: PresentMode::Mailbox,
         })?;
+        #[cfg(not(feature = "editor"))]
+        let presenter = crate::presentation::Presenter::new(rhi, swapchain.format().texture)?;
         Ok(Self {
+            #[cfg(not(feature = "editor"))]
+            presenter,
             id: window.id(),
             swapchain,
             requested_extent: extent,
@@ -63,7 +69,9 @@ impl Window {
         self.requested_extent = extent;
         self.recreate = true;
     }
-    pub fn next_image(&mut self) -> Result<Option<SurfaceFrame>> {
+    pub fn next_image(&mut self, rhi: &Rhi) -> Result<Option<SurfaceFrame>> {
+        #[cfg(feature = "editor")]
+        let _ = rhi;
         let (Some(width), Some(height)) = (
             NonZeroU32::new(self.requested_extent.width),
             NonZeroU32::new(self.requested_extent.height),
@@ -75,6 +83,9 @@ impl Window {
         }
         if self.recreate {
             self.swapchain.resize(width, height)?;
+            #[cfg(not(feature = "editor"))]
+            self.presenter
+                .set_target_format(rhi, self.swapchain.format().texture)?;
             self.recreate = false;
         }
         match self.swapchain.acquire(u64::MAX) {

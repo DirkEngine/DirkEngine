@@ -898,6 +898,13 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
         .into_iter()
         .map(generate_shader)
         .collect::<Vec<_>>();
+    let (presentation_shaders, renderer_shaders): (Vec<_>, Vec<_>) = renderer_shaders
+        .into_iter()
+        .partition(|shader| shader.entrypoint.starts_with("present_"));
+    let presentation_shaders = presentation_shaders
+        .into_iter()
+        .map(generate_shader)
+        .collect::<Vec<_>>();
     let renderer_shaders = renderer_shaders
         .into_iter()
         .map(generate_shader)
@@ -911,6 +918,14 @@ fn generate_shader_module(shaders: &[ReflectedShader]) -> TokenStream {
         use crate::shaders::metadata::{FragmentShader, Shader, VertexShader};
 
         #(#renderer_shaders)*
+
+        #[cfg(not(feature = "editor"))]
+        mod presentation {
+            use super::*;
+            #(#presentation_shaders)*
+        }
+        #[cfg(not(feature = "editor"))]
+        pub use presentation::*;
 
         #[cfg(feature = "editor")]
         mod editor {

@@ -4,8 +4,6 @@ use std::{collections::HashMap, ffi::CString};
 
 use anyhow::Context;
 use dirk_rhi::{Extent3d, SampleCount};
-#[cfg(not(feature = "editor"))]
-use dirk_rhi::{ImageAspects, ImageCopy};
 
 #[cfg(feature = "editor")]
 use dirk_platform::WindowInputEvent;
@@ -35,6 +33,9 @@ pub use errors::{Error, Result};
 mod egui_integration;
 #[cfg(feature = "editor")]
 use egui_integration::{EguiFrameInput, EguiState};
+
+#[cfg(not(feature = "editor"))]
+mod presentation;
 
 mod window;
 use window::Window;
@@ -643,7 +644,7 @@ impl Renderer {
                 .windows
                 .get_mut(&window_id)
                 .expect("window keys should come from the window map");
-            if let Some(image) = window.next_image()? {
+            if let Some(image) = window.next_image(&self.rhi)? {
                 targets.push(PresentationTarget {
                     window: window_id,
                     extent: image.extent(),
@@ -713,36 +714,13 @@ impl Renderer {
                         viewport.import()
                     })?;
 
-                    let mut copy_pass = graph.add_pass("copy scene to swapchain");
-                    copy_pass
-                        .read_transfer_src(viewport_source)
-                        .write_transfer_dst(swapchain);
-                    copy_pass.execute_transfer(Box::new(move |cmd, ctx| {
-                        let source = ctx.resolve(viewport_source)?;
-                        let destination = ctx.resolve(swapchain)?;
-                        // SAFETY: both images were declared as copy operands in this pass.
-                        unsafe {
-                            cmd.copy_image(
-                                &source.image,
-                                &destination.image,
-                                &[ImageCopy {
-                                    src_mip_level: 0,
-                                    src_base_array_layer: 0,
-                                    dst_mip_level: 0,
-                                    dst_base_array_layer: 0,
-                                    array_layer_count: 1,
-                                    src_origin: dirk_rhi::Origin3d::default(),
-                                    dst_origin: dirk_rhi::Origin3d::default(),
-                                    extent: Extent3d::new_2d(
-                                        target_extent.width,
-                                        target_extent.height,
-                                    ),
-                                    aspects: ImageAspects::COLOR,
-                                }],
-                            )?;
-                        }
-                        Ok(())
-                    }));
+                    self.windows[&target.window].presenter.add_pass(
+                        &self.rhi,
+                        &mut graph,
+                        viewport_source,
+                        swapchain,
+                        target_extent,
+                    );
                 }
             }
         }

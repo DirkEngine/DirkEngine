@@ -16,3 +16,12 @@ Register `RendererPlugin` with `EngineBuilder`; it depends on `PlatformPlugin` a
 `AssetsPlugin`. Rust GPU shaders produce SPIR-V and, on Apple targets, translated
 MSL with shared binding metadata. Shader overhaul and transient allocation remain
 deferred. See the [rendering contract](../../docs/rhi/runtime-contract.md).
+
+## Output colors
+
+Scene shaders produce linear colors. Viewport images preserve that meaning when
+sampled, using hardware decoding for sRGB image formats. Window creation prefers
+sRGB attachments. Standalone presentation samples the viewport and encodes exactly
+once: the attachment performs the conversion for sRGB formats, and a fragment
+shader performs it for UNORM formats. Editor output uses the same sRGB transfer
+function. Presentation pipelines follow each window's format across recreation.
