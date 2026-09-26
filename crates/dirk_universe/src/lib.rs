@@ -18,7 +18,7 @@ use changes::{Change, ComponentChange};
 pub mod query;
 
 pub mod systems;
-use systems::System;
+use systems::{ErasedSystem, ToSystem};
 
 mod command_buffer;
 use command_buffer::Command;
@@ -72,10 +72,13 @@ pub struct Universe {
 
     // Systems mutate their own state while borrowing the universe's component
     // data. Only tick borrows this private list, so callbacks cannot reborrow it.
-    systems: RefCell<Vec<Box<dyn System>>>,
+    systems: RefCell<Vec<Box<dyn ErasedSystem>>>,
 
     components: Components,
     changes: Vec<Change>,
+    pending_changes: Vec<Change>,
+    edit_order: RefCell<Vec<(Entity, TypeId)>>,
+    prepared_order: RefCell<Vec<(Entity, TypeId)>>,
 }
 
 impl Universe {
@@ -95,6 +98,9 @@ impl Universe {
             systems: RefCell::new(builder.systems),
             components: Components::default(),
             changes: Vec::new(),
+            pending_changes: Vec::new(),
+            edit_order: RefCell::new(Vec::new()),
+            prepared_order: RefCell::new(Vec::new()),
         };
 
         let mut cmd = universe.handle.command_buffer();
@@ -115,6 +121,7 @@ impl Universe {
     ///
     /// Systems run once each, in registration order, even with no entities.
     /// Commands produced by any system become visible on the next tick.
+    /// Mutable query edits are visible to later systems in the same tick.
     /// `delta_time` is measured in seconds.
     ///
     /// # Panics
@@ -123,7 +130,7 @@ impl Universe {
     /// was just created is not found in the [`Universe`].
     /// Panics from system callbacks propagate to the caller.
     pub fn tick(&mut self, delta_time: f64) {
-        let mut cmd = self.handle.command_buffer();
+        let cmd = RefCell::new(self.handle.command_buffer());
 
         let mut commands: Vec<Command> = Vec::new();
         for sub in self.buffer_receiver.try_iter() {
@@ -131,13 +138,23 @@ impl Universe {
         }
 
         self.changes.clear();
+        self.changes.append(&mut self.pending_changes);
         self.run_commands(commands);
 
         for system in self.systems.borrow_mut().iter_mut() {
-            system.run(&mut cmd, self, delta_time);
+            system.run(self, delta_time, &cmd);
+            self.pending_changes.extend(
+                self.components
+                    .finish_edits(
+                        &mut self.edit_order.borrow_mut(),
+                        &mut self.prepared_order.borrow_mut(),
+                    )
+                    .into_iter()
+                    .map(|(entity, old, new)| Change::ComponentUpdated { entity, old, new }),
+            );
         }
 
-        cmd.submit();
+        cmd.into_inner().submit();
     }
 
     fn run_commands(&mut self, commands: Vec<Command>) {
@@ -348,7 +365,7 @@ pub struct UniverseBuilder {
     handle: UniverseHandle,
     buffer_receiver: Receiver<CommandBuffer>,
     worlds: Vec<WorldBuilder>,
-    systems: Vec<Box<dyn System>>,
+    systems: Vec<Box<dyn ErasedSystem>>,
 }
 
 impl UniverseBuilder {
@@ -387,12 +404,12 @@ impl UniverseBuilder {
 
     /// Adds a system to run on each tick, in registration order.
     ///
-    /// Use [`systems::FuncSystem::new`] to wrap a function or
-    /// stateful closure. Every system runs once, sharing the command buffer;
-    /// writes are applied on the following tick.
+    /// Functions declare the queries, changes, and delta time they need in
+    /// their arguments. Stateful [`systems::System`] implementations use
+    /// the same parameters. Writes are applied on the following tick.
     #[must_use]
-    pub fn with_system(mut self, system: impl System) -> Self {
-        self.systems.push(Box::new(system));
+    pub fn with_system<Marker>(mut self, system: impl ToSystem<Marker>) -> Self {
+        self.systems.push(system.to_system());
         self
     }
 

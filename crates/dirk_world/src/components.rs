@@ -6,8 +6,11 @@ use std::collections::{HashMap, HashSet};
 
 use dirk_assets::{AssetHandle, AssetLoad, AssetRegistry, Handle, Model};
 use dirk_universe::{
-    CommandBuffer, Entity, Universe, changes::ComponentChange, components::Component,
-    systems::System,
+    Entity,
+    changes::ComponentChange,
+    components::Component,
+    query::QueryView,
+    systems::{Changes, System},
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::{error, warn};
@@ -91,22 +94,23 @@ impl ModelUploadSystem {
     }
 }
 
-impl System for ModelUploadSystem {
-    fn run(&mut self, _: &mut CommandBuffer, universe: &Universe, _: f64) {
-        let mut changed = HashSet::new();
-        for change in universe.component_changes::<Renderable>() {
+impl System<(Changes<'_>, QueryView<'_, &Renderable>)> for ModelUploadSystem {
+    fn run(&mut self, (changes, renderables): (Changes<'_>, QueryView<'_, &Renderable>)) {
+        let mut affected_entities = HashSet::new();
+        for change in changes.components::<Renderable>() {
             let entity = match change {
                 ComponentChange::Added { entity, .. }
                 | ComponentChange::Updated { entity, .. }
                 | ComponentChange::Removed { entity, .. } => entity,
             };
-            changed.insert(entity);
+            affected_entities.insert(entity);
         }
 
         // Reconcile once against the final component value, even if it changed
         // several times in this command batch.
-        for entity in changed {
-            if let Some(component) = universe.component::<Renderable>(entity) {
+        for entity in affected_entities {
+            if let Some(component) = renderables.get(entity) {
+                let component = component.into_params();
                 if self
                     .requests
                     .get(&entity)
