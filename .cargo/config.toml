@@ -1,14 +1,5 @@
-[target.'cfg(target_os = "windows")']
-rustflags = [ "--cfg", "platform_windows"]
-
-[target.'cfg(target_os = "linux")']
-rustflags = [ "--cfg", "platform_linux"]
-
-[target.'cfg(target_os = "macos")']
-rustflags = [ "--cfg", "platform_macos"]
-
-[target.'cfg(target_os = "android")']
-rustflags = [ "--cfg", "platform_android"]
-
-[target.'cfg(target_os = "ios")']
-rustflags = [ "--cfg", "platform_ios"]
+[env]
+# Native dependencies must use Apple's C++ ABI on macOS. Development shells
+# may otherwise expose GNU g++ as `c++`, which makes spirv-cross fail to link.
+CXX_aarch64_apple_darwin = "/usr/bin/clang++"
+CXX_x86_64_apple_darwin = "/usr/bin/clang++"

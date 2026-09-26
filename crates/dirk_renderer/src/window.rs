@@ -1,91 +1,114 @@
-use ash::vk;
+//! Window policy and presentation orchestration, using the RHI swapchain directly.
+use crate::Result;
 use dirk_platform::WindowId;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
-use crate::{
-    Result,
-    resources::{
-        device::{Garbage, RenderDevice},
-        swapchain::{RenderImage, Swapchain},
-    },
+use dirk_rhi::{
+    ColorSpace, Extent3d, PresentMode, Rhi, SurfaceFormat, SurfaceFrame, Swapchain, SwapchainDesc,
+    TextureFormat,
 };
+use std::num::NonZeroU32;
 
-/// The renderer's representation of a platform window.
-/// Holds the swapchain, surface & other related state.
-/// Doesn't actually do any of the rendering of the game.
 pub struct Window {
-    device: RenderDevice,
-    surface_target: std::sync::Arc<dirk_platform::WindowSurfaceTarget>,
-
     id: WindowId,
-    surface: vk::SurfaceKHR,
     swapchain: Swapchain,
-
-    // TODO: stop rendering when the window is occluded
+    #[cfg(not(feature = "editor"))]
+    pub(crate) presenter: crate::presentation::Presenter,
+    requested_extent: Extent3d,
     occluded: bool,
+    recreate: bool,
 }
-
 impl Window {
-    pub fn build(device: &RenderDevice, plat_window: &dirk_platform::Window) -> Result<Self> {
-        let surface_target = plat_window.surface_target();
-        let surface = unsafe {
-            ash_window::create_surface(
-                &device.entry,
-                &device.instance,
-                surface_target.display_handle()?.as_raw(),
-                surface_target.window_handle()?.as_raw(),
-                None,
-            )?
-        };
-
-        let window_size = plat_window.size();
-        let size = vk::Extent2D {
-            width: window_size.width,
-            height: window_size.height,
-        };
-
-        let swapchain = match Swapchain::build(device, surface, size) {
-            Ok(swapchain) => swapchain,
-            Err(error) => {
-                // The target remains alive until the failed surface is destroyed.
-                unsafe { device.surface_loader.destroy_surface(surface, None) };
-                return Err(error);
-            }
-        };
-
+    pub fn build(rhi: &Rhi, window: &dirk_platform::Window) -> Result<Self> {
+        let surface =
+            rhi.create_surface(dirk_rhi::SurfaceCreateInfo::new(window.surface_target()))?;
+        let size = window.size();
+        let extent = Extent3d::new_2d(size.width, size.height);
+        let preferred_formats = [
+            SurfaceFormat {
+                texture: TextureFormat::Bgra8Srgb,
+                color_space: ColorSpace::Srgb,
+            },
+            SurfaceFormat {
+                texture: TextureFormat::Rgba8Srgb,
+                color_space: ColorSpace::Srgb,
+            },
+        ];
+        let swapchain = rhi.create_swapchain(&SwapchainDesc {
+            label: "renderer window",
+            surface: &surface,
+            width: NonZeroU32::new(size.width.max(1)).expect("clamped"),
+            height: NonZeroU32::new(size.height.max(1)).expect("clamped"),
+            usage: dirk_rhi::ImageUsages::COLOR_ATTACHMENT
+                | dirk_rhi::ImageUsages::COPY_DST
+                | dirk_rhi::ImageUsages::PRESENT,
+            preferred_formats: &preferred_formats,
+            desired_image_count: NonZeroU32::new(3),
+            present_mode: PresentMode::Mailbox,
+        })?;
+        #[cfg(not(feature = "editor"))]
+        let presenter = crate::presentation::Presenter::new(rhi, swapchain.format().texture)?;
         Ok(Self {
-            id: plat_window.id(),
-            device: device.clone(),
-            surface_target,
-            surface,
+            #[cfg(not(feature = "editor"))]
+            presenter,
+            id: window.id(),
             swapchain,
+            requested_extent: extent,
             occluded: false,
+            recreate: false,
         })
     }
-    /// Returns the window's ID
     pub fn id(&self) -> WindowId {
         self.id
     }
-    pub fn extent(&self) -> vk::Extent2D {
-        self.swapchain.extent()
+    pub fn extent(&self) -> Extent3d {
+        self.requested_extent
     }
-    pub fn next_image(&mut self) -> Result<RenderImage> {
-        self.swapchain.acquire_next_image()
+    pub fn format(&self) -> TextureFormat {
+        self.swapchain.format().texture
     }
-    pub fn resize(&mut self, extent: vk::Extent2D) -> Result<()> {
-        self.swapchain.recreate(extent)
+    pub fn resize(&mut self, extent: Extent3d) {
+        self.requested_extent = extent;
+        self.recreate = true;
+    }
+    pub fn next_image(&mut self, rhi: &Rhi) -> Result<Option<SurfaceFrame>> {
+        #[cfg(feature = "editor")]
+        let _ = rhi;
+        let (Some(width), Some(height)) = (
+            NonZeroU32::new(self.requested_extent.width),
+            NonZeroU32::new(self.requested_extent.height),
+        ) else {
+            return Ok(None);
+        };
+        if self.occluded {
+            return Ok(None);
+        }
+        if self.recreate {
+            self.swapchain.resize(width, height)?;
+            #[cfg(not(feature = "editor"))]
+            self.presenter
+                .set_target_format(rhi, self.swapchain.format().texture)?;
+            self.recreate = false;
+        }
+        match self.swapchain.acquire(u64::MAX) {
+            Ok(frame) => {
+                self.recreate = frame.status() == dirk_rhi::SurfaceStatus::Suboptimal;
+                Ok(Some(frame))
+            }
+            Err(dirk_rhi::Error::SwapchainOutOfDate) => {
+                self.recreate = true;
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub fn present(&mut self, image: SurfaceFrame) -> Result<()> {
+        match self.swapchain.present(image) {
+            Ok(status) => self.recreate |= status == dirk_rhi::SurfaceStatus::Suboptimal,
+            Err(dirk_rhi::Error::SwapchainOutOfDate) => self.recreate = true,
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
     }
     pub fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
-    }
-}
-
-impl Drop for Window {
-    fn drop(&mut self) {
-        self.swapchain.destroy();
-        self.device.destroy(Garbage::Surface {
-            surface: self.surface,
-            target: self.surface_target.clone(),
-        });
     }
 }

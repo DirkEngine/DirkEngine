@@ -1,17 +1,27 @@
-# renderer
+# Renderer
 
-The renderer owns Vulkan rendering for the engine. GPU operations are handled
-through `ash`.
+The renderer owns one `dirk_rhi::Rhi` and orchestrates frame slots, final-state scene
+updates, per-viewport cameras, uploads, graph execution, and presentation.
+`dirk_render_utils` contains the renderer-independent graph, upload, typed binding,
+buffer, and pipeline helpers. RHI backend selection is internal and compile-time:
+Metal on Apple platforms, Vulkan elsewhere.
 
-On macOS, the renderer discovers the `AppKit` surface extensions and enables
-Vulkan portability enumeration for `MoltenVK`. It loads the Vulkan loader
-provided by the user's Vulkan SDK; no Vulkan SDK or `MoltenVK` library is
-linked, installed, or bundled by this crate.
+Two frame slots wait for completion before GPU buffer preparation. Resource drops
+enter the RHI retirement queue, normally collected after three completed cycles.
+Asset uploads are batched on the transfer queue and acquired on graphics. Asset
+mipmaps use CPU sRGB filtering for consistent backend behavior. Editor rendering
+uses the same RHI and graph, retaining pending texture updates while minimized.
 
-Debug builds enable `VK_LAYER_KHRONOS_validation`, so its manifest must be
-discoverable through `VK_ADD_LAYER_PATH` or a standard Vulkan layer path.
+Register `RendererPlugin` with `EngineBuilder`; it depends on `PlatformPlugin` and
+`AssetsPlugin`. Rust GPU shaders produce SPIR-V and, on Apple targets, translated
+MSL with shared binding metadata. Shader overhaul and transient allocation remain
+deferred. See the [rendering contract](../../docs/rhi/runtime-contract.md).
 
-Register `RendererPlugin` with an `EngineBuilder` to install the renderer
-subsystem and its ECS integration systems. The plugin depends on
-`PlatformPlugin` and `AssetsPlugin`, reads engine metadata for Vulkan
-application info, and renders once per engine tick.
+## Output colors
+
+Scene shaders produce linear colors. Viewport images preserve that meaning when
+sampled, using hardware decoding for sRGB image formats. Window creation prefers
+sRGB attachments. Standalone presentation samples the viewport and encodes exactly
+once: the attachment performs the conversion for sRGB formats, and a fragment
+shader performs it for UNORM formats. Editor output uses the same sRGB transfer
+function. Presentation pipelines follow each window's format across recreation.

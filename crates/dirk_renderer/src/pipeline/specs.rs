@@ -18,6 +18,21 @@ impl GraphicsPipelineSpec for MainPipelineSpec {
     const NAME: &'static str = "main";
 }
 
+impl MainPipelineSpec {
+    pub fn settings(properties: crate::RendererProperties) -> super::graphics::PipelineSettings {
+        super::graphics::PipelineSettings {
+            color_format: properties.surface_format,
+            depth: Some(dirk_rhi::DepthState {
+                format: properties.depth_format,
+                write_enabled: true,
+                compare: dirk_rhi::CompareOp::Less,
+                stencil: None,
+            }),
+            samples: properties.msaa_samples,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::pipeline::{MainPipelineSpec, graphics::GraphicsPipelineSpec};
