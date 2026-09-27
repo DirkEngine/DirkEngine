@@ -569,18 +569,21 @@ mod tests {
         let flat = ModelRegistry::flat_vertices(&vertices, &indices).expect("flat normals");
         assert_eq!(flat.len(), 6);
         for (i, vertex) in flat.iter().enumerate() {
-            assert_eq!(
-                vertex.normal,
-                if i < 3 {
-                    [0.0, 0.0, 1.0]
-                } else {
-                    [0.0, 1.0, 0.0]
-                }
-            );
+            let expected = if i < 3 { glam::Vec3::Z } else { glam::Vec3::Y };
+            assert!((glam::Vec3::from_array(vertex.normal) - expected).length() < f32::EPSILON);
             let original = &vertices[usize::try_from(indices[i]).expect("small index")];
-            assert_eq!(vertex.position, original.position);
-            assert_eq!(vertex.texcoord, original.texcoord);
-            assert_eq!(vertex.color, original.color);
+            assert_eq!(
+                vertex.position.map(f32::to_bits),
+                original.position.map(f32::to_bits)
+            );
+            assert_eq!(
+                vertex.texcoord.map(f32::to_bits),
+                original.texcoord.map(f32::to_bits)
+            );
+            assert_eq!(
+                vertex.color.map(f32::to_bits),
+                original.color.map(f32::to_bits)
+            );
         }
     }
 
@@ -593,6 +596,8 @@ mod tests {
             color: [1.0; 4],
         });
         let flat = ModelRegistry::flat_vertices(&vertices, &[0, 1, 2]).expect("triangle normals");
-        assert!(flat.iter().all(|vertex| vertex.normal == [0.0, 0.0, 1.0]));
+        assert!(flat.iter().all(|vertex| {
+            (glam::Vec3::from_array(vertex.normal) - glam::Vec3::Z).length() < f32::EPSILON
+        }));
     }
 }

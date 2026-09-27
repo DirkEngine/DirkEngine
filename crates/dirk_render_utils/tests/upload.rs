@@ -77,6 +77,7 @@ fn batched_upload_acquires_on_graphics_and_survives_retirement() -> dirk_rhi::Re
     rhi.finish_cycle()?;
     rhi.finish_cycle()?;
     rhi.wait_idle()?;
+    assert_eq!(rhi.validation_error_count(), 0, "native validation errors");
     Ok(())
 }
 
@@ -168,5 +169,6 @@ fn clear_only_graph_produces_pixels_and_idle_preserves_active_retirements() -> a
     for row in pixels.chunks_exact(layout.bytes_per_row.get() as usize) {
         assert_eq!(&row[..16], [255, 0, 0, 255].repeat(4));
     }
+    assert_eq!(rhi.validation_error_count(), 0, "native validation errors");
     Ok(())
 }

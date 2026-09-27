@@ -184,7 +184,10 @@ mod tests {
             width: 1,
             height: 1,
         };
-        assert_eq!(Image::rgba8(&grayscale).unwrap(), [64, 64, 64, 128]);
+        assert_eq!(
+            Image::rgba8(&grayscale).expect("grayscale conversion"),
+            [64, 64, 64, 128]
+        );
 
         let high_depth = gltf::image::Data {
             pixels: [0x1234_u16, 0xabcd, 0xffff]
@@ -195,7 +198,10 @@ mod tests {
             width: 1,
             height: 1,
         };
-        assert_eq!(Image::rgba8(&high_depth).unwrap(), [0x12, 0xab, 0xff, 0xff]);
+        assert_eq!(
+            Image::rgba8(&high_depth).expect("16-bit conversion"),
+            [0x12, 0xab, 0xff, 0xff]
+        );
     }
 
     #[test]
