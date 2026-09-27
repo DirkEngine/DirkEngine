@@ -123,5 +123,11 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
-      - name: Test
+      - name: Test (default features)
         run: cargo nextest run --workspace --locked
+
+      - name: Test (no default features)
+        run: cargo nextest run --workspace --locked --no-default-features
+
+      - name: Test (all features)
+        run: cargo nextest run --workspace --locked --all-features
