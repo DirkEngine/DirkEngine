@@ -15,6 +15,8 @@ const SIGTERM: i32 = 15;
 
 #[test]
 fn default_engine_does_not_change_host_signal_disposition() -> anyhow::Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+
     let child = Command::new(std::env::current_exe()?)
         .env(CHILD_ENV, "1")
         .arg("--exact")
@@ -24,7 +26,6 @@ fn default_engine_does_not_change_host_signal_disposition() -> anyhow::Result<()
     thread::sleep(Duration::from_secs(1));
     send_signal(&child, "TERM")?;
     let status = wait_for_exit(child, Duration::from_secs(5))?;
-    use std::os::unix::process::ExitStatusExt;
     assert_eq!(status.signal(), Some(SIGTERM));
     Ok(())
 }
