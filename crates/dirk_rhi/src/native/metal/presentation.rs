@@ -224,6 +224,10 @@ impl MetalSurfaceFrame {
             .map_err(|_| Ir::BadState.into())
     }
 
+    pub(crate) fn unmark_submitted(&self) {
+        self.submitted.store(false, Ordering::Release);
+    }
+
     pub(crate) fn was_submitted(&self) -> bool {
         self.submitted.load(Ordering::Acquire)
     }

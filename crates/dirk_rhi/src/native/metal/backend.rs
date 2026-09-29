@@ -70,6 +70,48 @@ pub struct MetalBackend {
     capabilities: Capabilities,
 }
 
+impl MetalBackend {
+    /// Rejects foreign or mismatched inputs, then claims every surface frame.
+    /// Claims are released again when a later frame was already submitted.
+    fn validate_submission(
+        &self,
+        queue: QueueType,
+        submission: &Submission<'_, Self>,
+    ) -> Result<()> {
+        if let Some(fence) = submission.fence {
+            require_context(&self.context, &fence.context)?;
+        }
+        for command in submission.command_buffers {
+            require_context(&self.context, &command.context)?;
+            if command.queue != queue {
+                return Err(crate::InvalidResourceKind::Mismatch.into());
+            }
+            if !command.is_submittable() {
+                return Err(crate::InvalidResourceKind::BadState.into());
+            }
+        }
+        for point in submission
+            .wait_timelines
+            .iter()
+            .chain(submission.signal_timelines)
+        {
+            require_context(&self.context, &point.semaphore.context)?;
+        }
+        for frame in submission.surface_frames {
+            require_context(&self.context, &frame.context)?;
+        }
+        for (index, frame) in submission.surface_frames.iter().enumerate() {
+            if let Err(error) = frame.mark_submitted() {
+                for claimed in &submission.surface_frames[..index] {
+                    claimed.unmark_submitted();
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl crate::Api for MetalBackend {
     type Buffer = MetalBuffer;
     type Image = MetalImage;
@@ -312,32 +354,14 @@ unsafe impl Backend for MetalBackend {
 
     unsafe fn submit(&self, queue: QueueType, submission: &Submission<'_, Self>) -> Result<()> {
         metal::objc::rc::autoreleasepool(|| {
-            if let Some(fence) = submission.fence {
-                require_context(&self.context, &fence.context)?;
-            }
+            self.validate_submission(queue, submission)?;
             let mut commands = submission
                 .command_buffers
                 .iter()
-                .map(|command| {
-                    require_context(&self.context, &command.context)?;
-                    if command.queue != queue {
-                        return Err(crate::InvalidResourceKind::Mismatch.into());
-                    }
-                    command.command_for_submit()
-                })
+                .map(|command| command.command_for_submit())
                 .collect::<Result<Vec<_>>>()?;
             if commands.is_empty() {
                 commands.push(self.context.queue(queue).new_command_buffer().to_owned());
-            }
-            for point in submission
-                .wait_timelines
-                .iter()
-                .chain(submission.signal_timelines)
-            {
-                require_context(&self.context, &point.semaphore.context)?;
-            }
-            for frame in submission.surface_frames {
-                require_context(&self.context, &frame.context)?;
             }
             // Waits must precede recorded work, not be appended after its encoders.
             if !submission.wait_timelines.is_empty() {
@@ -349,7 +373,6 @@ unsafe impl Backend for MetalBackend {
             }
             let last = &commands[commands.len() - 1];
             for frame in submission.surface_frames {
-                frame.mark_submitted()?;
                 last.present_drawable(&frame.drawable);
             }
             for point in submission.signal_timelines {

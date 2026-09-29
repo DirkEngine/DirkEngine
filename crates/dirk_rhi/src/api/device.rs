@@ -606,7 +606,7 @@ pub(super) struct Work<B: Backend> {
     pub(super) queue: crate::QueueType,
     pub(super) fence: B::Fence,
     pub(super) payload: Mutex<Option<Payload<B>>>,
-    pub(super) _backend: Arc<B>,
+    pub(super) backend: Arc<B>,
 }
 impl<B: Backend> Work<B> {
     pub(super) fn wait(&self, timeout: u64) -> Result<()> {

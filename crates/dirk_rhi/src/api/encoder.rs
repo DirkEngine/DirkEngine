@@ -974,6 +974,13 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
                 return Err(Ir::BadState.into());
             }
         }
+        for completion in info.wait_for {
+            if !Arc::ptr_eq(&completion.0.backend, &device.backend) {
+                return Err(Ir::ForeignInstance
+                    .with_detail("waited completion belongs to another device")
+                    .into());
+            }
+        }
         for command in commands {
             if command.cycle != state.cycle {
                 return Err(Ir::BadState
@@ -986,8 +993,12 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         }
         Ok(())
     }
-    /// Submits finished recordings once. Failure poisons the device if native submission may have started.
-    /// Barriers and queue dependencies are supplied explicitly by the caller.
+    /// Submits finished recordings once. Barriers and queue dependencies are supplied explicitly
+    /// by the caller.
+    ///
+    /// Invalid requests are rejected before native submission: the recordings are dropped, surface
+    /// frames remain acquired, and the device stays usable. Any other failure poisons the device
+    /// because native submission may have started.
     ///
     /// # Safety
     /// Resources and non-owning bindings must remain valid through their last recording
@@ -1008,7 +1019,7 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         let native = commands.into_iter().map(|c| (c.raw, c.pool)).collect();
         let fence = unsafe { device.backend.create_fence(false)? };
         let work = Arc::new(Work {
-            _backend: device.backend.clone(),
+            backend: device.backend.clone(),
             timeline: self.timeline.clone(),
             value: self.next_value,
             pools: device.pools.clone(),
@@ -1056,6 +1067,10 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         };
         drop(payload);
         if let Err(error) = result {
+            if matches!(error, crate::Error::InvalidResource(_)) {
+                // Backends reject invalid submissions before touching native queue state.
+                return Err(error);
+            }
             state.lost = true;
             for (frame, native) in info.surface_frames.iter().zip(&mut frames) {
                 frame.poison(native);

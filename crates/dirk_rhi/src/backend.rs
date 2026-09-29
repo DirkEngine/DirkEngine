@@ -372,6 +372,11 @@ pub unsafe trait Backend:
     /// or stale surface frames, and keep submitted native objects alive until
     /// execution completes.
     ///
+    /// [`Error::InvalidResource`](crate::Error::InvalidResource) is reserved
+    /// for requests rejected before native submission starts; such a rejection
+    /// must leave command buffers, surface frames, and synchronization
+    /// unchanged. Any other error may follow partial native submission.
+    ///
     /// # Safety
     /// The caller must uphold the native [`crate::Backend`] contract for this
     /// operation, including resource lifetime, valid state, and host synchronization.

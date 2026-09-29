@@ -428,3 +428,42 @@ fn pending_work_reports_timeouts_instead_of_errors() -> Result<()> {
     drop((src, dst));
     test.check()
 }
+
+#[test]
+#[ignore = "requires Vulkan 1.3 and Khronos validation"]
+fn rejected_submission_keeps_the_device_usable() -> Result<()> {
+    let mut producer = TestDevice::new()?;
+    let mut test = TestDevice::new()?;
+    // SAFETY: an empty submission references no resources.
+    let foreign = unsafe {
+        producer
+            .rhi
+            .queue::<Graphics>()
+            .submit(Vec::new(), &SubmitInfo::default())?
+    };
+    let commands = test.rhi.create_encoder::<Graphics>("rejected")?.finish()?;
+    // SAFETY: validation rejects the foreign dependency before native submission.
+    let rejected = unsafe {
+        test.rhi.queue::<Graphics>().submit(
+            vec![commands],
+            &SubmitInfo {
+                surface_frames: &[],
+                wait_for: &[&foreign],
+            },
+        )
+    };
+    assert!(
+        matches!(rejected, Err(Error::InvalidResource(ref error)) if error.kind() == InvalidResourceKind::ForeignInstance)
+    );
+    let commands = test.rhi.create_encoder::<Graphics>("accepted")?.finish()?;
+    // SAFETY: the recording is empty.
+    let accepted = unsafe {
+        test.rhi
+            .queue::<Graphics>()
+            .submit(vec![commands], &SubmitInfo::default())?
+    };
+    accepted.wait(u64::MAX)?;
+    foreign.wait(u64::MAX)?;
+    producer.check()?;
+    test.check()
+}

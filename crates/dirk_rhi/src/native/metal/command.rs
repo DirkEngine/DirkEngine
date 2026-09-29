@@ -65,6 +65,12 @@ impl MetalCommandBuffer {
         }
     }
 
+    /// Whether this recording is finished and has not been submitted.
+    pub(crate) fn is_submittable(&self) -> bool {
+        let state = self.state.lock();
+        state.ended && !state.submitted && state.command.is_some()
+    }
+
     pub(crate) fn command_for_submit(&self) -> Result<metal::CommandBuffer> {
         let mut state = self.state.lock();
         if !state.ended || state.submitted {
