@@ -17,6 +17,8 @@ pub struct EguiState {
     start_time: Instant,
     pending: Option<EguiPaintData>,
     textures_to_free: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
+    /// Keyboard modifiers last reported by the platform.
+    modifiers: egui::Modifiers,
 }
 
 pub struct EguiFrameInput {
@@ -52,6 +54,7 @@ impl EguiState {
             start_time: Instant::now(),
             pending: None,
             textures_to_free: std::array::from_fn(|_| Vec::new()),
+            modifiers: egui::Modifiers::default(),
         })
     }
 
@@ -74,6 +77,8 @@ impl EguiState {
             native_pixels_per_point,
             input.events.as_slice(),
         );
+        self.modifiers =
+            latest_modifiers(input.window_id, input.events.as_slice()).unwrap_or(self.modifiers);
         let system_theme = input.theme.map(|theme| match theme {
             Theme::Dark => egui::Theme::Dark,
             Theme::Light => egui::Theme::Light,
@@ -84,6 +89,7 @@ impl EguiState {
             focused: input.focused,
             system_theme,
             events,
+            modifiers: self.modifiers,
             ..egui::RawInput::default()
         };
         raw_input.viewports.insert(
@@ -187,6 +193,17 @@ fn translate_events(
     translated
 }
 
+fn latest_modifiers(window_id: WindowId, events: &[WindowInputEvent]) -> Option<egui::Modifiers> {
+    events
+        .iter()
+        .rev()
+        .filter(|event| event.window == window_id)
+        .find_map(|event| match event.event {
+            InputEvent::ModifiersChanged(modifiers) => Some(egui::Modifiers::from(modifiers)),
+            _ => None,
+        })
+}
+
 fn append_translated_event(
     out: &mut Vec<egui::Event>,
     extent: glam::UVec2,
@@ -224,7 +241,7 @@ fn append_translated_event(
                 position.to_egui(extent, native_pixels_per_point),
             ));
         }
-        InputEvent::PointerEntered => {}
+        InputEvent::PointerEntered | InputEvent::ModifiersChanged(_) => {}
         InputEvent::PointerLeft => {
             out.push(egui::Event::PointerGone);
         }
@@ -460,6 +477,31 @@ mod tests {
                 delta: Vec2::new(1.0, 1.0),
                 modifiers: modifiers.into(),
             }]
+        );
+    }
+
+    #[test]
+    fn latest_modifiers_uses_last_change_for_window() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let change = |raw, modifiers| WindowInputEvent {
+            window: window_id(raw),
+            event: InputEvent::ModifiersChanged(modifiers),
+        };
+
+        assert_eq!(latest_modifiers(window_id(1), &[]), None);
+        assert_eq!(
+            latest_modifiers(
+                window_id(1),
+                &[
+                    change(1, ctrl),
+                    change(1, Modifiers::default()),
+                    change(2, ctrl)
+                ],
+            ),
+            Some(egui::Modifiers::default())
         );
     }
 }

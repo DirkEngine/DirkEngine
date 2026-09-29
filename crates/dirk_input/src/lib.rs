@@ -190,6 +190,9 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+    /// The active keyboard modifiers changed, including being released
+    /// implicitly when the input region loses focus.
+    ModifiersChanged(Modifiers),
 }
 
 /// A raw input that can activate an [`InputAction`].
@@ -336,7 +339,8 @@ impl InputState {
             }
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::ModifiersChanged(_) => {}
             // release held keys
             InputEvent::PointerLeft => {
                 self.held.clear();

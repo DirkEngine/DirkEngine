@@ -33,7 +33,8 @@ impl InputContext {
             InputEvent::Key { .. }
             | InputEvent::PointerEntered
             | InputEvent::PointerButton { .. }
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::ModifiersChanged(_) => {}
         }
     }
 

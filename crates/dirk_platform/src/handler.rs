@@ -118,9 +118,10 @@ impl PlatformHandler {
             WindowEvent::Focused(focused) => {
                 if !focused {
                     self.pointer_positions.remove(&id);
-                    self.modifiers = ModifiersState::default();
-                    // Focus loss can consume the matching key/button releases.
+                    // Focus loss can consume the matching key/button and
+                    // modifier releases.
                     self.dispatch_input(id, InputEvent::PointerLeft);
+                    self.set_modifiers(id, ModifiersState::default());
                 }
                 self.window_dispatcher
                     .dispatch(PlatformWindowEvent::FocusChanged {
@@ -144,8 +145,7 @@ impl PlatformHandler {
     fn dispatch_input_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::ModifiersChanged(new_modifiers) => {
-                self.modifiers = new_modifiers.state();
-                trace!("Modifiers changed to {:?}", self.modifiers);
+                self.set_modifiers(id, new_modifiers.state());
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -169,6 +169,18 @@ impl PlatformHandler {
         }
 
         true
+    }
+
+    fn set_modifiers(&mut self, id: WindowId, modifiers: ModifiersState) {
+        if self.modifiers == modifiers {
+            return;
+        }
+        self.modifiers = modifiers;
+        trace!("Modifiers changed to {modifiers:?}");
+        self.dispatch_input(
+            id,
+            InputEvent::ModifiersChanged(modifiers_from_winit(modifiers)),
+        );
     }
 
     fn dispatch_pointer_moved(

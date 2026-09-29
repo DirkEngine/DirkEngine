@@ -290,6 +290,7 @@ pub fn input_events_from_egui_response(
                 }
                 egui::Event::WindowFocused(false) if keyboard_routes => {
                     out.push(InputEvent::PointerLeft);
+                    out.push(InputEvent::ModifiersChanged(Modifiers::default()));
                 }
                 _ => {}
             }
