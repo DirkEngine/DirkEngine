@@ -228,20 +228,22 @@ struct BufferDependency {
 impl BufferDependency {
     unsafe fn record_all(
         cmd: &mut CommandBuffer,
-        resources: &[Resource<'_, dirk_rhi::Buffer>],
+        resources: &[Option<Resource<'_, dirk_rhi::Buffer>>],
         dependencies: &[Self],
     ) -> Result<()> {
         let barriers = dependencies
             .iter()
-            .map(|b| dirk_rhi::BufferBarrier {
-                buffer: &*resources[b.handle.0],
-                offset: 0,
-                size: u64::MAX,
-                old_state: b.old,
-                new_state: b.new,
-                queue_transfer: None,
+            .map(|b| {
+                Ok(dirk_rhi::BufferBarrier {
+                    buffer: &**allocated(resources, b.handle.0)?,
+                    offset: 0,
+                    size: u64::MAX,
+                    old_state: b.old,
+                    new_state: b.new,
+                    queue_transfer: None,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         if !barriers.is_empty() {
             unsafe {
                 cmd.barrier(&DependencyInfo {
@@ -658,6 +660,7 @@ impl<'a> RenderGraph<'a> {
     }
 
     /// Allocates a transient device buffer with usage derived from its declarations.
+    /// Buffers no pass declares are never allocated.
     pub fn create_buffer(&mut self, size: u64) -> BufferHandle {
         let handle = BufferHandle(self.buffers.len());
         self.buffers.push(GraphBuffer {
@@ -694,6 +697,7 @@ impl<'a> RenderGraph<'a> {
     }
 
     /// Adds a transient texture; capabilities are derived from its pass declarations.
+    /// Textures no pass declares are never allocated.
     ///
     /// # Panics
     /// Panics if the description contains an import; use `import_texture` instead.
@@ -1099,10 +1103,11 @@ struct CompiledColorAttachment {
 
 /// Validated resource resolution handed to pass callbacks.
 pub struct PassContext<'ctx> {
-    buffers: &'ctx [Resource<'ctx, dirk_rhi::Buffer>],
+    /// Graph buffers indexed by [`BufferHandle`]; unused transients are not allocated.
+    buffers: &'ctx [Option<Resource<'ctx, dirk_rhi::Buffer>>],
     buffer_uses: &'ctx [BufferUse],
-    /// Resolved graph textures indexed by [`TextureHandle`].
-    images: &'ctx [ResolvedImage<'ctx>],
+    /// Resolved graph textures indexed by [`TextureHandle`]; unused transients are not allocated.
+    images: &'ctx [Option<ResolvedImage<'ctx>>],
     /// `(texture table index, is_write)` pairs declared by the running pass.
     declared: &'ctx [(u32, bool)],
 }
@@ -1119,6 +1124,7 @@ impl PassContext<'_> {
         );
         self.buffers
             .get(handle.0)
+            .and_then(Option::as_ref)
             .map(std::ops::Deref::deref)
             .ok_or_else(|| anyhow::anyhow!("buffer handle is outside this graph"))
     }
@@ -1134,9 +1140,7 @@ impl PassContext<'_> {
         if !self.declared.iter().any(|(index, _)| *index == handle.0) {
             return Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Undeclared).into());
         }
-        self.images
-            .get(handle.index())
-            .ok_or_else(|| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange).into())
+        allocated(self.images, handle.index())
     }
 }
 
@@ -1164,9 +1168,9 @@ struct CompiledGraph<'a> {
 }
 
 struct GraphExecutor<'a> {
-    buffers: Vec<Resource<'a, dirk_rhi::Buffer>>,
+    buffers: Vec<Option<Resource<'a, dirk_rhi::Buffer>>>,
     buffer_exports: Vec<BufferDependency>,
-    images: Vec<ResolvedImage<'a>>,
+    images: Vec<Option<ResolvedImage<'a>>>,
     passes: Vec<CompiledPass<'a>>,
     final_barriers: Vec<CompiledBarrier>,
 }
@@ -1187,20 +1191,30 @@ impl<'a> GraphExecutor<'a> {
             .zip(buffer_usages)
             .map(|(b, usage)| {
                 Ok(if let Some(imported) = b.imported {
-                    Resource::Borrowed(imported.buffer)
+                    Some(Resource::Borrowed(imported.buffer))
+                } else if usage.is_empty() {
+                    // No pass declared this transient, so it has no required capabilities.
+                    None
                 } else {
-                    Resource::Owned(device.create_buffer(&dirk_rhi::BufferDesc {
-                        label: "graph buffer",
-                        size: b.size,
-                        usage,
-                        memory: dirk_rhi::MemoryDomain::Device,
-                    })?)
+                    Some(Resource::Owned(device.create_buffer(
+                        &dirk_rhi::BufferDesc {
+                            label: "graph buffer",
+                            size: b.size,
+                            usage,
+                            memory: dirk_rhi::MemoryDomain::Device,
+                        },
+                    )?))
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         let mut images = Vec::with_capacity(textures.len());
         for (desc, usage) in textures.into_iter().zip(usages) {
             let Some(imported) = desc.imported else {
+                if usage.is_empty() {
+                    // No pass declared this transient, so it has no required capabilities.
+                    images.push(None);
+                    continue;
+                }
                 let image = device.create_image(&ImageDesc {
                     label: "render graph texture",
                     dimension: dirk_rhi::ImageDimension::TwoD,
@@ -1212,16 +1226,16 @@ impl<'a> GraphExecutor<'a> {
                     samples: desc.samples,
                 })?;
                 let view = device.view(&image)?;
-                images.push(ResolvedImage {
+                images.push(Some(ResolvedImage {
                     image: Resource::Owned(image),
                     view: Resource::Owned(view),
-                });
+                }));
                 continue;
             };
-            images.push(ResolvedImage {
+            images.push(Some(ResolvedImage {
                 image: Resource::Borrowed(imported.image),
                 view: Resource::Borrowed(imported.view),
-            });
+            }));
         }
         Ok(Self {
             buffers,
@@ -1248,25 +1262,33 @@ impl<'a> GraphExecutor<'a> {
                 declared: &pass.declared,
             };
             if has_rendering {
+                let view = |handle: TextureHandle| {
+                    allocated(&self.images, handle.index()).map(|image| &*image.view)
+                };
                 let colors = pass
                     .colors
                     .iter()
-                    .map(|attachment| dirk_rhi::ColorAttachment {
-                        view: &*self.images[attachment.handle.index()].view,
-                        resolve: attachment
-                            .resolve
-                            .map(|handle| &*self.images[handle.index()].view),
-                        load: attachment.info.color_load(),
-                        store: attachment.info.store,
+                    .map(|attachment| {
+                        Ok(dirk_rhi::ColorAttachment {
+                            view: view(attachment.handle)?,
+                            resolve: attachment.resolve.map(view).transpose()?,
+                            load: attachment.info.color_load(),
+                            store: attachment.info.store,
+                        })
                     })
-                    .collect::<Vec<_>>();
-                let depth = pass.depth.map(|(handle, info)| dirk_rhi::DepthAttachment {
-                    view: &*self.images[handle.index()].view,
-                    depth_load: info.depth_load(),
-                    depth_store: info.store,
-                    stencil_load: info.stencil_load(),
-                    stencil_store: info.store,
-                });
+                    .collect::<Result<Vec<_>>>()?;
+                let depth = pass
+                    .depth
+                    .map(|(handle, info)| {
+                        Ok::<_, anyhow::Error>(dirk_rhi::DepthAttachment {
+                            view: view(handle)?,
+                            depth_load: info.depth_load(),
+                            depth_store: info.store,
+                            stencil_load: info.stencil_load(),
+                            stencil_store: info.store,
+                        })
+                    })
+                    .transpose()?;
                 let extent = pass.extent.unwrap_or_else(|| Extent3d::new_2d(1, 1));
                 let mut scope = unsafe {
                     cmd.begin_render_pass(&RenderingInfo {
@@ -1309,7 +1331,7 @@ impl<'a> GraphExecutor<'a> {
 
 fn record_barriers(
     cmd: &mut CommandBuffer,
-    images: &[ResolvedImage],
+    images: &[Option<ResolvedImage>],
     barriers: &[CompiledBarrier],
 ) -> Result<()> {
     if barriers.is_empty() {
@@ -1318,8 +1340,8 @@ fn record_barriers(
     let barriers = barriers
         .iter()
         .map(|barrier| {
-            let image = &images[barrier.handle.index()];
-            ImageBarrier {
+            let image = allocated(images, barrier.handle.index())?;
+            Ok(ImageBarrier {
                 image: &*image.image,
                 old_state: barrier.old_state,
                 new_state: barrier.new_state,
@@ -1333,9 +1355,9 @@ fn record_barriers(
                 base_array_layer: barrier.range.base_array_layer,
                 array_layer_count: barrier.range.array_layer_count,
                 queue_transfer: None,
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     unsafe {
         cmd.barrier(&DependencyInfo {
             memory_barriers: &[],
@@ -1344,6 +1366,14 @@ fn record_barriers(
         })?;
     };
     Ok(())
+}
+
+/// Resolves a graph resource that compilation allocated because a pass declared it.
+fn allocated<T>(resources: &[Option<T>], index: usize) -> Result<&T> {
+    resources
+        .get(index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::OutOfRange).into())
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -1669,6 +1699,21 @@ mod tests {
             ImageUsages::COLOR_ATTACHMENT
         );
         assert_eq!(compiled.usages[storage.index()], ImageUsages::STORAGE);
+    }
+
+    #[test]
+    fn undeclared_transients_derive_no_capabilities() {
+        let mut graph = RenderGraph::new();
+        let unused_texture = graph.create_texture(color_desc());
+        let unused_buffer = graph.create_buffer(64);
+        let used = graph.create_texture(color_desc());
+        graph.add_pass("clear").write_transfer_dst(used);
+
+        let compiled = graph.compile().expect("valid graph");
+        assert!(compiled.usages[unused_texture.index()].is_empty());
+        assert!(compiled.buffer_usages[unused_buffer.0].is_empty());
+        assert_eq!(compiled.usages[used.index()], ImageUsages::COPY_DST);
+        assert!(allocated::<ResolvedImage>(&[None], 0).is_err());
     }
 
     fn mip_range(base: u32) -> SubresourceRange {
