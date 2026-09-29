@@ -4,7 +4,7 @@ use dirk_input::{
     ButtonState, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition,
     PointerButton, ScrollUnit,
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseScrollDelta, WindowEvent},
@@ -19,7 +19,11 @@ use crate::{
 };
 
 pub struct PlatformHandler {
-    initialization: Option<anyhow::Result<()>>,
+    /// Whether `can_create_surfaces` has already created the main window.
+    /// Later calls (e.g. on resume) must not open additional main windows.
+    main_window_created: bool,
+    /// Error raised inside a winit callback, surfaced by the next pump.
+    error: Option<anyhow::Error>,
     #[cfg(platform_macos)]
     shutdown_requested: bool,
     windows: PlatformWindows,
@@ -41,7 +45,8 @@ pub struct PlatformHandler {
 impl PlatformHandler {
     pub fn new(events: &dirk_events::EventManager, windows: PlatformWindows) -> Self {
         Self {
-            initialization: None,
+            main_window_created: false,
+            error: None,
             #[cfg(platform_macos)]
             shutdown_requested: false,
             windows,
@@ -66,8 +71,12 @@ impl PlatformHandler {
             .dispatch(PlatformEvent::WindowCreated { id: window_id });
         Ok(window_id)
     }
-    pub fn take_initialization(&mut self) -> Option<anyhow::Result<()>> {
-        self.initialization.take()
+    pub fn is_initialized(&self) -> bool {
+        self.main_window_created
+    }
+    /// Takes the error raised by the last winit callback, if any.
+    pub fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error.take()
     }
     pub fn shutdown(&mut self) {
         let count = self.windows.clear();
@@ -314,11 +323,20 @@ impl PlatformHandler {
 
 impl ApplicationHandler for PlatformHandler {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        self.initialization = Some(self.create_window(event_loop).map(|id| {
-            self.windows.set_main_window(id);
-        }));
-        if self.initialization.as_ref().is_some_and(Result::is_err) {
-            event_loop.exit();
+        if self.main_window_created {
+            debug!("Surfaces can be created again; keeping the existing main window");
+            return;
+        }
+        match self.create_window(event_loop) {
+            Ok(id) => {
+                self.windows.set_main_window(id);
+                self.main_window_created = true;
+            }
+            Err(err) => {
+                error!("Failed to create main window: {err:#}");
+                self.error = Some(err);
+                event_loop.exit();
+            }
         }
     }
 
