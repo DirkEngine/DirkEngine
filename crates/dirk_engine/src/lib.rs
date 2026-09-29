@@ -205,8 +205,9 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error if a subsystem fails to start. The engine emits
-    /// [`events::Exiting`] and cannot be restarted; call [`Self::shutdown`] or
-    /// drop it to clean up all constructed subsystems.
+    /// [`events::Exiting`], keeps a report of the failure for
+    /// [`Self::take_error`], and cannot be restarted; call [`Self::shutdown`]
+    /// or drop it to clean up all constructed subsystems.
     pub fn start(&mut self) -> Result<()> {
         match self.lifecycle {
             EngineLifecycle::Running => return Ok(()),
@@ -237,10 +238,11 @@ impl Engine {
             Ok(())
         })();
 
-        if result.is_err() {
+        if let Err(err) = &result {
             self.lifecycle = EngineLifecycle::Failed;
-            self.request_exit(None);
-            self.state.set_status(EngineStatus::Error);
+            // The typed error goes to the caller; keep a report of it so
+            // `take_error` observes the failure like any other terminal error.
+            self.request_exit(Some(error_report(err)));
             return result;
         }
 
@@ -392,7 +394,8 @@ impl Engine {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Takes a terminal error reported with [`EngineHandle::exit_with_error`].
+    /// Takes a terminal error reported with [`EngineHandle::exit_with_error`]
+    /// or raised while starting subsystems.
     ///
     /// Call this after manually driving the engine with [`Engine::tick`] to
     /// inspect the original failure. [`Engine::run`] returns it automatically.
@@ -434,6 +437,22 @@ impl Engine {
         self.last_tick = current_time;
         delta_time
     }
+}
+
+/// Builds an owned report of `err`, including every cause in its chain.
+///
+/// Engine errors already display their direct source, so only deeper causes
+/// are appended.
+fn error_report(err: &Error) -> anyhow::Error {
+    use std::{error::Error as _, fmt::Write as _};
+
+    let mut message = err.to_string();
+    let mut cause = err.source().and_then(std::error::Error::source);
+    while let Some(inner) = cause {
+        let _ = write!(message, ": {inner}");
+        cause = inner.source();
+    }
+    anyhow::Error::msg(message)
 }
 
 impl Drop for Engine {
@@ -574,6 +593,10 @@ impl EngineState {
     }
 
     fn set_status(&self, status: EngineStatus) {
+        debug_assert!(
+            !matches!(status, EngineStatus::Error),
+            "use EngineState::set_error to set an error status"
+        );
         *self.status.write() = status;
     }
 }

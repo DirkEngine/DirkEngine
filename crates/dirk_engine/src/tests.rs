@@ -456,6 +456,13 @@ fn failed_start_notifies_exit_and_shutdown_cleans_up_all_subsystems() {
         Err(Error::SubsystemFailedStart { name: "failed", .. })
     ));
     assert_eq!(engine.status(), EngineStatus::Error);
+    let report = engine
+        .take_error()
+        .expect("startup failure must be available from take_error");
+    assert_eq!(
+        report.to_string(),
+        "subsystem failed failed start: start failed"
+    );
     let notification = notification_rx.recv_timeout(std::time::Duration::from_secs(2));
     listener.abort();
     assert!(notification.expect("startup failure must notify exit"));
@@ -726,4 +733,16 @@ fn universe_handle_is_available_as_engine_resource() -> Result<()> {
 
     engine.shutdown()?;
     Ok(())
+}
+
+#[test]
+fn startup_error_report_keeps_nested_causes() {
+    let err = Error::SubsystemFailedStart {
+        name: "nested",
+        source: anyhow::anyhow!("root cause").context("outer context"),
+    };
+    assert_eq!(
+        crate::error_report(&err).to_string(),
+        "subsystem nested failed start: outer context: root cause"
+    );
 }
