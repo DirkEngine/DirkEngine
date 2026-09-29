@@ -1,8 +1,10 @@
 //! Typed binding declarations and immutable groups.
+use crate::buffer::UniformBuffer;
+use bytemuck::NoUninit;
 use dirk_rhi::BindGroupLayoutEntry;
 use dirk_rhi::{
     BindGroup, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindingResource, BindingType,
-    Buffer, ImageView, Rhi, Sampler,
+    ImageView, Rhi, Sampler,
 };
 use std::marker::PhantomData;
 
@@ -54,16 +56,15 @@ impl<L: SetLayout> BindingLayout<L> {
         })
     }
 
-    /// Creates a set containing one uniform-buffer binding.
+    /// Creates a set binding one whole uniform record.
     ///
     /// # Errors
     /// Returns allocation, interface validation, or native device errors with their details.
-    pub fn uniform_buffer(
+    pub fn uniform_buffer<T: NoUninit>(
         &self,
         rhi: &Rhi,
         binding: u32,
-        buffer: &Buffer,
-        size: u64,
+        uniform: &UniformBuffer<T>,
     ) -> dirk_rhi::Result<DescriptorSet<L>> {
         Self::require_binding(
             binding,
@@ -76,9 +77,9 @@ impl<L: SetLayout> BindingLayout<L> {
             &[BindGroupEntry {
                 binding,
                 resource: BindingResource::Buffer {
-                    buffer,
+                    buffer: uniform.buffer(),
                     offset: 0,
-                    size,
+                    size: uniform.buffer().size(),
                 },
             }],
         )
@@ -122,7 +123,50 @@ impl<L: SetLayout> BindingLayout<L> {
     fn require_binding(binding: u32, ty: BindingType) -> dirk_rhi::Result<()> {
         match L::BINDINGS.iter().find(|entry| entry.binding == binding) {
             Some(entry) if entry.ty == ty => Ok(()),
-            _ => Err(dirk_rhi::InvalidResourceKind::Mismatch.into()),
+            _ => Err(dirk_rhi::InvalidResourceKind::Mismatch
+                .with_detail(format!(
+                    "set layout does not declare binding {binding} as {ty:?}"
+                ))
+                .into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirk_rhi::ShaderStages;
+
+    struct Set;
+    impl SetLayout for Set {
+        const BINDINGS: &'static [BindGroupLayoutEntry] = &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                ty: BindingType::UniformBuffer {
+                    dynamic_offset: false,
+                },
+                visibility: ShaderStages::VERTEX,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                ty: BindingType::SampledImage,
+                visibility: ShaderStages::FRAGMENT,
+            },
+        ];
+    }
+
+    #[test]
+    fn bindings_must_exist_with_the_requested_type() {
+        let uniform = BindingType::UniformBuffer {
+            dynamic_offset: false,
+        };
+        assert!(BindingLayout::<Set>::require_binding(0, uniform).is_ok());
+        assert!(BindingLayout::<Set>::require_binding(2, BindingType::SampledImage).is_ok());
+        assert!(BindingLayout::<Set>::require_binding(2, uniform).is_err());
+        assert!(BindingLayout::<Set>::require_binding(1, BindingType::SampledImage).is_err());
+        let dynamic = BindingType::UniformBuffer {
+            dynamic_offset: true,
+        };
+        assert!(BindingLayout::<Set>::require_binding(0, dynamic).is_err());
     }
 }
