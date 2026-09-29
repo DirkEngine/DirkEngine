@@ -565,8 +565,8 @@ impl Renderer {
         self.scene_manager
             .prepare(&self.rhi, frame_index, &mut self.viewports)?;
 
-        let viewport_submission = self.record_viewport_graph(frame_index)?;
         let presentation_targets = self.acquire_presentation_targets()?;
+        let viewport_submission = self.record_viewport_graph(frame_index, &presentation_targets)?;
         let presentation_cmd = self.record_presentation_graph(
             frame_index,
             &presentation_targets,
@@ -606,18 +606,41 @@ impl Renderer {
         Ok(())
     }
 
+    /// Records scene rendering for viewports that are displayed this frame.
+    ///
+    /// Viewports whose window acquired no image, for example because it is
+    /// minimized or occluded, keep their previous output instead.
     fn record_viewport_graph(
         &self,
         frame_index: usize,
+        targets: &[PresentationTarget],
     ) -> Result<Option<ViewportRenderSubmission>> {
         if self.viewports.is_empty() {
             return Ok(None);
         }
 
+        #[cfg(feature = "editor")]
+        let egui_presented = targets
+            .iter()
+            .any(|target| Some(target.window) == self.egui_window);
+        #[cfg(not(feature = "editor"))]
+        let presented_players = targets
+            .iter()
+            .filter_map(|target| {
+                self.presentation_assignments
+                    .player_for_window(target.window)
+            })
+            .collect::<Vec<_>>();
+
         let mut graph = RenderGraph::new();
         let mut rendered_players = Vec::new();
         for viewport in self.viewports.values() {
-            if !viewport.is_renderable() {
+            // Editor viewports are displayed through the egui window.
+            #[cfg(feature = "editor")]
+            let presented = egui_presented;
+            #[cfg(not(feature = "editor"))]
+            let presented = presented_players.contains(&viewport.player());
+            if !presented || !viewport.is_renderable() {
                 continue;
             }
             let Some(_) = viewport.world else {
