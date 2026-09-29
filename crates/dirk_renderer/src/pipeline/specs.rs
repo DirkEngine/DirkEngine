@@ -21,7 +21,7 @@ impl GraphicsPipelineSpec for MainPipelineSpec {
 impl MainPipelineSpec {
     pub fn settings(properties: crate::RendererProperties) -> super::graphics::PipelineSettings {
         super::graphics::PipelineSettings {
-            color_format: properties.surface_format,
+            color_format: properties.scene_format,
             depth: Some(dirk_rhi::DepthState {
                 format: properties.depth_format,
                 write_enabled: true,

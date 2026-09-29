@@ -264,6 +264,21 @@ impl Renderer {
         .unwrap_or(SampleCount::One)
     }
 
+    /// Selects the viewport scene format.
+    ///
+    /// Scenes are stored as sRGB so that 8-bit outputs keep perceptual
+    /// precision even when a surface only offers UNORM formats; presentation
+    /// encodes them for the surface.
+    fn scene_format(rhi: &Rhi, surface_format: dirk_rhi::TextureFormat) -> dirk_rhi::TextureFormat {
+        let preferred = dirk_rhi::TextureFormat::Rgba8Srgb;
+        let usages = dirk_rhi::ImageUsages::COLOR_ATTACHMENT | dirk_rhi::ImageUsages::SAMPLED;
+        if rhi.format_capabilities(preferred).supports(usages) {
+            preferred
+        } else {
+            surface_format
+        }
+    }
+
     /// Renderer initialization. Creates the active backend and renderer objects.
     ///
     /// # Errors
@@ -308,10 +323,13 @@ impl Renderer {
                 .ok_or(crate::errors::Error::Rhi(dirk_rhi::Error::from(
                     dirk_rhi::InvalidResourceKind::Empty,
                 )))?;
+        let scene_format = Self::scene_format(&rhi, surface_format);
         let properties = RendererProperties {
-            msaa_samples: Self::best_sample_count(&rhi, surface_format, depth_format),
+            msaa_samples: Self::best_sample_count(&rhi, scene_format, depth_format),
             anisotropy: capabilities.max_sampler_anisotropy > 1,
+            #[cfg(feature = "editor")]
             surface_format,
+            scene_format,
             depth_format,
         };
 
@@ -447,7 +465,7 @@ impl Renderer {
             let viewport = Viewport::new(
                 &self.rhi,
                 event.id,
-                ViewportSettings::new(Extent3d::new_2d(1, 1), self.properties.surface_format),
+                ViewportSettings::new(Extent3d::new_2d(1, 1), self.properties.scene_format),
             )?;
             #[cfg(feature = "editor")]
             self.viewport_editor.add_viewport(

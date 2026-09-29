@@ -42,6 +42,10 @@ pub struct RendererProperties {
     pub msaa_samples: SampleCount,
     #[allow(unused)]
     pub anisotropy: bool,
+    /// Format of the primary window's surface.
+    #[cfg(feature = "editor")]
     pub surface_format: TextureFormat,
+    /// Format of viewport scene outputs, independent of any surface.
+    pub scene_format: TextureFormat,
     pub depth_format: TextureFormat,
 }
