@@ -2,8 +2,8 @@
 use dirk_rhi::{
     Buffer, BufferCopy, BufferDesc, BufferImageCopy, BufferUsages, CommandEncoder, Completion,
     CopyQueue, DependencyInfo, Graphics, Image, ImageBarrier, ImageState, ImageSubresourceRange,
-    MemoryDomain, Origin3d, QueueTransfer, QueueType, RecordedCommands, Result, Rhi, ShaderStages,
-    SubmitInfo, UploadLayout,
+    InvalidResourceKind, MemoryDomain, Origin3d, QueueTransfer, QueueType, RecordedCommands,
+    ResourceAccess, Result, Rhi, ShaderStages, SubmitInfo, UploadLayout,
 };
 
 /// One tick's uploads. Native copies record immediately; staging drops into the current cycle.
@@ -24,28 +24,28 @@ impl UploadBatch {
     }
 
     fn encoders(&mut self, rhi: &Rhi) -> Result<&mut UploadEncoders> {
-        if self.encoders.is_none() {
-            self.encoders = Some(UploadEncoders {
+        let encoders = match self.encoders.take() {
+            Some(encoders) => encoders,
+            None => UploadEncoders {
                 transfer: rhi.create_encoder("uploads")?,
                 acquire: rhi.create_encoder("upload acquisitions")?,
-            });
-        }
-        Ok(self
-            .encoders
-            .as_mut()
-            .expect("upload encoders were created"))
+            },
+        };
+        Ok(self.encoders.insert(encoders))
     }
     /// Allocates and uploads immutable buffer data for subsequent graphics use.
     ///
     /// # Errors
-    /// Returns allocation, interface validation, or native device errors with their details.
+    /// Returns allocation, interface validation, or native device errors with their details,
+    /// and rejects shader accesses naming no shader stages.
     pub fn buffer(
         &mut self,
         rhi: &Rhi,
         bytes: &[u8],
         usage: BufferUsages,
-        access: ImageState,
+        access: ResourceAccess,
     ) -> Result<Buffer> {
+        ensure_shader_stages(access)?;
         let mut staging = Self::staging(rhi, bytes)?;
         // SAFETY: this allocation has not been submitted and is exclusively borrowed.
         unsafe {
@@ -87,7 +87,8 @@ impl UploadBatch {
         }
         Ok(buffer)
     }
-    /// Uploads all mip levels of a new color image and makes it readable by fragment shaders.
+    /// Uploads every mip and array layer of a new color image and makes it
+    /// readable by fragment shaders. See [`Self::image_for_stages`].
     ///
     /// # Safety
     /// The image must be uninitialized, not in GPU use, and remain alive through all subsequent uses.
@@ -95,9 +96,34 @@ impl UploadBatch {
     /// # Errors
     /// Returns allocation, interface validation, or native device errors with their details.
     pub unsafe fn image(&mut self, rhi: &Rhi, image: &Image, levels: &[&[u8]]) -> Result<()> {
-        if levels.len() != image.description().mip_levels as usize {
-            return Err(dirk_rhi::InvalidResourceKind::Mismatch.into());
-        }
+        unsafe { self.image_for_stages(rhi, image, levels, ShaderStages::FRAGMENT) }
+    }
+
+    /// Uploads every mip and array layer of a new color image and makes it
+    /// readable by shaders in `stages`.
+    ///
+    /// `levels` holds one entry per mip. Each entry contains every array layer's
+    /// tightly packed texels, layer after layer.
+    ///
+    /// # Safety
+    /// The image must be uninitialized, not in GPU use, and remain alive through all subsequent uses.
+    ///
+    /// # Errors
+    /// Rejects empty `stages`, volume images, a level count differing from the
+    /// image's mips, or level sizes differing from all of its layers before
+    /// recording anything. Returns allocation, interface validation, or native
+    /// device errors with their details.
+    pub unsafe fn image_for_stages(
+        &mut self,
+        rhi: &Rhi,
+        image: &Image,
+        levels: &[&[u8]],
+        stages: ShaderStages,
+    ) -> Result<()> {
+        let final_state = ImageState::ShaderRead(stages);
+        ensure_shader_stages(final_state)?;
+        let info = image.description();
+        validate_levels(&info, levels)?;
         let encoders = self.encoders(rhi)?;
         unsafe {
             Self::image_barrier(
@@ -109,8 +135,8 @@ impl UploadBatch {
             )?;
         }
         for (mip, pixels) in levels.iter().enumerate() {
-            let mip = u32::try_from(mip).map_err(|_| dirk_rhi::InvalidResourceKind::OutOfRange)?;
-            let extent = image.description().mip_extent(mip)?;
+            let mip = u32::try_from(mip).map_err(|_| InvalidResourceKind::OutOfRange)?;
+            let extent = info.mip_extent(mip)?;
             unsafe {
                 ImageUpload {
                     image,
@@ -119,10 +145,14 @@ impl UploadBatch {
                     extent,
                     pixels,
                 }
-                .record(rhi, &mut encoders.transfer)?;
+                .record_layers(
+                    rhi,
+                    &mut encoders.transfer,
+                    0,
+                    info.array_layers,
+                )?;
             }
         }
-        let final_state = ImageState::ShaderRead(ShaderStages::FRAGMENT);
         unsafe {
             Self::image_barrier(
                 &mut encoders.transfer,
@@ -221,6 +251,9 @@ impl UploadBatch {
 }
 
 /// One packed color region; the caller supplies its explicit image dependencies.
+///
+/// [`Self::record`] writes array layer 0; [`Self::record_layers`] writes several
+/// layers from consecutive tightly packed layer payloads.
 pub struct ImageUpload<'a> {
     /// Destination allocation.
     pub image: &'a Image,
@@ -230,11 +263,12 @@ pub struct ImageUpload<'a> {
     pub origin: Origin3d,
     /// Region extent.
     pub extent: dirk_rhi::Extent3d,
-    /// Tightly packed source texels.
+    /// Tightly packed source texels, layer after layer when recording several layers.
     pub pixels: &'a [u8],
 }
 impl ImageUpload<'_> {
-    /// Packs aligned staging memory and records a copy into an already transitioned image.
+    /// Packs aligned staging memory and records a copy into layer 0 of an
+    /// already transitioned image.
     ///
     /// # Safety
     /// The image must be in `CopyDestination` state, ordered against prior uses, and alive through GPU use.
@@ -246,13 +280,33 @@ impl ImageUpload<'_> {
         rhi: &Rhi,
         command: &mut CommandEncoder<Q>,
     ) -> Result<()> {
+        unsafe { self.record_layers(rhi, command, 0, 1) }
+    }
+
+    /// Packs aligned staging memory and records one copy into `layer_count`
+    /// consecutive layers starting at `base_layer`.
+    ///
+    /// # Safety
+    /// The layers must be in `CopyDestination` state, ordered against prior uses, and alive through GPU use.
+    ///
+    /// # Errors
+    /// Rejects pixel data that is not exactly `layer_count` tightly packed
+    /// layers. Returns allocation, interface validation, or native device errors
+    /// with their details.
+    pub unsafe fn record_layers<Q: dirk_rhi::QueueKind>(
+        &self,
+        rhi: &Rhi,
+        command: &mut CommandEncoder<Q>,
+        base_layer: u32,
+        layer_count: u32,
+    ) -> Result<()> {
         let layout = UploadLayout::new(
             self.extent.width,
             self.extent.height,
             self.image.description().format,
             rhi.capabilities(),
         )?;
-        let pixels = layout.pack(self.pixels)?;
+        let pixels = pack_layers(layout, self.pixels, layer_count)?;
         let mut staging = UploadBatch::staging(rhi, &pixels)?;
         unsafe {
             staging.write(0, &pixels)?;
@@ -264,8 +318,8 @@ impl ImageUpload<'_> {
                     buffer_bytes_per_row: layout.bytes_per_row,
                     buffer_rows_per_image: layout.rows,
                     mip_level: self.mip,
-                    base_array_layer: 0,
-                    array_layer_count: 1,
+                    base_array_layer: base_layer,
+                    array_layer_count: layer_count,
                     image_origin: self.origin,
                     extent: self.extent,
                     aspects: dirk_rhi::ImageAspects::COLOR,
@@ -273,5 +327,116 @@ impl ImageUpload<'_> {
             )?;
         }
         Ok(())
+    }
+}
+
+/// Checks one tightly packed payload per mip covering every array layer.
+fn validate_levels(info: &dirk_rhi::ImageInfo, levels: &[&[u8]]) -> Result<()> {
+    if info.dimension == dirk_rhi::ImageDimension::ThreeD {
+        return Err(InvalidResourceKind::Mismatch
+            .with_detail("volume image uploads are unsupported")
+            .into());
+    }
+    if levels.len() != info.mip_levels as usize {
+        return Err(InvalidResourceKind::Mismatch
+            .with_detail("upload must provide exactly one level per image mip")
+            .into());
+    }
+    for (mip, pixels) in (0..info.mip_levels).zip(levels) {
+        let extent = info.mip_extent(mip)?;
+        let expected = u64::from(extent.width)
+            .checked_mul(u64::from(extent.height))
+            .and_then(|n| n.checked_mul(u64::from(info.format.texel_size())))
+            .and_then(|n| n.checked_mul(u64::from(info.array_layers)))
+            .ok_or(InvalidResourceKind::OutOfRange)?;
+        if u64::try_from(pixels.len()).ok() != Some(expected) {
+            return Err(InvalidResourceKind::Mismatch
+                .with_detail(format!(
+                    "upload mip {mip} must hold {expected} bytes covering all {} layers",
+                    info.array_layers
+                ))
+                .into());
+        }
+    }
+    Ok(())
+}
+
+/// Packs `layer_count` consecutive tightly packed layers with aligned row pitches.
+fn pack_layers(layout: UploadLayout, pixels: &[u8], layer_count: u32) -> Result<Vec<u8>> {
+    let layer_bytes = usize::try_from(u64::from(layout.row_bytes) * u64::from(layout.rows.get()))
+        .map_err(|_| InvalidResourceKind::OutOfRange)?;
+    let layers = usize::try_from(layer_count).map_err(|_| InvalidResourceKind::OutOfRange)?;
+    if layers == 0 || layer_bytes.checked_mul(layers) != Some(pixels.len()) {
+        return Err(InvalidResourceKind::Mismatch
+            .with_detail("upload pixels must hold every selected layer, tightly packed")
+            .into());
+    }
+    let mut packed = Vec::new();
+    for layer in pixels.chunks_exact(layer_bytes) {
+        packed.extend(layout.pack(layer)?);
+    }
+    Ok(packed)
+}
+
+/// Rejects shader accesses whose empty stage set would synchronize nothing.
+fn ensure_shader_stages(access: ResourceAccess) -> Result<()> {
+    if crate::graph::names_shader_stages(access) {
+        Ok(())
+    } else {
+        Err(InvalidResourceKind::Mismatch
+            .with_detail("upload destination must name at least one shader stage")
+            .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirk_rhi::{Extent3d, ImageDimension, ImageInfo, ImageUsages, SampleCount, TextureFormat};
+    use std::num::NonZeroU32;
+
+    fn layered(dimension: ImageDimension, array_layers: u32) -> ImageInfo {
+        ImageInfo {
+            dimension,
+            extent: Extent3d::new_2d(4, 2),
+            format: TextureFormat::Rgba8Unorm,
+            usage: ImageUsages::COPY_DST | ImageUsages::SAMPLED,
+            mip_levels: 2,
+            array_layers,
+            samples: SampleCount::One,
+        }
+    }
+
+    #[test]
+    fn levels_must_cover_every_layer_of_every_mip() {
+        let info = layered(ImageDimension::TwoD, 3);
+        let (mip0, mip1) = (vec![0; 4 * 2 * 4 * 3], vec![0; 2 * 4 * 3]);
+        assert!(validate_levels(&info, &[&mip0, &mip1]).is_ok());
+        let single_layer = vec![0; 4 * 2 * 4];
+        assert!(validate_levels(&info, &[&single_layer, &mip1]).is_err());
+        assert!(validate_levels(&info, &[&mip0]).is_err());
+        let volume = layered(ImageDimension::ThreeD, 1);
+        assert!(validate_levels(&volume, &[&single_layer, &mip1[..8]]).is_err());
+    }
+
+    #[test]
+    fn layers_pack_consecutively_with_padded_rows() -> Result<()> {
+        let layout = UploadLayout {
+            row_bytes: 2,
+            bytes_per_row: NonZeroU32::new(4).ok_or(InvalidResourceKind::Empty)?,
+            rows: NonZeroU32::new(2).ok_or(InvalidResourceKind::Empty)?,
+        };
+        let packed = pack_layers(layout, &[1, 2, 3, 4, 5, 6, 7, 8], 2)?;
+        assert_eq!(packed, [1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0, 7, 8, 0, 0]);
+        assert!(pack_layers(layout, &[1, 2, 3, 4], 2).is_err());
+        assert!(pack_layers(layout, &[], 0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn upload_destinations_must_name_shader_stages() {
+        assert!(ensure_shader_stages(ResourceAccess::Uniform(ShaderStages::NONE)).is_err());
+        assert!(ensure_shader_stages(ResourceAccess::ShaderRead(ShaderStages::VERTEX)).is_ok());
+        assert!(ensure_shader_stages(ResourceAccess::Index).is_ok());
     }
 }
