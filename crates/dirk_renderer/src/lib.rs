@@ -244,6 +244,11 @@ impl dirk_engine::Subsystem for Renderer {
 }
 
 impl Renderer {
+    /// Picks the highest supported MSAA sample count, capped at 4x.
+    ///
+    /// Every viewport keeps multisampled color and depth attachments for each
+    /// frame slot, so 8x would double that memory (about 250 MiB per 1080p
+    /// viewport with 32-bit color and depth) for a small visual gain over 4x.
     fn best_sample_count(
         rhi: &Rhi,
         color: dirk_rhi::TextureFormat,
