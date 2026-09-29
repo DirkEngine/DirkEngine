@@ -106,6 +106,13 @@ impl EngineBuilder {
 
     /// Opts into process-wide SIGINT and termination handling.
     ///
+    /// Disabled by default: [`Engine::new`] and a plain builder leave the
+    /// process's signal disposition untouched, so Ctrl-C keeps its default
+    /// behavior and terminates the process without running engine shutdown.
+    /// Applications that want Ctrl-C to request a graceful shutdown must call
+    /// `with_os_signals(true)`; a second signal then terminates the process
+    /// immediately.
+    ///
     /// The host application should enable this only when the engine owns its
     /// signal policy for the process lifetime. `signal-hook` cannot restore the
     /// previous disposition after the engine is dropped. Window close events

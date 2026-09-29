@@ -59,6 +59,22 @@
 //! Looking up a missing resource returns [`Error::ResourceMissing`], and
 //! registering a second resource of the same concrete type returns
 //! [`Error::ResourceAlreadyRegistered`].
+//!
+//! # Operating system signals
+//!
+//! The engine does not install signal handlers unless asked to. Without
+//! [`EngineBuilder::with_os_signals`], Ctrl-C and termination signals keep the
+//! host process's disposition (by default they terminate the process without
+//! running engine shutdown). Executables that own their process should opt in
+//! so the first signal requests a graceful exit:
+//!
+//! ```rust,no_run
+//! # fn main() -> dirk_engine::errors::Result<()> {
+//! let mut builder = dirk_engine::Engine::builder();
+//! builder.with_os_signals(true);
+//! builder.build()?.run()
+//! # }
+//! ```
 
 use std::{
     any::{Any, TypeId},
