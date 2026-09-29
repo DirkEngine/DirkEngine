@@ -450,6 +450,25 @@ impl PassNode<'_> {
         Ok(extent)
     }
 
+    /// Rendering passes record inside a render pass scope; others record transfers.
+    fn validate_callback(&self) -> Result<()> {
+        let rendering = self.writes.iter().any(|usage| usage.attachment.is_some());
+        match &self.callback {
+            Some(Callback::Graphics(_)) => anyhow::ensure!(
+                rendering,
+                "{}: graphics callbacks require a color or depth attachment; use execute_transfer",
+                self.name
+            ),
+            Some(Callback::Transfer(_)) => anyhow::ensure!(
+                !rendering,
+                "{}: transfer callbacks cannot record inside attachment passes; use execute",
+                self.name
+            ),
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Derive one dependency for overlapping reads before changing tracked state.
     /// All accesses cover the same aspects/layers after validation, so overlapping
     /// mip spans can be combined. The stage union may conservatively cover extra mips.
@@ -622,6 +641,8 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Provides the command-recording callback for this pass.
+    ///
+    /// The pass must declare a color or depth attachment; compilation rejects it otherwise.
     pub fn execute(&mut self, callback: PassCallback<'a>) {
         self.pass.callback = Some(Callback::Graphics(callback));
     }
@@ -636,6 +657,8 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Records transfer work outside a rendering scope.
+    ///
+    /// The pass must not declare attachments; compilation rejects it otherwise.
     pub fn execute_transfer(&mut self, callback: TransferCallback<'a>) {
         self.pass.callback = Some(Callback::Transfer(callback));
     }
@@ -791,6 +814,7 @@ impl<'a> RenderGraph<'a> {
             })
             .collect();
         for pass in &mut self.passes {
+            pass.validate_callback()?;
             let mut in_pass: Vec<(TextureHandle, SubresourceRange, ImageState)> = Vec::new();
             for usage in pass.reads.iter_mut().chain(&mut pass.writes) {
                 let desc = self.textures.get(usage.handle.index()).ok_or_else(|| {
@@ -1714,6 +1738,29 @@ mod tests {
         assert!(compiled.buffer_usages[unused_buffer.0].is_empty());
         assert_eq!(compiled.usages[used.index()], ImageUsages::COPY_DST);
         assert!(allocated::<ResolvedImage>(&[None], 0).is_err());
+    }
+
+    #[test]
+    fn callback_kinds_are_checked_before_recording() {
+        for graphics in [false, true] {
+            let mut graph = RenderGraph::new();
+            let color = graph.create_texture(color_desc());
+            let mut pass = graph.add_pass("mismatched callback");
+            if graphics {
+                pass.write_transfer_dst(color)
+                    .execute(Box::new(|_, _| Ok(())));
+            } else {
+                pass.write_color_attachment(color, AttachmentInfo::clear_color(0., 0., 0., 1.))
+                    .execute_transfer(Box::new(|_, _| Ok(())));
+            }
+            let error = graph.compile().err().expect("mismatched callback kind");
+            let expected = if graphics {
+                "graphics callbacks require"
+            } else {
+                "transfer callbacks cannot"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     fn mip_range(base: u32) -> SubresourceRange {
