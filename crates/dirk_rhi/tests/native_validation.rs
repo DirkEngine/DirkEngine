@@ -14,6 +14,12 @@ struct TestDevice {
     rhi: Rhi,
 }
 
+/// Reports a hardware precondition this device does not meet. The calling test
+/// returns early instead of failing on hardware that cannot exercise it.
+fn skip(reason: &str) {
+    eprintln!("skipping native regression: {reason}");
+}
+
 impl TestDevice {
     fn new() -> Result<Self> {
         // SAFETY: no borrowed loader symbols escape this scope.
@@ -214,10 +220,11 @@ fn uniform_binding_limit_applies_to_resolved_ranges() -> Result<()> {
     {
         let limits = test.rhi.capabilities().limits;
         let max_range = limits.max_uniform_buffer_binding_size;
-        assert!(
-            limits.max_buffer_size > max_range,
-            "test requires an allocation larger than a uniform binding"
-        );
+        // The test allocates one byte past the binding limit in host memory.
+        if max_range >= limits.max_buffer_size || max_range >= 1 << 28 {
+            skip("the uniform binding limit is not below a practical allocation size");
+            return Ok(());
+        }
         let buffer = test.rhi.create_buffer(&BufferDesc {
             label: "oversized uniform allocation",
             size: max_range + 1,
@@ -290,13 +297,16 @@ fn independent_color_write_masks_are_enabled_or_rejected() -> Result<()> {
 fn depth_stencil_pipeline_matches_rendering_attachment() -> Result<()> {
     let mut test = TestDevice::new()?;
     {
-        let format = test
+        let Some(format) = test
             .rhi
             .supported_depth_formats()
             .iter()
             .copied()
             .find(|format| format.aspects().contains(ImageAspects::STENCIL))
-            .expect("test requires a depth/stencil format");
+        else {
+            skip("no depth/stencil attachment format is supported");
+            return Ok(());
+        };
         let face = StencilFaceState {
             compare: CompareOp::Always,
             fail_op: StencilOp::Keep,

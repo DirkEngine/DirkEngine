@@ -166,7 +166,7 @@ unsafe impl Backend for VulkanBackend {
     }
 
     fn supported_depth_formats(&self) -> &[TextureFormat] {
-        self.context.supported_depth_formats
+        &self.context.supported_depth_formats
     }
 
     fn format_capabilities(&self, format: TextureFormat) -> FormatCapabilities {

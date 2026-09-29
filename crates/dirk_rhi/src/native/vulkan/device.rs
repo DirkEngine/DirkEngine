@@ -90,7 +90,7 @@ pub(crate) struct Context {
     pub(crate) families: QueueFamilies,
     pub(crate) queues: Queues,
     pub(crate) capabilities: Capabilities,
-    pub(crate) supported_depth_formats: &'static [TextureFormat],
+    pub(crate) supported_depth_formats: Box<[TextureFormat]>,
     pub(crate) sampler_anisotropy: bool,
     pub(crate) image_cube_array: bool,
     pub(crate) independent_blend: bool,
@@ -468,7 +468,7 @@ struct SelectedDevice {
     api_version: String,
     families: QueueFamilies,
     capabilities: Capabilities,
-    supported_depth_formats: &'static [crate::TextureFormat],
+    supported_depth_formats: Box<[TextureFormat]>,
     sampler_anisotropy: bool,
     image_cube_array: bool,
     independent_blend: bool,
@@ -504,6 +504,14 @@ fn inspect_device(
     if properties.api_version < vk::API_VERSION_1_3 {
         return None;
     }
+    // Vertex, index, and copy buffers are bounded by the allocation limit;
+    // storage-buffer ranges are reported separately.
+    let max_buffer_size = {
+        let mut vulkan13 = vk::PhysicalDeviceVulkan13Properties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan13);
+        unsafe { instance.get_physical_device_properties2(raw, &mut properties2) };
+        vulkan13.max_buffer_size
+    };
 
     let extensions = unsafe { instance.enumerate_device_extension_properties(raw) }.ok()?;
     if surface.is_some() && !extension_available(&extensions, swapchain::NAME) {
@@ -528,9 +536,10 @@ fn inspect_device(
 
     let queue_properties = unsafe { instance.get_physical_device_queue_family_properties(raw) };
     let families = QueueFamilies::resolve(&queue_properties, surface_loader, surface, raw)?;
-    let supported_depth_formats: &'static [TextureFormat] = [
+    let supported_depth_formats: Box<[TextureFormat]> = [
         TextureFormat::Depth32Float,
         TextureFormat::Depth24UnormStencil8,
+        TextureFormat::Depth32FloatStencil8,
         TextureFormat::Depth16Unorm,
     ]
     .into_iter()
@@ -541,8 +550,7 @@ fn inspect_device(
         .optimal_tiling_features
         .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
     })
-    .collect::<Vec<_>>()
-    .leak();
+    .collect();
     if supported_depth_formats.is_empty() {
         return None;
     }
@@ -590,7 +598,7 @@ fn inspect_device(
             families,
             capabilities: Capabilities {
                 limits: crate::Limits {
-                    max_buffer_size: u64::from(properties.limits.max_storage_buffer_range),
+                    max_buffer_size,
                     max_uniform_buffer_binding_size: u64::from(
                         properties.limits.max_uniform_buffer_range,
                     ),
