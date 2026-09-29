@@ -693,6 +693,10 @@ impl<B: Backend> RenderPass<'_, B> {
     }
     /// Binds immutable groups whose resource lifetimes are managed by the caller.
     ///
+    /// `dynamic_offsets` holds one offset per dynamic-offset buffer binding, ordered by group
+    /// and then by ascending binding number within each group. Each offset must be aligned
+    /// for its binding type and keep the bound range inside its buffer.
+    ///
     /// # Safety
     /// Resources and non-owning bindings must remain valid through their last recording
     /// and GPU use. Supply correct access states and dependencies, and keep shader and

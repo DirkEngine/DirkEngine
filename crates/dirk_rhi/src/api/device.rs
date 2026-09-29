@@ -314,6 +314,7 @@ impl<B: Backend> Rhi<B> {
         }
 
         let mut native = Vec::new();
+        let mut dynamic_buffers = Vec::new();
         for layout in desc.layout.info() {
             let mut matches = desc.entries.iter().filter(|e| e.binding == layout.binding);
             let entry = matches.next().ok_or(Ir::Mismatch)?;
@@ -321,6 +322,28 @@ impl<B: Backend> Rhi<B> {
                 return Err(Ir::Mismatch.into());
             }
             let resource = self.prepare_binding(entry, layout.ty)?;
+            if let (
+                BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                },
+                BindingType::UniformBuffer {
+                    dynamic_offset: true,
+                }
+                | BindingType::StorageBuffer {
+                    dynamic_offset: true,
+                    ..
+                },
+            ) = (&resource, layout.ty)
+            {
+                dynamic_buffers.push(super::DynamicBuffer {
+                    binding: layout.binding,
+                    uniform: matches!(layout.ty, BindingType::UniformBuffer { .. }),
+                    end: offset + size,
+                    buffer_size: crate::NativeBuffer::size(*buffer),
+                });
+            }
             native.push(crate::BindGroupEntry {
                 binding: entry.binding,
                 resource,
@@ -337,6 +360,7 @@ impl<B: Backend> Rhi<B> {
             },
             GroupMetadata {
                 layout: desc.layout.info().clone(),
+                dynamic_buffers,
             },
         ))
     }

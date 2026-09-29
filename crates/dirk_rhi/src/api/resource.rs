@@ -60,38 +60,58 @@ pub struct SamplerInfo {
 pub struct GroupMetadata {
     /// Implemented layout.
     pub layout: Vec<crate::BindGroupLayoutEntry>,
+    /// Dynamic-offset buffer bindings in ascending binding order.
+    pub(super) dynamic_buffers: Vec<DynamicBuffer>,
+}
+/// Static range of a dynamic-offset buffer binding, checked again at bind time.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DynamicBuffer {
+    pub(super) binding: u32,
+    pub(super) uniform: bool,
+    /// End of the bound range before any dynamic offset is applied.
+    pub(super) end: u64,
+    pub(super) buffer_size: u64,
 }
 impl GroupMetadata {
     /// Consumes this group's offsets in ascending layout-binding order.
+    ///
+    /// Each offset must be aligned for its binding type and keep the bound range
+    /// inside its buffer (VUID-vkCmdBindDescriptorSets-01979).
     pub(super) fn validate_dynamic_offsets<'a>(
         &self,
         group: u32,
         offsets: &mut impl Iterator<Item = &'a u64>,
         capabilities: crate::Capabilities,
     ) -> crate::Result<()> {
-        for entry in &self.layout {
-            let alignment = match entry.ty {
-                crate::BindingType::UniformBuffer {
-                    dynamic_offset: true,
-                } => capabilities.min_uniform_buffer_offset_alignment,
-                crate::BindingType::StorageBuffer {
-                    dynamic_offset: true,
-                    ..
-                } => capabilities.min_storage_buffer_offset_alignment,
-                _ => continue,
+        for buffer in &self.dynamic_buffers {
+            let binding = buffer.binding;
+            let alignment = if buffer.uniform {
+                capabilities.min_uniform_buffer_offset_alignment
+            } else {
+                capabilities.min_storage_buffer_offset_alignment
             }
             .max(1);
             let offset = offsets.next().ok_or_else(|| {
-                crate::InvalidResourceKind::Mismatch.with_detail(format!(
-                    "missing dynamic offset for group {group} binding {}",
-                    entry.binding
+                Ir::Mismatch.with_detail(format!(
+                    "missing dynamic offset for group {group} binding {binding}"
                 ))
             })?;
             if !offset.is_multiple_of(alignment) {
-                return Err(crate::InvalidResourceKind::Mismatch
+                return Err(Ir::Mismatch
                     .with_detail(format!(
-                        "dynamic offset for group {group} binding {} must be aligned to {alignment} bytes",
-                        entry.binding
+                        "dynamic offset for group {group} binding {binding} must be aligned to {alignment} bytes"
+                    ))
+                    .into());
+            }
+            if buffer
+                .end
+                .checked_add(*offset)
+                .is_none_or(|end| end > buffer.buffer_size)
+            {
+                return Err(Ir::OutOfRange
+                    .with_detail(format!(
+                        "dynamic offset {offset} moves group {group} binding {binding} past its {}-byte buffer",
+                        buffer.buffer_size
                     ))
                     .into());
             }
@@ -160,23 +180,21 @@ mod dynamic_offset_tests {
     use super::*;
 
     #[test]
-    fn dynamic_offsets_follow_sorted_bindings_and_alignment() {
+    fn dynamic_offsets_follow_sorted_bindings_alignment_and_bounds() {
         let group = GroupMetadata {
-            layout: vec![
-                crate::BindGroupLayoutEntry {
+            layout: Vec::new(),
+            dynamic_buffers: vec![
+                DynamicBuffer {
                     binding: 2,
-                    ty: crate::BindingType::StorageBuffer {
-                        read_only: true,
-                        dynamic_offset: true,
-                    },
-                    visibility: crate::ShaderStages::FRAGMENT,
+                    uniform: false,
+                    end: 64,
+                    buffer_size: 1024,
                 },
-                crate::BindGroupLayoutEntry {
+                DynamicBuffer {
                     binding: 7,
-                    ty: crate::BindingType::UniformBuffer {
-                        dynamic_offset: true,
-                    },
-                    visibility: crate::ShaderStages::VERTEX,
+                    uniform: true,
+                    end: 256,
+                    buffer_size: 1024,
                 },
             ],
         };
@@ -191,21 +209,15 @@ mod dynamic_offset_tests {
             dedicated_compute_queue: false,
             dedicated_copy_queue: false,
         };
+        let validate =
+            |offsets: &[u64]| group.validate_dynamic_offsets(0, &mut offsets.iter(), capabilities);
 
-        assert!(
-            group
-                .validate_dynamic_offsets(0, &mut [16, 256].iter(), capabilities)
-                .is_ok()
-        );
-        assert!(
-            group
-                .validate_dynamic_offsets(0, &mut [256, 16].iter(), capabilities)
-                .is_err()
-        );
-        assert!(
-            group
-                .validate_dynamic_offsets(0, &mut [16].iter(), capabilities)
-                .is_err()
-        );
+        assert!(validate(&[16, 256]).is_ok());
+        assert!(validate(&[960, 768]).is_ok());
+        assert!(validate(&[256, 16]).is_err());
+        assert!(validate(&[16]).is_err());
+        assert!(validate(&[976, 0]).is_err());
+        assert!(validate(&[0, 1024]).is_err());
+        assert!(validate(&[0, u64::MAX - 255]).is_err());
     }
 }
