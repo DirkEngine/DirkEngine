@@ -1788,6 +1788,159 @@ mod tests {
         }
     }
 
+    fn native_rhi() -> dirk_rhi::Result<Rhi> {
+        Rhi::new(&dirk_rhi::RhiCreateInfo {
+            engine_name: "DirkEngine",
+            engine_version: (0, 1, 0),
+            application_name: "graph boundary validation",
+            application_version: (0, 1, 0),
+            validation: true,
+            compatible_surface: None,
+        })
+    }
+
+    fn states(barrier: &CompiledBarrier) -> (ImageState, ImageState) {
+        (barrier.old_state, barrier.new_state)
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan or Metal device; exercised explicitly on native validation hosts"]
+    fn imported_textures_transition_from_initial_through_passes_to_final() -> Result<()> {
+        let rhi = native_rhi()?;
+        let image = rhi.create_image(&ImageDesc {
+            label: "surface-like target",
+            dimension: dirk_rhi::ImageDimension::TwoD,
+            extent: Extent3d::new_2d(8, 8),
+            format: TextureFormat::Bgra8Unorm,
+            usage: ImageUsages::COLOR_ATTACHMENT | ImageUsages::SAMPLED,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::One,
+        })?;
+        let view = rhi.view(&image)?;
+        let surface = |final_state| ImportedTexture {
+            image: &image,
+            view: &view,
+            initial_state: ImageState::Undefined,
+            final_state,
+        };
+
+        let mut graph = RenderGraph::new();
+        let target = graph.import_texture(surface(ImageState::Present))?;
+        graph
+            .add_pass("draw")
+            .write_color_attachment(target, AttachmentInfo::clear_color(0., 0., 0., 1.));
+        let compiled = graph.compile()?;
+        let entry = &compiled.passes[0].barriers;
+        assert_eq!(entry.len(), 1);
+        assert_eq!(
+            states(&entry[0]),
+            (ImageState::Undefined, ImageState::ColorAttachment)
+        );
+        assert_eq!(compiled.final_barriers.len(), 1);
+        assert_eq!(
+            states(&compiled.final_barriers[0]),
+            (ImageState::ColorAttachment, ImageState::Present)
+        );
+
+        // An untouched import still reaches its required final state.
+        let mut graph = RenderGraph::new();
+        graph.import_texture(surface(ImageState::Present))?;
+        let compiled = graph.compile()?;
+        assert_eq!(
+            states(&compiled.final_barriers[0]),
+            (ImageState::Undefined, ImageState::Present)
+        );
+
+        let mut graph = RenderGraph::new();
+        let stageless = graph.import_texture(surface(ImageState::ShaderRead(ShaderStages::NONE)));
+        assert!(stageless.is_err());
+        Ok(())
+    }
+
+    /// Rewrites an imported uniform buffer between boundary reads.
+    fn boundary_graph<'a>(
+        buffer: &'a dirk_rhi::Buffer,
+        source: &'a dirk_rhi::Buffer,
+    ) -> Result<RenderGraph<'a>> {
+        let mut graph = RenderGraph::new();
+        let uniform = graph.import_buffer(ImportedBuffer {
+            buffer,
+            initial_state: ResourceAccess::Uniform(ShaderStages::FRAGMENT),
+            final_state: ResourceAccess::Uniform(ShaderStages::VERTEX),
+        })?;
+        // Undeclared transients must not reach allocation.
+        graph.create_texture(color_desc());
+        graph.create_buffer(64);
+        graph
+            .add_pass("rewrite uniform")
+            .write_buffer(uniform, ResourceAccess::CopyDestination)
+            .execute_transfer(Box::new(move |cmd, context| {
+                let region = dirk_rhi::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: 256,
+                };
+                // SAFETY: host writes precede submission; the graph orders the destination.
+                unsafe { cmd.copy_buffer(source, context.buffer(uniform)?, &[region])? };
+                Ok(())
+            }));
+        Ok(graph)
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan or Metal device; exercised explicitly on native validation hosts"]
+    fn imported_buffers_transition_at_graph_boundaries() -> Result<()> {
+        let mut rhi = native_rhi()?;
+        let buffer = rhi.create_buffer(&dirk_rhi::BufferDesc {
+            label: "imported uniform",
+            size: 256,
+            usage: dirk_rhi::BufferUsages::COPY_DST | dirk_rhi::BufferUsages::UNIFORM,
+            memory: dirk_rhi::MemoryDomain::Device,
+        })?;
+        let mut source = rhi.create_buffer(&dirk_rhi::BufferDesc {
+            label: "uniform contents",
+            size: 256,
+            usage: dirk_rhi::BufferUsages::COPY_SRC,
+            memory: dirk_rhi::MemoryDomain::Upload,
+        })?;
+        // SAFETY: the new allocation has no GPU use yet.
+        unsafe { source.write(0, &[7; 256])? };
+        let compiled = boundary_graph(&buffer, &source)?.compile()?;
+        let entry = &compiled.passes[0].buffer_barriers;
+        assert_eq!(entry.len(), 1);
+        assert_eq!(
+            (entry[0].old, entry[0].new),
+            (
+                ResourceAccess::Uniform(ShaderStages::FRAGMENT),
+                ResourceAccess::CopyDestination
+            )
+        );
+        let exports = &compiled.buffer_exports;
+        assert_eq!(exports.len(), 1);
+        assert_eq!(
+            (exports[0].old, exports[0].new),
+            (
+                ResourceAccess::CopyDestination,
+                ResourceAccess::Uniform(ShaderStages::VERTEX)
+            )
+        );
+        drop(compiled);
+
+        let mut commands = rhi.create_encoder::<dirk_rhi::Graphics>("buffer boundaries")?;
+        // SAFETY: the buffer is idle and retained until the flush below.
+        unsafe {
+            boundary_graph(&buffer, &source)?.run(&rhi, &mut commands)?;
+            rhi.queue::<dirk_rhi::Graphics>()
+                .submit(vec![commands.finish()?], &dirk_rhi::SubmitInfo::default())?;
+        }
+        rhi.flush()?;
+        drop((buffer, source));
+        rhi.flush()?;
+        assert_eq!(rhi.validation_error_count(), 0, "native validation errors");
+        Ok(())
+    }
+
     fn mip_range(base: u32) -> SubresourceRange {
         SubresourceRange {
             aspects: dirk_rhi::ImageAspects::NONE,
