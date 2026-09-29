@@ -190,8 +190,8 @@ impl Drop for BufferInner {
     }
 }
 
-/// Owned or swapchain-provided Vulkan image.
-pub struct VulkanImage(ImageInner);
+/// Owned or swapchain-provided Vulkan image. Views share its native handle.
+pub struct VulkanImage(Arc<ImageInner>);
 
 impl fmt::Debug for VulkanImage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -286,7 +286,7 @@ impl VulkanImage {
             context.allocator_free(allocation);
             return Err(vk_error(error));
         }
-        Ok(Self(ImageInner {
+        Ok(Self(Arc::new(ImageInner {
             raw,
             format: desc.format,
             extent: desc.extent,
@@ -294,7 +294,7 @@ impl VulkanImage {
                 context: context.clone(),
                 allocation: Some(allocation),
             },
-        }))
+        })))
     }
 
     pub(crate) fn surface(
@@ -303,19 +303,16 @@ impl VulkanImage {
         format: crate::TextureFormat,
         extent: crate::Extent3d,
     ) -> Self {
-        Self(ImageInner {
+        Self(Arc::new(ImageInner {
             raw,
             format,
             extent,
             ownership: ImageOwnership::Surface { generation },
-        })
+        }))
     }
 
     pub(crate) fn context(&self) -> &Arc<Context> {
-        match &self.0.ownership {
-            ImageOwnership::Owned { context, .. } => context,
-            ImageOwnership::Surface { generation } => &generation.context,
-        }
+        self.0.context()
     }
 
     #[must_use]
@@ -334,6 +331,15 @@ impl VulkanImage {
     /// Returns the image extent.
     pub fn extent(&self) -> crate::Extent3d {
         self.0.extent
+    }
+}
+
+impl ImageInner {
+    fn context(&self) -> &Arc<Context> {
+        match &self.ownership {
+            ImageOwnership::Owned { context, .. } => context,
+            ImageOwnership::Surface { generation } => &generation.context,
+        }
     }
 }
 
@@ -366,7 +372,9 @@ impl fmt::Debug for VulkanImageView {
 }
 
 enum ImageViewOwnership {
-    Owned(Arc<Context>),
+    /// A created view, which keeps its image alive like a Metal texture view.
+    Owned(Arc<ImageInner>),
+    /// A swapchain generation's default view of one of its images.
     Surface(Arc<SwapchainGeneration>),
 }
 
@@ -400,7 +408,7 @@ impl VulkanImageView {
         Ok(Self(ImageViewInner {
             raw,
             aspects: desc.aspects,
-            ownership: ImageViewOwnership::Owned(context.clone()),
+            ownership: ImageViewOwnership::Owned(desc.image.0.clone()),
         }))
     }
 
@@ -424,7 +432,7 @@ impl VulkanImageView {
 
     pub(crate) fn context(&self) -> &Arc<Context> {
         match &self.0.ownership {
-            ImageViewOwnership::Owned(context) => context,
+            ImageViewOwnership::Owned(image) => image.context(),
             ImageViewOwnership::Surface(generation) => &generation.context,
         }
     }
@@ -433,7 +441,9 @@ impl VulkanImageView {
 impl Drop for ImageViewInner {
     fn drop(&mut self) {
         match &self.ownership {
-            ImageViewOwnership::Owned(context) => context.retire(Garbage::ImageView(self.raw)),
+            ImageViewOwnership::Owned(image) => {
+                image.context().retire(Garbage::ImageView(self.raw));
+            }
             ImageViewOwnership::Surface(_generation) => {}
         }
     }

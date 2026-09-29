@@ -473,3 +473,74 @@ fn rejected_submission_keeps_the_device_usable() -> Result<()> {
     producer.check()?;
     test.check()
 }
+
+#[test]
+#[ignore = "requires Vulkan 1.3 and Khronos validation"]
+fn views_keep_their_image_alive() -> Result<()> {
+    let mut test = TestDevice::new()?;
+    let image = test.rhi.create_image(&ImageDesc {
+        label: "viewed image",
+        dimension: ImageDimension::TwoD,
+        extent: Extent3d::new_2d(16, 16),
+        format: TextureFormat::Rgba8Unorm,
+        usage: ImageUsages::COLOR_ATTACHMENT,
+        mip_levels: 1,
+        array_layers: 1,
+        samples: SampleCount::One,
+    })?;
+    let view = test.rhi.view(&image)?;
+    let mut encoder = test.rhi.create_encoder::<Graphics>("attachment layout")?;
+    // SAFETY: the fresh image is only transitioned; completion is awaited below.
+    unsafe {
+        encoder.barrier(&DependencyInfo {
+            memory_barriers: &[],
+            buffer_barriers: &[],
+            image_barriers: &[ImageBarrier {
+                image: &image,
+                old_state: ImageState::Undefined,
+                new_state: ImageState::ColorAttachment,
+                aspects: ImageAspects::COLOR,
+                base_mip_level: 0,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                queue_transfer: None,
+            }],
+        })?;
+        test.rhi
+            .queue::<Graphics>()
+            .submit(vec![encoder.finish()?], &SubmitInfo::default())?
+            .wait(u64::MAX)?;
+    }
+    drop(image);
+    // Retire the image owner's cycle while the view still references it.
+    test.rhi.flush()?;
+    let mut encoder = test.rhi.create_encoder::<Graphics>("orphaned view")?;
+    // SAFETY: the pass only clears the view, which keeps its image alive.
+    unsafe {
+        drop(encoder.begin_render_pass(&RenderingInfo {
+            label: "clear",
+            width: 16,
+            height: 16,
+            layer_count: 1,
+            color_attachments: &[ColorAttachment {
+                view: &view,
+                resolve: None,
+                load: LoadOp::Clear(Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                store: StoreOp::Store,
+            }],
+            depth_attachment: None,
+        })?);
+        test.rhi
+            .queue::<Graphics>()
+            .submit(vec![encoder.finish()?], &SubmitInfo::default())?
+            .wait(u64::MAX)?;
+    }
+    drop(view);
+    test.check()
+}

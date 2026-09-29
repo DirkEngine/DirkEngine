@@ -64,7 +64,7 @@ pub type Rhi = api::Rhi<native::SelectedBackend>;
 pub type Buffer = api::GpuBuffer<native::SelectedBackend>;
 /// Unique image allocation.
 pub type Image = api::GpuImage<native::SelectedBackend>;
-/// Non-owning view of an image allocation.
+/// View of an image allocation; it keeps the native image alive.
 pub type ImageView = api::GpuImageView<native::SelectedBackend>;
 /// Sampling configuration.
 pub type Sampler = api::GpuSampler<native::SelectedBackend>;

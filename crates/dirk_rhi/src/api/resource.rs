@@ -17,7 +17,7 @@ pub struct BufferInfo {
 pub type GpuBuffer<B> = Object<B, <B as crate::Api>::Buffer, BufferInfo>;
 /// Unique image with portable allocation metadata.
 pub type GpuImage<B> = Object<B, <B as crate::Api>::Image, ImageInfo>;
-/// Unique view; image ownership remains with the caller.
+/// Unique view. The native image stays alive until its last view is dropped.
 pub type GpuImageView<B> = Object<B, <B as crate::Api>::ImageView, ViewMetadata>;
 /// Unique sampler.
 pub type GpuSampler<B> = Object<B, <B as crate::Api>::Sampler, SamplerInfo>;
@@ -42,7 +42,7 @@ impl<B: Backend> GpuImage<B> {
         *self.info()
     }
 }
-/// Image view selection. The image owner must outlive all uses of this view.
+/// Image view selection and the viewed image's description.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewMetadata {
     /// Source allocation description, not ownership.

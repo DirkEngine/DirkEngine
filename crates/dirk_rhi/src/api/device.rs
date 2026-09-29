@@ -180,7 +180,7 @@ impl<B: Backend> Rhi<B> {
         }
         Ok(())
     }
-    /// Creates a non-owning view with a checked subresource selection.
+    /// Creates a view with a checked subresource selection. The view keeps the native image alive.
     pub fn create_image_view(&self, desc: &ImageViewDesc<'_, Self>) -> Result<GpuImageView<B>> {
         let info = desc.image.description();
         let range = ImageSubresourceRange {
