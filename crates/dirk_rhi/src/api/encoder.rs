@@ -973,13 +973,13 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         let device = &self.device;
         let mut frame_ids = std::collections::HashSet::new();
         for frame in info.surface_frames {
-            frame.require_device(&device.backend)?;
+            frame.require_device(device)?;
             if !frame_ids.insert(std::ptr::from_ref(*frame)) {
                 return Err(Ir::BadState.into());
             }
         }
         for completion in info.wait_for {
-            if !Arc::ptr_eq(&completion.0.backend, &device.backend) {
+            if !Arc::ptr_eq(&completion.0.pools, &device.pools) {
                 return Err(Ir::ForeignInstance
                     .with_detail("waited completion belongs to another device")
                     .into());
@@ -1023,7 +1023,6 @@ impl<B: Backend, Q: QueueKind> Queue<B, Q> {
         let native = commands.into_iter().map(|c| (c.raw, c.pool)).collect();
         let fence = unsafe { device.backend.create_fence(false)? };
         let work = Arc::new(Work {
-            backend: device.backend.clone(),
             timeline: self.timeline.clone(),
             value: self.next_value,
             pools: device.pools.clone(),

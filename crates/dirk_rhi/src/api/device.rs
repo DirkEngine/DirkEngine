@@ -19,9 +19,11 @@ pub struct Rhi<B: Backend> {
     pub(super) transfer: super::Queue<B, super::CopyQueue>,
 }
 pub(super) struct Device<B: Backend> {
-    pub(super) backend: Arc<B>,
-    pub(super) gate: Arc<Mutex<()>>,
+    pub(super) backend: B,
+    pub(super) gate: Mutex<()>,
     pub(super) state: Mutex<DeviceState<B>>,
+    /// Shared with submitted work, which returns command allocations on completion.
+    /// Its identity also tells whether a completion belongs to this device.
     pub(super) pools: Arc<Mutex<PoolCache<B>>>,
 }
 pub(super) struct DeviceState<B: Backend> {
@@ -52,10 +54,10 @@ impl<B: Backend> Rhi<B> {
     /// Creates the platform-selected native backend and its queues.
     pub fn new(info: &crate::RhiCreateInfo<'_>) -> Result<Self> {
         // SAFETY: creation only borrows valid platform providers and retains no borrowed handles.
-        let backend = Arc::new(unsafe { B::new(info)? });
+        let backend = unsafe { B::new(info)? };
         let device = Arc::new(Device {
             backend,
-            gate: Arc::new(Mutex::new(())),
+            gate: Mutex::new(()),
             pools: Arc::new(Mutex::new(std::collections::HashMap::new())),
             state: Mutex::new(DeviceState {
                 pending: Vec::new(),
@@ -630,7 +632,6 @@ pub(super) struct Work<B: Backend> {
     pub(super) queue: crate::QueueType,
     pub(super) fence: B::Fence,
     pub(super) payload: Mutex<Option<Payload<B>>>,
-    pub(super) backend: Arc<B>,
 }
 impl<B: Backend> Work<B> {
     pub(super) fn wait(&self, timeout: u64) -> Result<()> {

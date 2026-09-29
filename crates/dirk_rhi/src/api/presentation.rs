@@ -24,8 +24,7 @@ pub struct GpuSwapchain<B: Backend> {
 }
 /// Owned acquisition. Image and view access borrow this frame.
 pub struct GpuSurfaceFrame<B: Backend> {
-    backend: Arc<B>,
-    gate: Arc<Mutex<()>>,
+    device: Arc<super::device::Device<B>>,
     chain: Arc<Chain<B>>,
     pub(super) native: Mutex<Option<B::SurfaceFrame>>,
     pub(super) phase: AtomicU8,
@@ -128,8 +127,7 @@ impl<B: Backend> GpuSwapchain<B> {
         };
         self.chain.acquired.fetch_add(1, Ordering::Release);
         Ok(GpuSurfaceFrame {
-            backend: self.device.backend.clone(),
-            gate: self.device.gate.clone(),
+            device: self.device.clone(),
             chain: self.chain.clone(),
             native: Mutex::new(Some(raw)),
             phase: AtomicU8::new(0),
@@ -208,8 +206,8 @@ impl<B: Backend> GpuSurfaceFrame<B> {
     pub fn status(&self) -> SurfaceStatus {
         self.status
     }
-    pub(super) fn require_device(&self, backend: &Arc<B>) -> Result<()> {
-        if !Arc::ptr_eq(&self.backend, backend) {
+    pub(super) fn require_device(&self, device: &Arc<super::device::Device<B>>) -> Result<()> {
+        if !Arc::ptr_eq(&self.device, device) {
             return Err(Ir::ForeignInstance.into());
         }
         if self.phase.load(Ordering::Acquire) != 0 {
@@ -228,7 +226,7 @@ impl<B: Backend> GpuSurfaceFrame<B> {
         self.chain.invalid.store(true, Ordering::Release);
     }
     fn release(&self, present: bool) -> Result<SurfaceStatus> {
-        let _gate = self.gate.lock();
+        let _gate = self.device.gate.lock();
         let mut native = self.native.lock();
         let frame = native.take().ok_or(Ir::BadState)?;
         let result = if present {
