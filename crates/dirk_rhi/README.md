@@ -40,6 +40,9 @@ of having no application-managed heap suballocation. The workspace enables only
 Metal allocator together with a binding migration and measured allocation needs.
 The pinned `metal 0.33.0` crate itself recommends `objc2-metal` for new development.
 
+`block` supplies the Objective-C blocks passed to Metal command-buffer completion
+handlers, which signal fences without polling.
+
 `core-graphics-types` supplies the C-compatible `CGSize` used by
 [`MetalLayerRef::set_drawable_size`](src/native/metal/presentation.rs) when creating
 or resizing the presentation layer. `metal 0.33.0` takes that same package's type in

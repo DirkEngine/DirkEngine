@@ -135,6 +135,12 @@ pub struct Submission<'a, B: Api> {
 
 /// Resource family used by borrowed portable descriptors. Each backend supplies
 /// its own native types; public aliases select the active backend's safe types.
+///
+/// Both native backends and the safe [`crate::Rhi`] implement this trait, so one
+/// descriptor definition is borrowed with safe owners at the public boundary and
+/// with native handles at the backend boundary. Native operation bounds are
+/// therefore declared on [`Backend`] rather than here, where they would exclude
+/// the safe family. See the crate README for the design rationale.
 pub trait Api: Sized + Send + Sync + 'static {
     /// Buffer resource.
     type Buffer: Debug + Send + Sync + 'static;
