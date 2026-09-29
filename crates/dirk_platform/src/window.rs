@@ -24,7 +24,19 @@ pub struct PlatformWindows {
 
 impl PlatformWindows {
     /// Applies cursor and input-method state requested by the active UI.
+    ///
+    /// This is called every frame, so unchanged state is detected under the
+    /// read lock and not reapplied to the native window.
     pub fn apply_ui_state(&self, id: WindowId, cursor: Option<CursorIcon>, ime: Option<ImeArea>) {
+        let unchanged = self
+            .inner
+            .read()
+            .windows
+            .get(&id)
+            .is_none_or(|window| window.ui_state_applied(cursor, ime));
+        if unchanged {
+            return;
+        }
         if let Some(window) = self.inner.write().windows.get_mut(&id) {
             window.apply_ui_state(cursor, ime);
         }
@@ -146,6 +158,10 @@ pub struct Window {
     /// window)
     occluded: bool,
     ime_area: Option<ImeArea>,
+    /// Last cursor visibility applied to the native window.
+    cursor_visible: bool,
+    /// Last cursor icon applied to the native window.
+    cursor_icon: CursorIcon,
 }
 
 impl Window {
@@ -157,6 +173,9 @@ impl Window {
             theme: window.theme().unwrap_or(Theme::Dark),
             occluded: false,
             ime_area: None,
+            // Native windows start with a visible default cursor.
+            cursor_visible: true,
+            cursor_icon: CursorIcon::Default,
             raw: Arc::new(WindowSurfaceTarget { raw: window }),
         }
     }
@@ -199,10 +218,22 @@ impl Window {
         self.theme
     }
 
+    fn ui_state_applied(&self, cursor: Option<CursorIcon>, ime: Option<ImeArea>) -> bool {
+        self.cursor_visible == cursor.is_some()
+            && cursor.is_none_or(|icon| icon == self.cursor_icon)
+            && self.ime_area == ime
+    }
+
     fn apply_ui_state(&mut self, cursor: Option<CursorIcon>, ime: Option<ImeArea>) {
-        self.raw.raw.set_cursor_visible(cursor.is_some());
-        if let Some(cursor) = cursor {
-            self.raw.raw.set_cursor(cursor.into());
+        if self.cursor_visible != cursor.is_some() {
+            self.cursor_visible = cursor.is_some();
+            self.raw.raw.set_cursor_visible(self.cursor_visible);
+        }
+        if let Some(icon) = cursor
+            && icon != self.cursor_icon
+        {
+            self.cursor_icon = icon;
+            self.raw.raw.set_cursor(icon.into());
         }
 
         if self.ime_area == ime {
