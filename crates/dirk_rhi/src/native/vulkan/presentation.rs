@@ -111,6 +111,8 @@ pub(crate) struct SwapchainGeneration {
     acquisitions: Mutex<Vec<AcquireSlot>>,
     format: SurfaceFormat,
     extent: Extent3d,
+    /// Images the application may hold while acquisition still makes progress.
+    max_acquired: NonZeroU32,
 }
 
 impl SwapchainGeneration {
@@ -309,6 +311,14 @@ impl SwapchainGeneration {
                 }
             }
         }
+        // VUID-vkAcquireNextImageKHR-surface-07783: an unbounded acquire is
+        // only guaranteed to progress while at most `images - minImageCount`
+        // images are already held.
+        let max_acquired = u32::try_from(images.len())
+            .ok()
+            .and_then(|count| count.checked_sub(capabilities.min_image_count))
+            .and_then(|spare| NonZeroU32::new(spare + 1))
+            .unwrap_or(NonZeroU32::MIN);
         let mut semaphores = Vec::with_capacity(images.len());
         for _ in 0..images.len() {
             let create_info = vk::SemaphoreCreateInfo::default();
@@ -341,6 +351,7 @@ impl SwapchainGeneration {
             semaphores,
             format,
             extent: Extent3d::new_2d(extent.width, extent.height),
+            max_acquired,
         }))
     }
 }
@@ -414,6 +425,10 @@ unsafe impl NativeSwapchain<VulkanBackend> for VulkanSwapchain {
     fn image_count(&self) -> NonZeroU32 {
         NonZeroU32::new(self.generation.images.len().try_into().unwrap_or(u32::MAX))
             .expect("a Vulkan swapchain always has at least one image")
+    }
+
+    fn max_acquired_frames(&self) -> NonZeroU32 {
+        self.generation.max_acquired
     }
 
     unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<VulkanSurfaceFrame> {

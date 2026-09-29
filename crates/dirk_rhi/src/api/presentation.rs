@@ -81,12 +81,25 @@ impl<B: Backend> GpuSwapchain<B> {
         self.image_count
     }
     /// Acquires a frame, respecting the caller's timeout and in-flight budget.
+    ///
+    /// Holding more frames than the native chain can release without a
+    /// presentation is rejected with
+    /// [`InvalidResourceKind::BadState`](crate::InvalidResourceKind::BadState)
+    /// instead of blocking; present or discard a frame first.
     pub fn acquire(&mut self, timeout_ns: u64) -> Result<GpuSurfaceFrame<B>> {
         if self.chain.invalid.load(Ordering::Acquire) {
             return Err(crate::Error::SwapchainOutOfDate);
         }
         let _gate = self.device.gate.lock();
         let mut chain = self.chain.raw.lock();
+        let budget = usize::try_from(chain.max_acquired_frames().get()).unwrap_or(usize::MAX);
+        if self.chain.acquired.load(Ordering::Acquire) >= budget {
+            return Err(Ir::BadState
+                .with_detail(format!(
+                    "at most {budget} swapchain frames may be acquired at once; present or discard one first"
+                ))
+                .into());
+        }
         let mut raw = unsafe { chain.acquire(timeout_ns)? };
         let format = raw.format();
         let extent = raw.extent();

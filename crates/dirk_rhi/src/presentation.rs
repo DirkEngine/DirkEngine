@@ -109,6 +109,10 @@ pub unsafe trait NativeSwapchain<B: Api> {
     fn extent(&self) -> Extent3d;
     /// Number of images in the current swapchain generation.
     fn image_count(&self) -> NonZeroU32;
+    /// Maximum number of frames that may be held acquired at once while an
+    /// unbounded [`Self::acquire`](Swapchain::acquire) is still guaranteed to
+    /// make progress. Acquiring beyond this budget could block forever.
+    fn max_acquired_frames(&self) -> NonZeroU32;
     /// Acquires the next presentation frame.
     ///
     /// This call may block the calling thread until an image is available,

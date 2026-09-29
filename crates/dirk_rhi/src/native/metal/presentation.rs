@@ -154,6 +154,11 @@ unsafe impl NativeSwapchain<MetalBackend> for MetalSwapchain {
         self.image_count
     }
 
+    fn max_acquired_frames(&self) -> NonZeroU32 {
+        // The display may still hold the most recently presented drawable.
+        NonZeroU32::new(self.image_count.get() - 1).unwrap_or(NonZeroU32::MIN)
+    }
+
     unsafe fn acquire(&mut self, timeout_ns: u64) -> Result<MetalSurfaceFrame> {
         metal::objc::rc::autoreleasepool(|| {
             if timeout_ns == 0 {
