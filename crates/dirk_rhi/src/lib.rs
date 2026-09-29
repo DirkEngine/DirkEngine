@@ -53,7 +53,7 @@ mod access;
 pub use access::*;
 mod api;
 pub use api::{BufferInfo, CopyQueue, Graphics, QueueKind, SamplerInfo, ViewMetadata};
-pub(crate) use backend::{Api, Backend, NativeFence, NativeTimelineSemaphore, Submission};
+pub(crate) use backend::{Api, Backend, NativeFence, Submission};
 pub(crate) use command::{NativeCommandBuffer, TimelinePoint};
 pub(crate) use presentation::{NativeSurfaceFrame, NativeSwapchain};
 pub(crate) use resource::NativeBuffer;

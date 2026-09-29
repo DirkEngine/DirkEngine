@@ -22,9 +22,16 @@ ash.workspace = true
 ash-window.workspace = true
 gpu-allocator.workspace = true
 
+# gpu-allocator supports Metal only through `objc2-metal` handles, while this backend
+# uses the `metal` crate's `objc` bindings. Resources are allocated by the device
+# directly until the backend migrates to `objc2-metal` and heap sub-allocation.
 [target.'cfg(target_vendor = "apple")'.dependencies]
+# Objective-C blocks for Metal command-buffer completion handlers.
+block = "0.1"
+# `CGSize` for `CAMetalLayer::set_drawable_size`, whose signature uses this crate.
 core-graphics-types = { version = "0.2", default-features = false }
 metal = "0.33"
+# Obtains the `CAMetalLayer` backing an AppKit or UIKit view.
 raw-window-metal = "1.1"
 
 # This crate contains the audited boundary between safe wrappers and native operations.

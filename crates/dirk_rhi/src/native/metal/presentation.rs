@@ -164,12 +164,13 @@ unsafe impl NativeSwapchain<MetalBackend> for MetalSwapchain {
             if timeout_ns == 0 {
                 return Err(crate::Error::Timeout);
             }
+            // `nextDrawable` returns nil after waiting one second for a drawable.
             let drawable = self
                 .surface
                 .0
                 .layer
                 .next_drawable()
-                .ok_or(crate::Error::SwapchainOutOfDate)?
+                .ok_or(crate::Error::Timeout)?
                 .to_owned();
             let texture = drawable.texture().to_owned();
             let image = MetalImage::surface(&self.context, texture.clone(), self.format.texture);

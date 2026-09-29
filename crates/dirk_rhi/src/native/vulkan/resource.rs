@@ -3,8 +3,7 @@ use std::{ffi::CString, fmt, sync::Arc};
 use crate::{
     BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, BufferDesc,
     GraphicsPipelineDesc, ImageDesc, ImageDimension, ImageViewDesc, InvalidResourceKind as Ir,
-    NativeBuffer, NativeFence, NativeTimelineSemaphore, Result, SamplerDesc, ShaderDesc,
-    ShaderSource, ShaderStage,
+    NativeBuffer, NativeFence, Result, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage,
 };
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
@@ -1124,16 +1123,6 @@ unsafe impl NativeFence for VulkanFence {
                 .map_err(vk_error)
         }
     }
-
-    unsafe fn reset(&self) -> Result<()> {
-        unsafe {
-            self.0
-                .context
-                .device
-                .reset_fences(std::slice::from_ref(&self.0.raw))
-                .map_err(vk_error)
-        }
-    }
 }
 
 impl Drop for FenceInner {
@@ -1178,32 +1167,5 @@ impl VulkanTimelineSemaphore {
 
     pub(crate) fn context(&self) -> &Arc<Context> {
         &self.0.context
-    }
-}
-
-unsafe impl NativeTimelineSemaphore for VulkanTimelineSemaphore {
-    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
-        let semaphores = [self.0.raw];
-        let values = [value];
-        let wait_info = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        unsafe {
-            self.0
-                .context
-                .device
-                .wait_semaphores(&wait_info, timeout_ns)
-                .map_err(vk_error)
-        }
-    }
-
-    unsafe fn value(&self) -> Result<u64> {
-        unsafe {
-            self.0
-                .context
-                .device
-                .get_semaphore_counter_value(self.0.raw)
-                .map_err(vk_error)
-        }
     }
 }

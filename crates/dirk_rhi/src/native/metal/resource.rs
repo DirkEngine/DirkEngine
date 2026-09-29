@@ -1,15 +1,13 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex};
 
 use crate::{
     BindGroupDesc, BindGroupLayoutDesc, BindingResource, BindingType, BufferDesc,
     GraphicsPipelineDesc, ImageAspects, ImageDesc, ImageDimension, ImageUsages, ImageViewDesc,
     ImageViewType, InvalidResourceKind as Ir, MemoryDomain, NativeBuffer, NativeFence,
-    NativeTimelineSemaphore, PipelineLayoutDesc, Result, SamplerDesc, ShaderDesc, ShaderSource,
-    ShaderStage,
+    PipelineLayoutDesc, Result, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage,
 };
 use metal::{
     CompileOptions, DepthStencilDescriptor, DepthStencilState, Function, MTLColorWriteMask,
@@ -114,6 +112,7 @@ pub struct MetalImage {
     pub(crate) format: crate::TextureFormat,
     pub(crate) mip_levels: u32,
     pub(crate) array_layers: u32,
+    drawable: bool,
 }
 
 impl std::fmt::Debug for MetalImage {
@@ -212,6 +211,7 @@ impl MetalImage {
             format: desc.format,
             mip_levels: desc.mip_levels,
             array_layers: desc.array_layers,
+            drawable: false,
         })
     }
 
@@ -226,6 +226,7 @@ impl MetalImage {
             format,
             mip_levels: 1,
             array_layers: 1,
+            drawable: true,
         }
     }
 }
@@ -235,6 +236,7 @@ pub struct MetalImageView {
     pub(crate) context: Arc<Context>,
     pub(crate) raw: Texture,
     pub(crate) aspects: ImageAspects,
+    drawable: bool,
 }
 
 impl std::fmt::Debug for MetalImageView {
@@ -329,6 +331,7 @@ impl MetalImageView {
             context: context.clone(),
             raw,
             aspects: desc.aspects,
+            drawable: false,
         })
     }
 
@@ -337,6 +340,7 @@ impl MetalImageView {
             context: context.clone(),
             raw,
             aspects: ImageAspects::COLOR,
+            drawable: true,
         }
     }
 }
@@ -429,6 +433,9 @@ impl MetalBindGroupLayout {
 }
 
 pub(crate) enum NativeBinding {
+    /// Metal binds buffers by offset only. The portable layer checks the bound
+    /// range against the buffer at creation and bind time; shader accesses
+    /// beyond it remain the caller's documented contract.
     Buffer {
         buffer: Borrowed<metal::BufferRef>,
         offset: u64,
@@ -702,55 +709,87 @@ impl MetalGraphicsPipeline {
 /// CPU-waitable completion of the actual native command buffers, including errors.
 pub struct MetalFence {
     pub(crate) context: Arc<Context>,
-    commands: parking_lot::Mutex<Vec<metal::CommandBuffer>>,
-    signaled: AtomicBool,
+    // Shared with completion handlers, which Metal runs on its own threads.
+    state: Arc<FenceState>,
 }
+
+struct FenceState {
+    progress: Mutex<FenceProgress>,
+    completed: Condvar,
+}
+
+struct FenceProgress {
+    pending: usize,
+    failed: bool,
+    signaled: bool,
+}
+
 impl MetalFence {
     pub(crate) fn create(context: &Arc<Context>, signaled: bool) -> Self {
         Self {
             context: context.clone(),
-            commands: parking_lot::Mutex::new(Vec::new()),
-            signaled: AtomicBool::new(signaled),
+            state: Arc::new(FenceState {
+                progress: Mutex::new(FenceProgress {
+                    pending: 0,
+                    failed: false,
+                    signaled,
+                }),
+                completed: Condvar::new(),
+            }),
         }
     }
+
+    /// Signals this fence once every command buffer completes. Call before commit.
     pub(crate) fn track(&self, commands: &[metal::CommandBuffer]) {
-        self.commands.lock().clone_from(&commands.to_vec());
+        *self.state.progress.lock() = FenceProgress {
+            pending: commands.len(),
+            failed: false,
+            signaled: commands.is_empty(),
+        };
+        for command in commands {
+            let state = self.state.clone();
+            let handler = block::ConcreteBlock::new(move |command: &metal::CommandBufferRef| {
+                let mut progress = state.progress.lock();
+                progress.failed |= command.status() == metal::MTLCommandBufferStatus::Error;
+                progress.pending = progress.pending.saturating_sub(1);
+                progress.signaled = progress.pending == 0;
+                state.completed.notify_all();
+            })
+            .copy();
+            command.add_completed_handler(&handler);
+        }
     }
 }
+
 unsafe impl NativeFence for MetalFence {
     unsafe fn wait(&self, timeout_ns: u64) -> Result<()> {
-        let started = Instant::now();
+        // `u64::MAX`, or a deadline past `Instant`'s range, waits indefinitely.
+        let deadline = (timeout_ns != u64::MAX)
+            .then(|| Instant::now().checked_add(Duration::from_nanos(timeout_ns)))
+            .flatten();
+        let mut progress = self.state.progress.lock();
         loop {
-            let commands = self.commands.lock();
-            if self.signaled.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            if commands
-                .iter()
-                .any(|command| command.status() == metal::MTLCommandBufferStatus::Error)
-            {
+            if progress.failed {
                 return Err(crate::Error::DeviceLost);
             }
-            if !commands.is_empty()
-                && commands
-                    .iter()
-                    .all(|command| command.status() == metal::MTLCommandBufferStatus::Completed)
-            {
-                self.signaled.store(true, Ordering::Release);
+            if progress.signaled {
                 return Ok(());
             }
-            if timeout_ns != u64::MAX && started.elapsed() >= Duration::from_nanos(timeout_ns) {
-                return Err(crate::Error::Timeout);
+            if let Some(deadline) = deadline {
+                if self
+                    .state
+                    .completed
+                    .wait_until(&mut progress, deadline)
+                    .timed_out()
+                    && !progress.signaled
+                    && !progress.failed
+                {
+                    return Err(crate::Error::Timeout);
+                }
+            } else {
+                self.state.completed.wait(&mut progress);
             }
-            drop(commands);
-            std::thread::yield_now();
         }
-    }
-    unsafe fn reset(&self) -> Result<()> {
-        unsafe { self.wait(0) }?;
-        self.commands.lock().clear();
-        self.signaled.store(false, Ordering::Release);
-        Ok(())
     }
 }
 
@@ -759,28 +798,6 @@ unsafe impl NativeFence for MetalFence {
 pub struct MetalTimelineSemaphore {
     pub(crate) context: Arc<Context>,
     pub(crate) event: SharedEvent,
-}
-
-unsafe impl NativeTimelineSemaphore for MetalTimelineSemaphore {
-    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
-        wait_event(&self.event, value, timeout_ns)
-    }
-
-    unsafe fn value(&self) -> Result<u64> {
-        Ok(self.event.signaled_value())
-    }
-}
-
-fn wait_event(event: &metal::SharedEventRef, value: u64, timeout_ns: u64) -> Result<()> {
-    let started = Instant::now();
-    let timeout = Duration::from_nanos(timeout_ns);
-    while event.signaled_value() < value {
-        if timeout_ns != u64::MAX && started.elapsed() >= timeout {
-            return Err(crate::Error::Timeout);
-        }
-        std::thread::yield_now();
-    }
-    Ok(())
 }
 
 pub(crate) fn require_context(expected: &Arc<Context>, actual: &Arc<Context>) -> Result<()> {
@@ -833,10 +850,25 @@ macro_rules! retire {
     };
 }
 retire!(MetalBuffer, raw, Buffer);
-retire!(MetalImage, raw, Texture);
-retire!(MetalImageView, raw, Texture);
 retire!(MetalSampler, raw, Sampler);
 retire!(MetalShader, function, Shader);
+// Command buffers retain the textures they reference, so drawable textures are
+// released when their frame ends. Deferring them for retirement cycles would keep
+// the layer's two or three drawables busy and starve `nextDrawable`.
+macro_rules! retire_texture {
+    ($ty:ty) => {
+        impl Drop for $ty {
+            fn drop(&mut self) {
+                if !self.drawable {
+                    self.context
+                        .retire(super::backend::Garbage::Texture(self.raw.clone()));
+                }
+            }
+        }
+    };
+}
+retire_texture!(MetalImage);
+retire_texture!(MetalImageView);
 impl Drop for MetalGraphicsPipeline {
     fn drop(&mut self) {
         self.context

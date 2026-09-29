@@ -709,6 +709,7 @@ dependencies = [
  "anyhow",
  "ash",
  "ash-window",
+ "block",
  "core-graphics-types 0.2.0",
  "gpu-allocator",
  "metal",

@@ -99,51 +99,6 @@ pub unsafe trait NativeFence: Send + Sync + 'static {
     /// The caller must uphold the native [`crate::Backend`] contract for this
     /// operation, including resource lifetime, valid state, and host synchronization.
     unsafe fn wait(&self, timeout_ns: u64) -> Result<()>;
-    /// Resets this signaled fence for reuse.
-    ///
-    /// # Synchronization
-    ///
-    /// Implementations must return
-    /// [`InvalidResourceKind::BadState`](crate::InvalidResourceKind::BadState)
-    /// if a signaling submission has not completed, and must serialize reset
-    /// against concurrent safe host operations.
-    ///
-    /// # Safety
-    /// The caller must uphold the native [`crate::Backend`] contract for this
-    /// operation, including resource lifetime, valid state, and host synchronization.
-    unsafe fn reset(&self) -> Result<()>;
-}
-
-/// Monotonically increasing GPU synchronization primitive.
-///
-/// # Safety
-/// Implementations must preserve native object lifetimes and obey the shared
-/// [`crate::Backend`] contract. Native operations are called with validated inputs.
-pub unsafe trait NativeTimelineSemaphore: Clone + Send + Sync + 'static {
-    /// Waits until this semaphore reaches `value` or `timeout_ns`
-    /// nanoseconds elapse.
-    ///
-    /// Returns `Ok(())` once the semaphore's payload is at least `value`,
-    /// including when it already exceeds it. Returns
-    /// [`Error::Timeout`](crate::Error::Timeout) when the timeout expires
-    /// first; the semaphore may still reach `value` afterwards.
-    ///
-    /// # Synchronization
-    ///
-    /// Implementations must serialize host operations where required by the
-    /// native backend. Cloned handles alias the same synchronization state and
-    /// therefore share that serialization.
-    ///
-    /// # Safety
-    /// The caller must uphold the native [`crate::Backend`] contract for this
-    /// operation, including resource lifetime, valid state, and host synchronization.
-    unsafe fn wait(&self, value: u64, timeout_ns: u64) -> Result<()>;
-    /// Returns this semaphore's current value.
-    ///
-    /// # Safety
-    /// The caller must uphold the native [`crate::Backend`] contract for this
-    /// operation, including resource lifetime, valid state, and host synchronization.
-    unsafe fn value(&self) -> Result<u64>;
 }
 
 /// One queue submission, including presentation and timeline dependencies.
@@ -207,7 +162,8 @@ pub trait Api: Sized + Send + Sync + 'static {
     type CommandBuffer: Send + 'static;
     /// Submission completion fence.
     type Fence: Send + Sync + 'static;
-    /// Timeline synchronization primitive.
+    /// Timeline synchronization primitive. Waits and signals are expressed
+    /// through [`Submission`]; the host observes completion through fences.
     type TimelineSemaphore: Send + Sync + 'static;
     /// Presentation surface.
     /// Implementations must retain the [`crate::SurfaceTarget`] supplied at
@@ -231,7 +187,7 @@ pub unsafe trait Backend:
         Buffer: NativeBuffer,
         CommandBuffer: NativeCommandBuffer<Self>,
         Fence: NativeFence,
-        TimelineSemaphore: NativeTimelineSemaphore,
+        TimelineSemaphore: Clone,
         Swapchain: NativeSwapchain<Self>,
         SurfaceFrame: NativeSurfaceFrame<Self>,
     >
