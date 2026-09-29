@@ -361,6 +361,16 @@ impl AttachmentInfo {
     }
 
     #[must_use]
+    /// Clears a transient color attachment and discards its multisampled contents after resolve.
+    pub fn clear_discard_color(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self {
+            clear: Some(AttachmentClear::Color(Color { r, g, b, a })),
+            load: false,
+            store: StoreOp::DontCare,
+        }
+    }
+
+    #[must_use]
     /// Preserves and stores existing attachment contents.
     pub fn load_store() -> Self {
         Self {
