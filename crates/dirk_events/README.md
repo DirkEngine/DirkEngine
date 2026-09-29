@@ -33,10 +33,9 @@ let mut consumer   = mgr.subscribe::<PlayerScored>();
 // 4. Queue an event from anywhere that holds the dispatcher.
 dispatcher.dispatch(PlayerScored { points: 42 });
 
-// 5. Read events on the consumer side.
-for event in consumer.consume_all() {
-    println!("score update: {}", event.debug()); // "player scored 42 points"
-}
+// 5. Wait for the event; routing runs on a worker thread.
+let event = consumer.consume_blocking().expect("event should arrive");
+println!("score update: {}", event.debug()); // "player scored 42 points"
 ```
 
 ## Lifecycle & Delivery Guarantees
@@ -60,12 +59,23 @@ for event in consumer.consume_all() {
   independent clone of each event.
 * **Type-isolated** — consumers only receive events of the exact type they
   subscribed to; other event types are never delivered to them.
+* **Ordering** — all dispatchers of one event type share a routing queue, so
+  every consumer sees that type's events in dispatch order.
 * **Dropped-consumer pruning** — if a [`Consumer`] is dropped, its entry is
-  silently removed on the next routing attempt; no panic, no leak.
+  removed immediately.
+* **Subscription timing** — a consumer receives exactly the events dispatched
+  after it subscribes, even if an older event is still waiting to be routed.
+* **Producer independence** — dispatchers can come and go freely. A consumer
+  stays subscribed while no dispatcher exists and receives events from
+  dispatchers registered later.
+* **Shutdown** — when the last [`EventManager`] clone is dropped, consumers
+  receive any queued events and then `consume` and `consume_blocking` return
+  `None`, so threads blocked on a consumer can exit. Dispatchers and consumers
+  do not keep the manager alive.
 
 ## Using the `#[derive(Event)]` Macro
 
-The [`macros::Event`] derive macro implements the [`Event`] trait for you and
+The [`Event`] derive macro implements the [`Event`] trait for you and
 lets you customise the string returned by [`Event::debug`] via an optional
 `#[event("…")]` attribute.
 
@@ -147,7 +157,7 @@ assert_eq!(Position { x: 5, y: 99, z: 0 }.debug(), "x only: 5");
 ## Sharing the Manager Across Systems
 
 [`EventManager`] is cheaply cloneable — every clone shares the **same**
-underlying state via `Arc<Mutex<…>>`. Pass it by value (or clone it freely)
+underlying state via an `Arc`. Pass it by value (or clone it freely)
 into as many systems as you like:
 
 ```rust
@@ -182,15 +192,16 @@ let mut consumer = mgr.subscribe::<DamageEvent>();
 d1.dispatch(DamageEvent(10));
 d2.dispatch(DamageEvent(25));
 
-# std::thread::sleep(std::time::Duration::from_millis(10));
-let total: u32 = consumer.consume_all().map(|e| e.0).sum();
+let total: u32 = (0..2)
+    .map(|_| consumer.consume_blocking().expect("event should arrive").0)
+    .sum();
 assert_eq!(total, 35);
 ```
 
 ## Cloning Dispatchers and Consumers
 
-Cloning a [`Dispatcher`] registers a **new, independent producer** with the
-same manager. Cloning a [`Consumer`] creates a **fresh, independent
+Cloning a [`Dispatcher`] is cheap and yields another producer for the same
+routing queue. Cloning a [`Consumer`] creates a **fresh, independent
 subscription** — it does not share the receiver of the original.
 
 ## Thread Safety
@@ -215,6 +226,6 @@ thread::spawn(move || {
     dispatcher.dispatch(WorkDone(2));
 }).join().unwrap();
 
-# std::thread::sleep(std::time::Duration::from_millis(10));
-assert_eq!(consumer.consume_all().count(), 2);
+assert_eq!(consumer.consume_blocking().expect("first event").0, 1);
+assert_eq!(consumer.consume_blocking().expect("second event").0, 2);
 ```
