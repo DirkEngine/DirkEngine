@@ -8,9 +8,12 @@ Metal on Apple platforms, Vulkan elsewhere.
 
 Two frame slots wait for completion before GPU buffer preparation. Resource drops
 enter the RHI retirement queue, normally collected after three completed cycles.
-Asset uploads are batched on the transfer queue and acquired on graphics. Asset
-mipmaps use CPU sRGB filtering for consistent backend behavior. Editor rendering
-uses the same RHI and graph, retaining pending texture updates while minimized.
+Asset uploads are batched on the transfer queue and acquired on graphics. Texture
+mipmaps are blitted on the graphics queue in linear light when the device supports
+filtered blits of the texture format; otherwise, as on Metal, they are filtered on
+the CPU. Viewports are only rendered while a window that shows them has acquired
+an image. Editor rendering uses the same RHI and graph, retaining pending texture
+updates while minimized.
 
 Register `RendererPlugin` with `EngineBuilder`; it depends on `PlatformPlugin` and
 `AssetsPlugin`. Rust GPU shaders produce SPIR-V and, on Apple targets, translated
@@ -19,8 +22,8 @@ deferred. See the [rendering contract](../../docs/rhi/runtime-contract.md).
 
 ## Output colors
 
-Scene shaders produce linear colors. Viewport images preserve that meaning when
-sampled, using hardware decoding for sRGB image formats. Window creation prefers
+Scene shaders produce linear colors. Viewport images use an sRGB format
+independent of the window surface and preserve that meaning when sampled. Window creation prefers
 sRGB attachments. Standalone presentation samples the viewport and encodes exactly
 once: the attachment performs the conversion for sRGB formats, and a fragment
 shader performs it for UNORM formats. Editor output uses the same sRGB transfer
