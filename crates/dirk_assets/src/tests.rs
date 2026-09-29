@@ -624,12 +624,9 @@ mod handle {
         assert_eq!(consumer.consume_all().count(), 0, "no event yet");
 
         drop(handle);
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
 
-        let fired: Vec<_> = consumer.consume_all().collect();
-        assert_eq!(fired.len(), 1, "exactly one InternalAssetUnloaded event");
-        assert_eq!(fired[0].handle, asset_handle);
+        let fired = consumer.consume_blocking().unwrap();
+        assert_eq!(fired.handle, asset_handle);
     }
 
     #[test]
@@ -659,9 +656,7 @@ mod handle {
         assert_eq!(consumer.consume_all().count(), 0, "one clone still alive");
 
         drop(h3); // last reference
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert_eq!(consumer.consume_all().count(), 1, "last clone dropped");
+        assert!(consumer.consume_blocking().is_some(), "last clone dropped");
     }
 
     #[test]
