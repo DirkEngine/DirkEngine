@@ -35,8 +35,8 @@ impl Window {
         let swapchain = rhi.create_swapchain(&SwapchainDesc {
             label: "renderer window",
             surface: &surface,
-            width: NonZeroU32::new(size.width.max(1)).expect("clamped"),
-            height: NonZeroU32::new(size.height.max(1)).expect("clamped"),
+            width: NonZeroU32::new(size.width).unwrap_or(NonZeroU32::MIN),
+            height: NonZeroU32::new(size.height).unwrap_or(NonZeroU32::MIN),
             usage: dirk_rhi::ImageUsages::COLOR_ATTACHMENT
                 | dirk_rhi::ImageUsages::COPY_DST
                 | dirk_rhi::ImageUsages::PRESENT,

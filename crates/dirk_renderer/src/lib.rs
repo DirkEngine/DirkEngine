@@ -692,14 +692,9 @@ impl Renderer {
     }
 
     fn acquire_presentation_targets(&mut self) -> Result<Vec<PresentationTarget>> {
-        let window_ids = self.windows.keys().copied().collect::<Vec<_>>();
         let mut targets = Vec::new();
 
-        for window_id in window_ids {
-            let window = self
-                .windows
-                .get_mut(&window_id)
-                .expect("window keys should come from the window map");
+        for (&window_id, window) in &mut self.windows {
             if let Some(image) = window.next_image(&self.rhi)? {
                 targets.push(PresentationTarget {
                     window: window_id,
