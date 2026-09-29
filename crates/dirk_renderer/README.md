@@ -8,14 +8,15 @@ Metal on Apple platforms, Vulkan elsewhere.
 
 Model loading uploads each glTF mesh once in its original coordinates. Scene
 selection, node transforms, and repeated node instances are not applied; entity
-transforms provide world placement. Triangle primitives, base-color textures with
-the default repeat/trilinear sampler and UV set 0, base-color factors, and vertex
-colors are supported. Missing indices are generated; missing normals split shared
+transforms provide world placement. Triangle lists, strips, and fans, base-color
+textures with their glTF sampler and UV set, base-color factors, and vertex colors
+are supported. Missing indices are generated; missing normals split shared
 vertices to preserve flat shading. Materials retain opaque, back-face-culled
 rendering even when glTF requests alpha blending or double-sided rendering.
-Other topology and custom base-color texture coordinates or sampler settings
-return a load error. Base-color images in 8- or 16-bit integer formats are converted
-to RGBA8; float images are unsupported.
+Base-color images in 8- or 16-bit integer formats are converted to RGBA8.
+Unsupported content never stops the renderer: point and line primitives and
+malformed primitives are skipped, float images are replaced by a white texture,
+each with a warning, and models that still fail to load are logged and skipped.
 
 Two frame slots wait for completion before GPU buffer preparation. Resource drops
 enter the RHI retirement queue, normally collected after three completed cycles.

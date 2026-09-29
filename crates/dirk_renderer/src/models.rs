@@ -27,19 +27,11 @@ use crate::{
             BindingLayout, DescriptorSet,
             sets::{MaterialSet, ObjectSet, SceneSet},
         },
-        image::Image,
+        image::{Image, TextureSampling},
         upload::MipGeneration,
     },
     utils::Vertex,
 };
-
-macro_rules! model_ensure {
-    ($condition:expr, $($message:tt)*) => {
-        if !$condition {
-            return Err(anyhow::anyhow!($($message)*).into());
-        }
-    };
-}
 
 struct Handle<T> {
     key: slotmap::DefaultKey,
@@ -89,16 +81,17 @@ impl<T> Deref for Handle<T> {
     }
 }
 
-pub struct Texture {
-    pub image: Image,
-    pub sampler: Sampler,
-}
-
 struct Primitive {
     pub vertex_buffer: VertexBuffer<Vertex>,
     pub index_buffer: dirk_rhi::Buffer,
     pub index_count: u32,
     pub material_handle: Option<Handle<Material>>,
+}
+
+/// Triangle-list geometry read from a glTF primitive.
+struct PrimitiveData {
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
 }
 
 struct Mesh {
@@ -107,24 +100,33 @@ struct Mesh {
 
 struct Material {
     pub set: DescriptorSet<MaterialSet>,
+    /// Referenced by `set`; kept alive as long as the material.
+    _sampler: Sampler,
 }
 
 struct Model {
     pub meshes: Vec<Handle<Mesh>>,
     pub materials: Vec<Handle<Material>>,
-    pub textures: Vec<Handle<Texture>>,
+    pub textures: Vec<Handle<Image>>,
     generation: dirk_assets::AssetGeneration,
 }
 
+/// GPU resources created for one glTF model before it is registered.
+#[derive(Default)]
+struct ModelParts {
+    meshes: Vec<Handle<Mesh>>,
+    materials: Vec<Handle<Material>>,
+    textures: Vec<Handle<Image>>,
+}
+
 pub struct ModelRegistry {
-    textures: slotmap::SlotMap<slotmap::DefaultKey, Texture>,
+    textures: slotmap::SlotMap<slotmap::DefaultKey, Image>,
     meshes: slotmap::SlotMap<slotmap::DefaultKey, Mesh>,
     materials: slotmap::SlotMap<slotmap::DefaultKey, Material>,
     models: HashMap<dirk_assets::AssetHandle, Model>,
 
     fallback_material: Material,
-    #[allow(unused)]
-    fallback_texture: Texture,
+    fallback_texture: Image,
     material_alloc: BindingLayout<MaterialSet>,
 
     asset_load_consumer: dirk_events::Consumer<::dirk_assets::AssetLoaded<::dirk_assets::Model>>,
@@ -162,15 +164,27 @@ impl ModelRegistry {
             asset_unload_consumer: events.subscribe(),
         })
     }
+
+    /// Loads and unloads models announced by the asset registry.
+    ///
+    /// Models that cannot be loaded are logged and skipped so that one bad
+    /// asset does not stop the renderer; a previously loaded generation of the
+    /// same asset stays in use.
     pub fn tick(
         &mut self,
         device: &Rhi,
         uploads: &mut dirk_render_utils::upload::UploadBatch,
         mips: &mut MipGeneration,
-    ) -> Result<()> {
+    ) {
         let events = self.asset_load_consumer.consume_all().collect::<Vec<_>>();
         for event in events {
-            self.load_model(device, uploads, mips, &event.handle)?;
+            if let Err(error) = self.load_model(device, uploads, mips, &event.handle) {
+                tracing::error!(
+                    model = %event.handle.handle(),
+                    %error,
+                    "skipping glTF model that could not be loaded"
+                );
+            }
         }
 
         let events = self.asset_unload_consumer.consume_all().collect::<Vec<_>>();
@@ -183,7 +197,6 @@ impl ModelRegistry {
                 self.unload_model(&event.handle);
             }
         }
-        Ok(())
     }
     pub unsafe fn render_model(
         &self,
@@ -227,7 +240,7 @@ impl ModelRegistry {
         uploads: &mut dirk_render_utils::upload::UploadBatch,
         mips: &mut MipGeneration,
         material_alloc: &mut BindingLayout<MaterialSet>,
-    ) -> Result<(Material, Texture)> {
+    ) -> Result<(Material, Image)> {
         let white = gltf::image::Data {
             pixels: vec![255, 255, 255, 255],
             format: gltf::image::Format::R8G8B8A8,
@@ -235,10 +248,16 @@ impl ModelRegistry {
             height: 1,
         };
         let texture = Image::upload_texture(device, uploads, mips, &white)?;
-        let set =
-            material_alloc.sampled_image(device, 0, texture.image.rhi_view(), &texture.sampler)?;
+        let sampler = texture.create_sampler(device, TextureSampling::default())?;
+        let set = material_alloc.sampled_image(device, 0, texture.rhi_view(), &sampler)?;
 
-        Ok((Material { set }, texture))
+        Ok((
+            Material {
+                set,
+                _sampler: sampler,
+            },
+            texture,
+        ))
     }
 
     fn load_model(
@@ -248,13 +267,46 @@ impl ModelRegistry {
         mips: &mut MipGeneration,
         handle: &dirk_assets::Handle<dirk_assets::Model>,
     ) -> Result<()> {
+        let model = handle.get()?;
+        let asset_handle = handle.handle();
+
+        let mut parts = ModelParts::default();
+        if let Err(error) = self.create_model_parts(device, uploads, mips, &model, &mut parts) {
+            self.remove_model_parts(&parts);
+            return Err(error);
+        }
+
+        self.unload_model(&asset_handle);
+        self.models.insert(
+            asset_handle,
+            Model {
+                meshes: parts.meshes,
+                materials: parts.materials,
+                textures: parts.textures,
+                generation: handle.generation(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Uploads the renderable parts of a glTF model into `parts`.
+    ///
+    /// Unsupported images fall back to a white texture and unsupported
+    /// primitives are skipped, each with a warning. Errors leave the parts
+    /// created so far in `parts` for the caller to remove.
+    fn create_model_parts(
+        &mut self,
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
+        mips: &mut MipGeneration,
+        model: &dirk_assets::Model,
+        parts: &mut ModelParts,
+    ) -> Result<()> {
         let dirk_assets::Model {
             gltf,
             buffers,
             images,
-        } = handle.get()?;
-        let asset_handle = handle.handle();
-
+        } = model;
         // Normal, metallic/roughness and emissive images are not rendered by this
         // pipeline. Upload only images referenced as material base colors.
         let base_color_images = gltf
@@ -262,149 +314,166 @@ impl ModelRegistry {
             .filter_map(|mat| mat.pbr_metallic_roughness().base_color_texture())
             .map(|info| info.texture().source().index())
             .collect::<HashSet<_>>();
-        if let Some(&index) = base_color_images
-            .iter()
-            .find(|&&index| index >= images.len())
-        {
-            return Err(Error::TextureIndexOutOfRange(index));
-        }
         let mut texture_handles = vec![None; images.len()];
         for index in base_color_images {
             let image = images
                 .get(index)
                 .ok_or(Error::TextureIndexOutOfRange(index))?;
             match Image::upload_texture(device, uploads, mips, image) {
-                Ok(tex) => texture_handles[index] = Some(Handle::new(self.textures.insert(tex))),
-                Err(error) => {
-                    self.remove_model_parts(
-                        &[],
-                        &[],
-                        &texture_handles
-                            .iter()
-                            .flatten()
-                            .copied()
-                            .collect::<Vec<_>>(),
-                    );
-                    return Err(error);
+                Ok(texture) => {
+                    let handle = Handle::new(self.textures.insert(texture));
+                    parts.textures.push(handle);
+                    texture_handles[index] = Some(handle);
                 }
+                Err(error) => tracing::warn!(
+                    image = index,
+                    %error,
+                    "using a white texture for an unsupported glTF base-color image"
+                ),
             }
         }
 
-        let mut material_handles = Vec::new();
-        let mut mesh_handles = Vec::new();
+        self.create_materials(device, gltf, &texture_handles, parts)?;
 
-        let result = (|| -> Result<()> {
-            material_handles =
-                self.create_materials(device, gltf.materials().collect(), &texture_handles)?;
-
-            // World placement is supplied by entity transforms; mesh coordinates
-            // stay in the units used by existing worlds and movement speeds.
-            for mesh in gltf.meshes() {
-                let primitives = mesh
-                    .primitives()
-                    .map(|prim| {
-                        Self::upload_primitive(device, uploads, &prim, &buffers, &material_handles)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                mesh_handles.push(Handle::new(self.meshes.insert(Mesh { primitives })));
+        // World placement is supplied by entity transforms; mesh coordinates
+        // stay in the units used by existing worlds and movement speeds.
+        for mesh in gltf.meshes() {
+            let mut primitives = Vec::new();
+            for primitive in mesh.primitives() {
+                let data = match Self::read_primitive(&primitive, buffers) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        tracing::warn!(
+                            mesh = mesh.index(),
+                            primitive = primitive.index(),
+                            %error,
+                            "skipping unsupported glTF primitive"
+                        );
+                        continue;
+                    }
+                };
+                let material_handle = primitive
+                    .material()
+                    .index()
+                    .and_then(|index| parts.materials.get(index).copied());
+                primitives.push(Self::upload_primitive(
+                    device,
+                    uploads,
+                    &data,
+                    material_handle,
+                )?);
             }
-
-            self.unload_model(&asset_handle);
-            self.models.insert(
-                asset_handle,
-                Model {
-                    meshes: mesh_handles.clone(),
-                    materials: material_handles.clone(),
-                    textures: texture_handles.iter().flatten().copied().collect(),
-                    generation: handle.generation(),
-                },
-            );
-            Ok(())
-        })();
-
-        if result.is_err() {
-            self.remove_model_parts(
-                &mesh_handles,
-                &material_handles,
-                &texture_handles
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .collect::<Vec<_>>(),
-            );
+            parts
+                .meshes
+                .push(Handle::new(self.meshes.insert(Mesh { primitives })));
         }
-
-        result
+        Ok(())
     }
 
+    /// Creates one material per glTF material, in document order.
     fn create_materials(
         &mut self,
         device: &Rhi,
-        materials: Vec<gltf::Material>,
-        texture_refs: &[Option<Handle<Texture>>],
-    ) -> Result<Vec<Handle<Material>>> {
-        let mut pending = Vec::with_capacity(materials.len());
-
-        for mat in materials {
-            let base_color = mat
-                .pbr_metallic_roughness()
-                .base_color_texture()
-                .map(|texture| {
-                    let tex_index = texture.texture().source().index();
-                    texture_refs
-                        .get(tex_index)
-                        .copied()
-                        .flatten()
-                        .ok_or(Error::TextureIndexOutOfRange(tex_index))
-                })
-                .transpose()?;
-
-            let texture =
-                base_color.map_or(&self.fallback_texture, |handle| &self.textures[*handle]);
-            let set = self.material_alloc.sampled_image(
-                device,
-                0,
-                texture.image.rhi_view(),
-                &texture.sampler,
-            )?;
-            pending.push(set);
-        }
-
-        Ok(pending
-            .into_iter()
-            .map(|set| Handle::new(self.materials.insert(Material { set })))
-            .collect())
-    }
-
-    fn validate_primitive(primitive: &gltf::Primitive) -> Result<()> {
-        model_ensure!(
-            primitive.mode() == gltf::mesh::Mode::Triangles,
-            "glTF primitive {} uses unsupported topology {:?}",
-            primitive.index(),
-            primitive.mode()
-        );
-        // This pipeline renders all materials as opaque and back-face culled,
-        // matching the model rendering behavior before the RHI migration.
-        let material = primitive.material();
-        if let Some(texture) = material.pbr_metallic_roughness().base_color_texture() {
-            let sampler = texture.texture().sampler();
-            model_ensure!(
-                texture.tex_coord() == 0
-                    && sampler.wrap_s() == gltf::texture::WrappingMode::Repeat
-                    && sampler.wrap_t() == gltf::texture::WrappingMode::Repeat
-                    && matches!(
-                        sampler.mag_filter(),
-                        None | Some(gltf::texture::MagFilter::Linear)
-                    )
-                    && matches!(
-                        sampler.min_filter(),
-                        None | Some(gltf::texture::MinFilter::LinearMipmapLinear)
-                    ),
-                "glTF primitive {} uses unsupported base-color texture coordinates or sampler",
-                primitive.index()
-            );
+        gltf: &gltf::Document,
+        texture_refs: &[Option<Handle<Image>>],
+        parts: &mut ModelParts,
+    ) -> Result<()> {
+        for mat in gltf.materials() {
+            let base_color = mat.pbr_metallic_roughness().base_color_texture();
+            let texture = base_color
+                .as_ref()
+                .and_then(|info| texture_refs.get(info.texture().source().index()))
+                .copied()
+                .flatten()
+                .map_or(&self.fallback_texture, |handle| &self.textures[*handle]);
+            let sampling = base_color.map_or_else(TextureSampling::default, |info| {
+                Self::texture_sampling(&info.texture().sampler())
+            });
+            let sampler = texture.create_sampler(device, sampling)?;
+            let set = self
+                .material_alloc
+                .sampled_image(device, 0, texture.rhi_view(), &sampler)?;
+            parts
+                .materials
+                .push(Handle::new(self.materials.insert(Material {
+                    set,
+                    _sampler: sampler,
+                })));
         }
         Ok(())
+    }
+
+    /// Maps a glTF sampler to the renderer's texture sampling state.
+    fn texture_sampling(sampler: &gltf::texture::Sampler) -> TextureSampling {
+        use dirk_rhi::{AddressMode, FilterMode};
+        use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+
+        let address = |mode| match mode {
+            WrappingMode::ClampToEdge => AddressMode::ClampToEdge,
+            WrappingMode::MirroredRepeat => AddressMode::MirrorRepeat,
+            WrappingMode::Repeat => AddressMode::Repeat,
+        };
+        let (minification, mipmapping) = match sampler.min_filter() {
+            Some(MinFilter::Nearest) => (FilterMode::Nearest, None),
+            Some(MinFilter::Linear) => (FilterMode::Linear, None),
+            Some(MinFilter::NearestMipmapNearest) => {
+                (FilterMode::Nearest, Some(FilterMode::Nearest))
+            }
+            Some(MinFilter::LinearMipmapNearest) => (FilterMode::Linear, Some(FilterMode::Nearest)),
+            Some(MinFilter::NearestMipmapLinear) => (FilterMode::Nearest, Some(FilterMode::Linear)),
+            Some(MinFilter::LinearMipmapLinear) | None => {
+                (FilterMode::Linear, Some(FilterMode::Linear))
+            }
+        };
+        TextureSampling {
+            mag_filter: match sampler.mag_filter() {
+                Some(MagFilter::Nearest) => FilterMode::Nearest,
+                Some(MagFilter::Linear) | None => FilterMode::Linear,
+            },
+            min_filter: minification,
+            mip_filter: mipmapping,
+            address_u: address(sampler.wrap_s()),
+            address_v: address(sampler.wrap_t()),
+        }
+    }
+
+    /// Converts glTF triangle topologies to a triangle list.
+    fn triangle_list(mode: gltf::mesh::Mode, indices: &[u32]) -> anyhow::Result<Vec<u32>> {
+        use gltf::mesh::Mode;
+        let triangles = match mode {
+            Mode::Triangles => {
+                anyhow::ensure!(
+                    indices.len().is_multiple_of(3),
+                    "triangle list has {} indices, which is not a multiple of three",
+                    indices.len()
+                );
+                indices.to_vec()
+            }
+            // glTF orders odd strip triangles as (i, i + 2, i + 1) to keep their winding.
+            Mode::TriangleStrip => indices
+                .windows(3)
+                .enumerate()
+                .flat_map(|(i, v)| {
+                    if i % 2 == 0 {
+                        [v[0], v[1], v[2]]
+                    } else {
+                        [v[0], v[2], v[1]]
+                    }
+                })
+                .collect(),
+            Mode::TriangleFan => match indices.split_first() {
+                Some((&center, rest)) => rest
+                    .windows(2)
+                    .flat_map(|edge| [edge[0], edge[1], center])
+                    .collect(),
+                None => Vec::new(),
+            },
+            Mode::Points | Mode::Lines | Mode::LineLoop | Mode::LineStrip => {
+                anyhow::bail!("unsupported topology {mode:?}")
+            }
+        };
+        anyhow::ensure!(!triangles.is_empty(), "primitive has no triangles");
+        Ok(triangles)
     }
 
     /// glTF requires flat normals when NORMAL is absent. Split shared vertices
@@ -431,16 +500,21 @@ impl ModelRegistry {
         Ok(expanded)
     }
 
-    fn upload_primitive(
-        device: &Rhi,
-        uploads: &mut dirk_render_utils::upload::UploadBatch,
+    /// Reads a primitive's vertices and triangle-list indices.
+    ///
+    /// All materials render as opaque and back-face culled, matching the
+    /// model rendering behavior before the RHI migration.
+    fn read_primitive(
         primitive: &gltf::Primitive,
         buffers: &[gltf::buffer::Data],
-        mat_refs: &[Handle<Material>],
-    ) -> Result<Primitive> {
-        Self::validate_primitive(primitive)?;
+    ) -> anyhow::Result<PrimitiveData> {
         let material = primitive.material();
-        let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
+        let reader =
+            primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+        let tex_coord_set = material
+            .pbr_metallic_roughness()
+            .base_color_texture()
+            .map_or(0, |info| info.tex_coord());
 
         let positions: Vec<_> = reader
             .read_positions()
@@ -451,32 +525,29 @@ impl ModelRegistry {
             .map(Iterator::collect)
             .unwrap_or_default();
         let texcoords: Vec<_> = reader
-            .read_tex_coords(0)
+            .read_tex_coords(tex_coord_set)
             .map(|iter| iter.into_f32().collect())
             .unwrap_or_default();
         let colors: Vec<[f32; 4]> = reader
             .read_colors(0)
             .map(|iter| iter.into_rgba_f32().collect())
             .unwrap_or_default();
-        model_ensure!(!positions.is_empty(), "glTF primitive has no positions");
+        anyhow::ensure!(!positions.is_empty(), "primitive has no positions");
+        anyhow::ensure!(
+            normals.is_empty() || normals.len() == positions.len(),
+            "primitive normal count does not match its positions"
+        );
         let vertex_count = u32::try_from(positions.len())
-            .context("glTF primitive has too many vertices for indexed drawing")?;
-        let mut indices: Vec<_> = reader.read_indices().map_or_else(
+            .context("primitive has too many vertices for indexed drawing")?;
+        let vertex_indices: Vec<_> = reader.read_indices().map_or_else(
             || (0..vertex_count).collect(),
             |iter| iter.into_u32().collect(),
         );
-        model_ensure!(
-            !indices.is_empty()
-                && indices.len().is_multiple_of(3)
-                && indices.iter().all(|&i| i < vertex_count),
-            "glTF triangle primitive has empty, incomplete, or out-of-range indices"
+        let mut indices = Self::triangle_list(primitive.mode(), &vertex_indices)?;
+        anyhow::ensure!(
+            indices.iter().all(|&index| index < vertex_count),
+            "primitive has out-of-range indices"
         );
-        model_ensure!(
-            normals.is_empty() || normals.len() == positions.len(),
-            "glTF primitive normal count does not match its positions"
-        );
-        let index_count = u32::try_from(indices.len())
-            .context("glTF primitive has too many indices for indexed drawing")?;
         let factor = material.pbr_metallic_roughness().base_color_factor();
 
         let mut vertices: Vec<Vertex> = positions
@@ -495,12 +566,25 @@ impl ModelRegistry {
 
         if normals.is_empty() {
             vertices = Self::flat_vertices(&vertices, &indices)?;
+            let index_count = u32::try_from(vertices.len())
+                .context("primitive has too many indices for indexed drawing")?;
             indices = (0..index_count).collect();
         }
-        let vertex_buffer = VertexBuffer::upload(device, uploads, &vertices)?;
+        Ok(PrimitiveData { vertices, indices })
+    }
+
+    fn upload_primitive(
+        device: &Rhi,
+        uploads: &mut dirk_render_utils::upload::UploadBatch,
+        data: &PrimitiveData,
+        material_handle: Option<Handle<Material>>,
+    ) -> Result<Primitive> {
+        let index_count = u32::try_from(data.indices.len())
+            .context("glTF primitive has too many indices for indexed drawing")?;
+        let vertex_buffer = VertexBuffer::upload(device, uploads, &data.vertices)?;
         let index_buffer = uploads.buffer(
             device,
-            bytemuck::cast_slice(&indices),
+            bytemuck::cast_slice(&data.indices),
             dirk_rhi::BufferUsages::INDEX,
             dirk_rhi::ResourceAccess::Index,
         )?;
@@ -509,39 +593,28 @@ impl ModelRegistry {
             vertex_buffer,
             index_buffer,
             index_count,
-            material_handle: primitive.material().index().map(|idx| mat_refs[idx]),
+            material_handle,
         })
     }
 
     fn unload_model(&mut self, handle: &dirk_assets::AssetHandle) {
-        let Some(model) = self.models.remove(handle) else {
-            return;
-        };
-
-        for mesh_handle in model.meshes {
-            self.meshes.remove(*mesh_handle);
-        }
-        for material_handle in model.materials {
-            self.materials.remove(*material_handle);
-        }
-        for texture_handle in model.textures {
-            self.textures.remove(*texture_handle);
+        if let Some(model) = self.models.remove(handle) {
+            self.remove_model_parts(&ModelParts {
+                meshes: model.meshes,
+                materials: model.materials,
+                textures: model.textures,
+            });
         }
     }
 
-    fn remove_model_parts(
-        &mut self,
-        mesh_handles: &[Handle<Mesh>],
-        material_handles: &[Handle<Material>],
-        texture_handles: &[Handle<Texture>],
-    ) {
-        for mesh_handle in mesh_handles {
+    fn remove_model_parts(&mut self, parts: &ModelParts) {
+        for mesh_handle in &parts.meshes {
             self.meshes.remove(**mesh_handle);
         }
-        for material_handle in material_handles {
+        for material_handle in &parts.materials {
             self.materials.remove(**material_handle);
         }
-        for texture_handle in texture_handles {
+        for texture_handle in &parts.textures {
             self.textures.remove(**texture_handle);
         }
     }
@@ -560,7 +633,200 @@ impl Drop for ModelRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelRegistry, Vertex};
+    use super::{ModelParts, ModelRegistry, PrimitiveData, Vertex};
+    use crate::resources::{image::TextureSampling, upload::MipGeneration};
+    use dirk_rhi::{AddressMode, FilterMode};
+
+    fn fixture(name: &str) -> anyhow::Result<dirk_assets::Model> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let (gltf, buffers, images) = gltf::import(path)?;
+        Ok(dirk_assets::Model {
+            gltf,
+            images,
+            buffers,
+        })
+    }
+
+    /// Reads every primitive of the fixture's first mesh.
+    fn read_primitives<const N: usize>(
+        name: &str,
+    ) -> anyhow::Result<[anyhow::Result<PrimitiveData>; N]> {
+        let model = fixture(name)?;
+        let mesh = model
+            .gltf
+            .meshes()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{name} has no mesh"))?;
+        mesh.primitives()
+            .map(|primitive| ModelRegistry::read_primitive(&primitive, &model.buffers))
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|primitives: Vec<_>| {
+                anyhow::anyhow!("{name} has {} primitives, not {N}", primitives.len())
+            })
+    }
+
+    fn positions(data: &PrimitiveData) -> Vec<[f32; 3]> {
+        data.indices
+            .iter()
+            .map(|&index| data.vertices[usize::try_from(index).expect("small index")].position)
+            .collect()
+    }
+
+    fn faces_up(data: &PrimitiveData) -> bool {
+        data.vertices.iter().all(|vertex| {
+            (glam::Vec3::from_array(vertex.normal) - glam::Vec3::Z).length() < f32::EPSILON
+        })
+    }
+
+    #[test]
+    fn non_indexed_primitives_generate_indices() -> anyhow::Result<()> {
+        let [Ok(data)] = read_primitives("non_indexed.gltf")? else {
+            panic!("non-indexed primitive should load");
+        };
+        assert_eq!(data.indices, [0, 1, 2]);
+        assert_eq!(
+            positions(&data),
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        );
+        assert!(faces_up(&data));
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_byte_indices_are_widened() -> anyhow::Result<()> {
+        let [Ok(data)] = read_primitives("u8_indices.gltf")? else {
+            panic!("u8-indexed primitive should load");
+        };
+        assert_eq!(
+            positions(&data),
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_accessors_substitute_values() -> anyhow::Result<()> {
+        let [Ok(data)] = read_primitives("sparse.gltf")? else {
+            panic!("sparse primitive should load");
+        };
+        assert_eq!(
+            positions(&data),
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn triangle_topologies_load_and_others_are_skipped() -> anyhow::Result<()> {
+        let [Ok(list), Ok(strip), Ok(fan), Err(_lines), Err(_partial)] =
+            read_primitives("multi_primitive.gltf")?
+        else {
+            panic!("only the triangle primitives should load");
+        };
+        assert_eq!(list.indices.len(), 3);
+        for converted in [&strip, &fan] {
+            assert_eq!(converted.indices.len(), 6);
+            // Converted triangles keep the counter-clockwise winding of the quad.
+            assert!(faces_up(converted));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn custom_samplers_and_uv_sets_are_supported() -> anyhow::Result<()> {
+        let model = fixture("unsupported_sampler.gltf")?;
+        let texture = model
+            .gltf
+            .textures()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("fixture has no texture"))?;
+        assert_eq!(
+            ModelRegistry::texture_sampling(&texture.sampler()),
+            TextureSampling {
+                mag_filter: FilterMode::Nearest,
+                min_filter: FilterMode::Nearest,
+                mip_filter: Some(FilterMode::Nearest),
+                address_u: AddressMode::ClampToEdge,
+                address_v: AddressMode::MirrorRepeat,
+            }
+        );
+
+        let [Ok(data)] = read_primitives("unsupported_sampler.gltf")? else {
+            panic!("textured primitive should load");
+        };
+        let texcoords = data
+            .indices
+            .iter()
+            .map(|&index| data.vertices[usize::try_from(index).expect("small index")].texcoord)
+            .collect::<Vec<_>>();
+        assert_eq!(texcoords, [[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a native Vulkan or Metal device"]
+    fn fixture_models_upload_without_errors() -> anyhow::Result<()> {
+        let mut rhi = dirk_rhi::Rhi::new(&dirk_rhi::RhiCreateInfo {
+            engine_name: "DirkEngine",
+            engine_version: (0, 1, 0),
+            application_name: "model loading validation",
+            application_version: (0, 1, 0),
+            validation: true,
+            compatible_surface: None,
+        })?;
+        let events = dirk_events::EventManager::new(dirk_threads::WorkerPool::new("model test"));
+        let mut registry = ModelRegistry::new(&mut rhi, &events)?;
+        for (name, primitive_count) in [
+            ("non_indexed.gltf", 1),
+            ("u8_indices.gltf", 1),
+            ("sparse.gltf", 1),
+            ("multi_primitive.gltf", 3),
+            ("unsupported_sampler.gltf", 1),
+        ] {
+            let model = fixture(name)?;
+            let mut uploads = dirk_render_utils::upload::UploadBatch::new();
+            let mut mips = MipGeneration::new();
+            let mut parts = ModelParts::default();
+            registry.create_model_parts(&rhi, &mut uploads, &mut mips, &model, &mut parts)?;
+            let [mesh] = parts.meshes[..] else {
+                panic!("{name} should create one mesh");
+            };
+            assert_eq!(
+                registry.meshes[*mesh].primitives.len(),
+                primitive_count,
+                "{name}"
+            );
+            uploads.finish(&mut rhi)?;
+            if let Some(commands) = mips.finish()? {
+                // SAFETY: the recording only touches textures created above.
+                unsafe {
+                    rhi.queue::<dirk_rhi::Graphics>()
+                        .submit(vec![commands], &dirk_rhi::SubmitInfo::default())?
+                }
+                .wait(u64::MAX)?;
+            }
+            registry.remove_model_parts(&parts);
+            rhi.finish_cycle()?;
+        }
+        drop(registry);
+        rhi.wait_idle()?;
+        assert_eq!(
+            rhi.validation_error_count(),
+            0,
+            "native model validation errors"
+        );
+        Ok(())
+    }
 
     #[test]
     fn missing_normals_split_shared_vertices_and_preserve_attributes() {

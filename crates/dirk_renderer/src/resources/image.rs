@@ -2,18 +2,41 @@
 
 use anyhow::Context;
 use dirk_rhi::{
-    Extent3d, FilterMode, ImageDesc, ImageDimension, ImageUsages, SampleCount, SamplerDesc,
-    TextureFormat,
+    AddressMode, Extent3d, FilterMode, ImageDesc, ImageDimension, ImageUsages, SampleCount,
+    SamplerDesc, TextureFormat,
 };
 
 use crate::{
     Result,
-    models::Texture,
     resources::{
-        ImageView, Rhi, RhiImage,
+        ImageView, Rhi, RhiImage, Sampler,
         upload::{MipGeneration, RgbaMip},
     },
 };
+
+/// How a material samples its texture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureSampling {
+    pub mag_filter: FilterMode,
+    pub min_filter: FilterMode,
+    /// Filtering between mips, or `None` to sample only the base level.
+    pub mip_filter: Option<FilterMode>,
+    pub address_u: AddressMode,
+    pub address_v: AddressMode,
+}
+
+impl Default for TextureSampling {
+    /// Trilinear filtering with repeating coordinates, the glTF default.
+    fn default() -> Self {
+        Self {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: Some(FilterMode::Linear),
+            address_u: AddressMode::Repeat,
+            address_v: AddressMode::Repeat,
+        }
+    }
+}
 
 pub struct Image {
     inner: RhiImage,
@@ -55,6 +78,38 @@ impl Image {
         &self.view
     }
 
+    /// Creates a sampler for this texture.
+    pub fn create_sampler(&self, device: &Rhi, sampling: TextureSampling) -> Result<Sampler> {
+        let filters = [
+            sampling.mag_filter,
+            sampling.min_filter,
+            sampling.mip_filter.unwrap_or(FilterMode::Linear),
+        ];
+        // Renderer textures cannot approach the precision limit of an f32.
+        #[allow(clippy::cast_precision_loss)]
+        let lod_max = match sampling.mip_filter {
+            Some(_) => self.inner.description().mip_levels as f32,
+            None => 0.0,
+        };
+        Ok(device.create_sampler(&SamplerDesc {
+            label: "renderer texture sampler",
+            mag_filter: sampling.mag_filter,
+            min_filter: sampling.min_filter,
+            mip_filter: sampling.mip_filter.unwrap_or(FilterMode::Nearest),
+            address_u: sampling.address_u,
+            address_v: sampling.address_v,
+            address_w: AddressMode::Repeat,
+            // Anisotropy only refines fully linear filtering.
+            max_anisotropy: if filters.contains(&FilterMode::Nearest) {
+                1
+            } else {
+                device.capabilities().max_sampler_anisotropy
+            },
+            lod_min: 0.0,
+            lod_max,
+        })?)
+    }
+
     /// Creates a sampled sRGB texture with a full mip chain.
     ///
     /// Mips are blitted on the GPU through `mips` when the format supports
@@ -65,7 +120,7 @@ impl Image {
         uploads: &mut dirk_render_utils::upload::UploadBatch,
         mips: &mut MipGeneration,
         texture: &gltf::image::Data,
-    ) -> Result<Texture> {
+    ) -> Result<Self> {
         let pixels = Self::rgba8(texture)?;
         let format = TextureFormat::Rgba8Srgb;
         let mip_levels = Self::mip_levels(texture.width, texture.height);
@@ -105,21 +160,7 @@ impl Image {
             }
         }
 
-        let sampler = device.create_sampler(&SamplerDesc {
-            label: "renderer texture sampler",
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mip_filter: FilterMode::Linear,
-            address_u: dirk_rhi::AddressMode::Repeat,
-            address_v: dirk_rhi::AddressMode::Repeat,
-            address_w: dirk_rhi::AddressMode::Repeat,
-            max_anisotropy: device.capabilities().max_sampler_anisotropy,
-            lod_min: 0.0,
-            // Renderer textures cannot approach the precision limit of an f32.
-            #[allow(clippy::cast_precision_loss)]
-            lod_max: mip_levels as f32,
-        })?;
-        Ok(Texture { image, sampler })
+        Ok(image)
     }
 
     fn mip_levels(width: u32, height: u32) -> u32 {

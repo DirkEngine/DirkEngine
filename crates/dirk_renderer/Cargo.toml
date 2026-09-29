@@ -37,6 +37,9 @@ gltf.workspace = true
 slotmap.workspace = true
 egui = { workspace = true, optional = true }
 
+[dev-dependencies]
+dirk_threads.workspace = true
+
 [build-dependencies]
 dirk_rhi.workspace = true
 cargo-gpu-install.workspace = true

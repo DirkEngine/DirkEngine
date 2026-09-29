@@ -595,7 +595,7 @@ impl Renderer {
         self.rhi.collect_garbage()?;
         let mut uploads = dirk_render_utils::upload::UploadBatch::new();
         let mut mips = resources::upload::MipGeneration::new();
-        self.models.tick(&self.rhi, &mut uploads, &mut mips)?;
+        self.models.tick(&self.rhi, &mut uploads, &mut mips);
         let upload_submission = uploads.submit(&mut self.rhi)?;
         let mip_commands = mips.finish()?;
         self.scene_manager
