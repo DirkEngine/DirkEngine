@@ -41,6 +41,12 @@ impl Version {
         );
         Self(((major) << 22) | ((minor) << 12) | (patch))
     }
+    /// Creates a version, or returns `None` if a component does not fit the
+    /// storage limits documented on [`Version::new`].
+    fn checked_new(major: u32, minor: u32, patch: u32) -> Option<Self> {
+        (major < (1 << 10) && minor < (1 << 10) && patch < (1 << 12))
+            .then(|| Self::new(major, minor, patch))
+    }
     /// Returns the major number of the [`Version`]
     #[must_use]
     pub fn major(&self) -> u32 {
@@ -57,19 +63,25 @@ impl Version {
         self.0 & 0xfff
     }
     /// Increments major, resets minor and patch to 0.
+    ///
+    /// Returns `None` if the major version is already at its maximum (1023).
     #[must_use]
-    pub fn bump_major(self) -> Self {
-        Self::new(self.major() + 1, 0, 0)
+    pub fn bump_major(self) -> Option<Self> {
+        Self::checked_new(self.major() + 1, 0, 0)
     }
     /// Increments minor, resets patch to 0.
+    ///
+    /// Returns `None` if the minor version is already at its maximum (1023).
     #[must_use]
-    pub fn bump_minor(self) -> Self {
-        Self::new(self.major(), self.minor() + 1, 0)
+    pub fn bump_minor(self) -> Option<Self> {
+        Self::checked_new(self.major(), self.minor() + 1, 0)
     }
     /// Increments patch.
+    ///
+    /// Returns `None` if the patch version is already at its maximum (4095).
     #[must_use]
-    pub fn bump_patch(self) -> Self {
-        Self::new(self.major(), self.minor(), self.patch() + 1)
+    pub fn bump_patch(self) -> Option<Self> {
+        Self::checked_new(self.major(), self.minor(), self.patch() + 1)
     }
     /// Returns true if both versions share a major version and this version is
     /// at least as new as `required`. This is not `SemVer` compatibility.
@@ -155,10 +167,7 @@ impl FromStr for Version {
             .ok_or_else(err)?
             .parse::<u32>()
             .map_err(|_| err())?;
-        if major >= (1 << 10) || minor >= (1 << 10) || patch >= (1 << 12) {
-            return Err(err());
-        }
-        Ok(Self::new(major, minor, patch))
+        Self::checked_new(major, minor, patch).ok_or_else(err)
     }
 }
 
@@ -208,20 +217,37 @@ mod tests {
 
     #[test]
     fn test_bump_major_resets_minor_and_patch() {
-        let v = Version::new(1, 5, 3).bump_major();
-        assert_eq!((v.major(), v.minor(), v.patch()), (2, 0, 0));
+        assert_eq!(
+            Version::new(1, 5, 3).bump_major(),
+            Some(Version::new(2, 0, 0))
+        );
     }
 
     #[test]
     fn test_bump_minor_resets_patch() {
-        let v = Version::new(1, 5, 3).bump_minor();
-        assert_eq!((v.major(), v.minor(), v.patch()), (1, 6, 0));
+        assert_eq!(
+            Version::new(1, 5, 3).bump_minor(),
+            Some(Version::new(1, 6, 0))
+        );
     }
 
     #[test]
     fn test_bump_patch() {
-        let v = Version::new(1, 5, 3).bump_patch();
-        assert_eq!((v.major(), v.minor(), v.patch()), (1, 5, 4));
+        assert_eq!(
+            Version::new(1, 5, 3).bump_patch(),
+            Some(Version::new(1, 5, 4))
+        );
+    }
+
+    #[test]
+    fn test_bump_at_limit_returns_none() {
+        assert_eq!(Version::new(1023, 5, 3).bump_major(), None);
+        assert_eq!(Version::new(1, 1023, 3).bump_minor(), None);
+        assert_eq!(Version::new(1, 5, 4095).bump_patch(), None);
+        assert_eq!(
+            Version::new(1, 1023, 4095).bump_major(),
+            Some(Version::new(2, 0, 0))
+        );
     }
 
     // -- Ordering --
