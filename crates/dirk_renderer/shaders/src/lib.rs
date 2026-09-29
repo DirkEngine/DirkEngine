@@ -51,12 +51,8 @@ pub fn egui_vs(
     let position = in_position / frame.screen_size;
     *out_position = Vec4::new(2.0 * position.x - 1.0, 2.0 * position.y - 1.0, 0.0, 1.0);
     *frag_tex_coord = in_tex_coord;
-    *frag_color = Vec4::new(
-        Float::powf(in_color.x, 2.2),
-        Float::powf(in_color.y, 2.2),
-        Float::powf(in_color.z, 2.2),
-        in_color.w,
-    );
+    // egui vertex colors are sRGB encoded; blend them in linear light.
+    *frag_color = decode_srgb(in_color);
 }
 
 #[spirv(fragment)]
@@ -73,6 +69,23 @@ pub fn egui_fs(
     } else {
         encode_srgb(color)
     };
+}
+
+// Exact inverse of `encode_srgb`, so UI colors round-trip on every target.
+fn decode_srgb(color: Vec4) -> Vec4 {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            Float::powf((value + 0.055) / 1.055, 2.4)
+        }
+    }
+    Vec4::new(
+        channel(color.x),
+        channel(color.y),
+        channel(color.z),
+        color.w,
+    )
 }
 
 // Scene textures are sampled as linear colors. Encode once when the target does
