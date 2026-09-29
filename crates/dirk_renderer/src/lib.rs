@@ -192,6 +192,16 @@ struct PresentationTarget {
     image: SurfaceFrame,
 }
 
+/// Graphics work recorded for one frame, in submission order.
+struct FrameCommands {
+    /// Upload acquisitions and the transfer submission they wait for.
+    uploads: Option<(RecordedCommands, dirk_rhi::Completion)>,
+    /// Texture base-level uploads and mip blits.
+    mips: Option<RecordedCommands>,
+    viewports: Option<RecordedCommands>,
+    presentation: Option<RecordedCommands>,
+}
+
 struct ViewportRenderSubmission {
     command_buffer: RecordedCommands,
     rendered_players: Vec<PlayerId>,
@@ -548,8 +558,10 @@ impl Renderer {
 
         self.rhi.collect_garbage()?;
         let mut uploads = dirk_render_utils::upload::UploadBatch::new();
-        self.models.tick(&self.rhi, &mut uploads)?;
+        let mut mips = resources::upload::MipGeneration::new();
+        self.models.tick(&self.rhi, &mut uploads, &mut mips)?;
         let upload_submission = uploads.submit(&mut self.rhi)?;
+        let mip_commands = mips.finish()?;
         self.scene_manager
             .prepare(&self.rhi, frame_index, &mut self.viewports)?;
 
@@ -566,10 +578,13 @@ impl Renderer {
             .map_or_else(Vec::new, |s| s.rendered_players.clone());
         self.submit_frame(
             frame_index,
-            viewport_submission,
-            presentation_cmd,
+            FrameCommands {
+                uploads: upload_submission,
+                mips: mip_commands,
+                viewports: viewport_submission.map(|submission| submission.command_buffer),
+                presentation: presentation_cmd,
+            },
             &presentation_targets,
-            upload_submission,
         )?;
         for player in rendered_players {
             if let Some(viewport) = self.viewports.get_mut(&player) {
@@ -792,20 +807,19 @@ impl Renderer {
     fn submit_frame(
         &mut self,
         frame_index: usize,
-        viewport_submission: Option<ViewportRenderSubmission>,
-        presentation_cmd: Option<RecordedCommands>,
+        commands: FrameCommands,
         presentation_targets: &[PresentationTarget],
-        uploads: Option<(RecordedCommands, dirk_rhi::Completion)>,
     ) -> Result<()> {
-        let (upload_commands, transfer) = match uploads {
+        let (upload_commands, transfer) = match commands.uploads {
             Some((commands, completion)) => (Some(commands), Some(completion)),
             None => (None, None),
         };
         let wait_for = transfer.as_ref().into_iter().collect::<Vec<_>>();
         let command_buffers = upload_commands
             .into_iter()
-            .chain(viewport_submission.map(|submission| submission.command_buffer))
-            .chain(presentation_cmd)
+            .chain(commands.mips)
+            .chain(commands.viewports)
+            .chain(commands.presentation)
             .collect::<Vec<_>>();
         let surface_frames = presentation_targets
             .iter()

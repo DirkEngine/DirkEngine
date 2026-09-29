@@ -8,7 +8,10 @@ use dirk_rhi::{
 use crate::{
     Result,
     models::Texture,
-    resources::{ImageView, Rhi, RhiImage, upload::RgbaMip},
+    resources::{
+        ImageView, Rhi, RhiImage,
+        upload::{MipGeneration, RgbaMip},
+    },
 };
 
 pub struct Image {
@@ -51,9 +54,15 @@ impl Image {
         &self.view
     }
 
+    /// Creates a sampled sRGB texture with a full mip chain.
+    ///
+    /// Mips are blitted on the GPU through `mips` when the format supports
+    /// filtered blits; otherwise every level is prepared on the CPU and
+    /// uploaded through `uploads`.
     pub fn upload_texture(
         device: &Rhi,
         uploads: &mut dirk_render_utils::upload::UploadBatch,
+        mips: &mut MipGeneration,
         texture: &gltf::image::Data,
     ) -> Result<Texture> {
         let pixels = match texture.format {
@@ -69,33 +78,42 @@ impl Image {
                 return Err(dirk_rhi::Error::from(dirk_rhi::InvalidResourceKind::Mismatch).into());
             }
         };
+        let format = TextureFormat::Rgba8Srgb;
         let mip_levels = Self::mip_levels(texture.width, texture.height);
         let image = Self::create_image(
             device,
             &ImageCreateInfo {
                 extent: Extent3d::new_2d(texture.width, texture.height),
-                format: TextureFormat::Rgba8Srgb,
+                format,
                 usage: ImageUsages::COPY_DST | ImageUsages::COPY_SRC | ImageUsages::SAMPLED,
                 mip_levels,
                 samples: SampleCount::One,
             },
         )?;
-        let mut mip = RgbaMip {
-            width: texture.width,
-            height: texture.height,
-            pixels,
-        };
-        let mut levels = Vec::with_capacity(mip_levels as usize);
-        for level in 0..mip_levels {
-            if level != 0 {
-                mip = mip.next();
+        if mip_levels > 1 && MipGeneration::supports(device, format) {
+            // SAFETY: a new allocation with no previous GPU use; this owner remains in the
+            // texture registry and the renderer submits the mip recording this cycle.
+            unsafe {
+                mips.record(device, image.rhi_image(), &pixels)?;
             }
-            levels.push(mip.pixels.clone());
-        }
-        let slices = levels.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        // SAFETY: a new allocation with no previous GPU use; this owner remains in the texture registry.
-        unsafe {
-            uploads.image(device, image.rhi_image(), &slices)?;
+        } else {
+            let mut mip = RgbaMip {
+                width: texture.width,
+                height: texture.height,
+                pixels,
+            };
+            let mut levels = Vec::with_capacity(mip_levels as usize);
+            for level in 0..mip_levels {
+                if level != 0 {
+                    mip = mip.next();
+                }
+                levels.push(mip.pixels.clone());
+            }
+            let slices = levels.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            // SAFETY: a new allocation with no previous GPU use; this owner remains in the texture registry.
+            unsafe {
+                uploads.image(device, image.rhi_image(), &slices)?;
+            }
         }
 
         let sampler = device.create_sampler(&SamplerDesc {

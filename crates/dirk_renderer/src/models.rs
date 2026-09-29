@@ -26,6 +26,7 @@ use crate::{
             sets::{MaterialSet, ObjectSet, SceneSet},
         },
         image::Image,
+        upload::MipGeneration,
     },
     utils::Vertex,
 };
@@ -124,9 +125,19 @@ impl ModelRegistry {
     pub fn new(device: &mut Rhi, events: &dirk_events::EventManager) -> Result<Self> {
         let mut material_alloc = BindingLayout::<MaterialSet>::new(device)?;
         let mut uploads = dirk_render_utils::upload::UploadBatch::new();
+        let mut mips = MipGeneration::new();
         let (fallback_material, fallback_texture) =
-            Self::create_fallback_material(device, &mut uploads, &mut material_alloc)?;
+            Self::create_fallback_material(device, &mut uploads, &mut mips, &mut material_alloc)?;
         uploads.finish(device)?;
+        if let Some(commands) = mips.finish()? {
+            // SAFETY: the recording only touches the fallback texture created above.
+            unsafe {
+                device
+                    .queue::<dirk_rhi::Graphics>()
+                    .submit(vec![commands], &dirk_rhi::SubmitInfo::default())?
+            }
+            .wait(u64::MAX)?;
+        }
 
         Ok(Self {
             textures: slotmap::SlotMap::new(),
@@ -145,10 +156,11 @@ impl ModelRegistry {
         &mut self,
         device: &Rhi,
         uploads: &mut dirk_render_utils::upload::UploadBatch,
+        mips: &mut MipGeneration,
     ) -> Result<()> {
         let events = self.asset_load_consumer.consume_all().collect::<Vec<_>>();
         for event in events {
-            self.load_model(device, uploads, &event.handle)?;
+            self.load_model(device, uploads, mips, &event.handle)?;
         }
 
         let events = self.asset_unload_consumer.consume_all().collect::<Vec<_>>();
@@ -203,6 +215,7 @@ impl ModelRegistry {
     fn create_fallback_material(
         device: &Rhi,
         uploads: &mut dirk_render_utils::upload::UploadBatch,
+        mips: &mut MipGeneration,
         material_alloc: &mut BindingLayout<MaterialSet>,
     ) -> Result<(Material, Texture)> {
         let white = gltf::image::Data {
@@ -211,7 +224,7 @@ impl ModelRegistry {
             width: 1,
             height: 1,
         };
-        let texture = Image::upload_texture(device, uploads, &white)?;
+        let texture = Image::upload_texture(device, uploads, mips, &white)?;
         let set =
             material_alloc.sampled_image(device, 0, texture.image.rhi_view(), &texture.sampler)?;
 
@@ -228,6 +241,7 @@ impl ModelRegistry {
         &mut self,
         device: &Rhi,
         uploads: &mut dirk_render_utils::upload::UploadBatch,
+        mips: &mut MipGeneration,
         handle: &dirk_assets::Handle<dirk_assets::Model>,
     ) -> Result<()> {
         let dirk_assets::Model {
@@ -239,7 +253,7 @@ impl ModelRegistry {
 
         let mut texture_handles = Vec::with_capacity(images.len());
         for image in &images {
-            match Image::upload_texture(device, uploads, image) {
+            match Image::upload_texture(device, uploads, mips, image) {
                 Ok(tex) => texture_handles.push(Handle::new(self.textures.insert(tex))),
                 Err(error) => {
                     self.remove_model_parts(&[], &[], &texture_handles);
