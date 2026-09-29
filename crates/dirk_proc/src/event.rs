@@ -1,8 +1,6 @@
-use std::fmt::Write;
-
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::{Attribute, DataEnum, DataStruct, DeriveInput, Fields, FieldsUnnamed, Ident, LitStr};
+use syn::{Attribute, DataEnum, DataStruct, DeriveInput, Fields, Ident, LitStr};
 
 pub fn derive_event_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<TokenStream> {
     let name = &input.ident;
@@ -72,21 +70,25 @@ pub fn derive_event_struct(input: &DeriveInput, data: &DataStruct) -> syn::Resul
 /// Returns (pattern, format expression)
 fn create_field_bindings(
     fields: &Fields,
-    message_format: &str,
+    message_format: &LitStr,
 ) -> syn::Result<(TokenStream, TokenStream)> {
     match fields {
         // struct Foo { x: T, y: T }  →  let Self { x, y, .. } = self;
         Fields::Named(named) => {
+            let fmt = rewrite_placeholders(message_format, None)?;
             let idents: Vec<_> = named.named.iter().map(|f| &f.ident).collect();
             // `..` lets the pattern survive the addition of new fields.
             let pattern = quote! { { #(#idents,)* .. } };
-            let format_expr = quote! { format!(#message_format) };
+            let format_expr = quote! { format!(#fmt) };
 
             Ok((pattern, format_expr))
         }
         // struct Foo(T, T)  →  let Self(_0, _1) = self;
         Fields::Unnamed(unnamed) => {
-            let (fmt, idents) = rewrite_unnamed_placeholders(message_format, unnamed)?;
+            let fmt = rewrite_placeholders(message_format, Some(unnamed.unnamed.len()))?;
+            let idents: Vec<Ident> = (0..unnamed.unnamed.len())
+                .map(|i| quote::format_ident!("_{i}"))
+                .collect();
             // No `..`: we enumerate every field, so the pattern is already
             // exhaustive. Adding `..` would cause an "unnecessary `..`" lint.
             let pattern = quote! { ( #(#idents,)* ) };
@@ -95,7 +97,10 @@ fn create_field_bindings(
             Ok((pattern, format_expr))
         }
         // struct Foo;  →  nothing to destructure.
-        Fields::Unit => Ok((quote! {}, quote! { format!(#message_format) })),
+        Fields::Unit => {
+            let fmt = rewrite_placeholders(message_format, None)?;
+            Ok((quote! {}, quote! { format!(#fmt) }))
+        }
     }
 }
 
@@ -104,98 +109,138 @@ fn create_field_bindings(
 /// Returns `"{self:?}"` when no `#[event]` attribute is present.
 /// Emits a `syn::Error` with a proper source span if the attribute argument
 /// is not a string literal.
-fn get_message_format_from_attrs(attrs: &[Attribute]) -> syn::Result<String> {
+fn get_message_format_from_attrs(attrs: &[Attribute]) -> syn::Result<LitStr> {
     for attr in attrs {
         if attr.path().is_ident("event") {
-            return Ok(attr
-                .parse_args::<LitStr>()
-                .map_err(|_| {
-                    syn::Error::new_spanned(attr, "expected a string literal: #[event(\"…\")]")
-                })?
-                .value());
+            return attr.parse_args::<LitStr>().map_err(|_| {
+                syn::Error::new_spanned(attr, "expected a string literal: #[event(\"…\")]")
+            });
         }
     }
-    Ok(String::from("{self:?}"))
+    Ok(LitStr::new("{self:?}", Span::call_site()))
 }
 
-/// Rewrites active tuple-field placeholders while preserving escaped braces and
-/// formatting specifications. Dynamic positional widths are intentionally rejected.
-fn rewrite_unnamed_placeholders(
-    format: &str,
-    fields: &FieldsUnnamed,
-) -> syn::Result<(String, Vec<Ident>)> {
-    let idents: Vec<Ident> = fields
-        .unnamed
-        .iter()
-        .enumerate()
-        .map(|(i, _)| quote::format_ident!("_{i}"))
-        .collect();
-    let mut output = String::with_capacity(format.len());
-    let bytes = format.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'{' {
-            if bytes.get(cursor + 1) == Some(&b'{') {
-                output.push_str("{{");
-                cursor += 2;
-                continue;
-            }
-            let start = cursor;
-            cursor += 1;
-            let index_start = cursor;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor += 1;
-            }
-            if cursor > index_start && matches!(bytes.get(cursor), Some(b':' | b'}')) {
-                let index = format[index_start..cursor].parse::<usize>().map_err(|_| {
-                    syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        "tuple field index is too large",
-                    )
-                })?;
-                if index >= fields.unnamed.len() {
-                    return Err(syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        format!("tuple event has no field {index}"),
-                    ));
-                }
-                let end = format[cursor..]
-                    .find('}')
-                    .map(|offset| cursor + offset)
-                    .ok_or_else(|| {
-                        syn::Error::new(
-                            proc_macro2::Span::call_site(),
-                            "unclosed event format placeholder",
-                        )
-                    })?;
-                let spec = &format[cursor..end];
-                if spec.contains('{')
-                    || spec
-                        .as_bytes()
-                        .windows(2)
-                        .any(|pair| pair[0].is_ascii_digit() && pair[1] == b'$')
-                {
-                    return Err(syn::Error::new(
-                        proc_macro2::Span::call_site(),
-                        "dynamic positional format widths are not supported in tuple events",
-                    ));
-                }
-                write!(&mut output, "{{_{index}{spec}}}").expect("writing to String cannot fail");
-                cursor = end + 1;
-            } else {
-                // Named captures such as `{self:?}` are handled by `format!`.
-                output.push_str(&format[start..cursor]);
-            }
-        } else if bytes[cursor] == b'}' && bytes.get(cursor + 1) == Some(&b'}') {
-            output.push_str("}}");
-            cursor += 2;
-        } else {
-            let ch = format[cursor..].chars().next().expect("valid UTF-8");
-            output.push(ch);
-            cursor += ch.len_utf8();
+/// Validates an event format string and rewrites tuple-field placeholders.
+///
+/// Event formats are passed to `format!` without positional arguments, so
+/// every placeholder must name what it prints: a named capture such as `{x}`
+/// or `{self:?}`, or, for tuple events (`tuple_fields` is `Some(len)`), a
+/// field index such as `{0}`, which is rewritten to the `_0` binding. Implicit
+/// positional placeholders (`{}`, `{:?}`), `.*` precision and `N$`
+/// width/precision arguments would all require positional arguments and are
+/// rejected here with an error spanning the format string literal.
+///
+/// Returns the rewritten format string literal, keeping the original span so
+/// any remaining `format!` errors point at the attribute.
+fn rewrite_placeholders(format: &LitStr, tuple_fields: Option<usize>) -> syn::Result<LitStr> {
+    let value = format.value();
+    let error = |message: String| syn::Error::new(format.span(), message);
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value.as_str();
+
+    while let Some(position) = rest.find(['{', '}']) {
+        output.push_str(&rest[..position]);
+        let tail = &rest[position..];
+
+        if let Some(after) = tail.strip_prefix("{{") {
+            output.push_str("{{");
+            rest = after;
+            continue;
         }
+        if let Some(after) = tail.strip_prefix("}}") {
+            output.push_str("}}");
+            rest = after;
+            continue;
+        }
+        if tail.starts_with('}') {
+            return Err(error(
+                "unmatched `}` in event format; use `}}` for a literal brace".to_owned(),
+            ));
+        }
+
+        let Some(end) = tail.find('}') else {
+            return Err(error(
+                "unclosed `{` in event format; use `{{` for a literal brace".to_owned(),
+            ));
+        };
+        let placeholder = &tail[1..end];
+        rest = &tail[end + 1..];
+
+        let (argument, spec) = match placeholder.split_once(':') {
+            Some((argument, spec)) => (argument, Some(spec)),
+            None => (placeholder, None),
+        };
+        if let Some(spec) = spec {
+            validate_spec(spec)
+                .map_err(|message| error(format!("`{{{placeholder}}}`: {message}")))?;
+        }
+
+        output.push('{');
+        if argument.is_empty() {
+            return Err(error(format!(
+                "`{{{placeholder}}}`: implicit positional placeholders are not supported in \
+                 event formats; reference a field by name (`{{field}}`) or, in tuple events, \
+                 by index (`{{0}}`)"
+            )));
+        } else if argument.bytes().all(|byte| byte.is_ascii_digit()) {
+            let Some(len) = tuple_fields else {
+                return Err(error(format!(
+                    "`{{{placeholder}}}`: positional placeholders are only supported in tuple \
+                     events; reference named fields by name"
+                )));
+            };
+            let index = argument
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < len)
+                .ok_or_else(|| {
+                    error(format!(
+                        "`{{{placeholder}}}`: tuple event has no field {argument} (it has {len})"
+                    ))
+                })?;
+            output.push('_');
+            output.push_str(&index.to_string());
+        } else {
+            // Named captures such as `{self:?}` are resolved by `format!`.
+            output.push_str(argument);
+        }
+        if let Some(spec) = spec {
+            output.push(':');
+            output.push_str(spec);
+        }
+        output.push('}');
     }
-    Ok((output, idents))
+    output.push_str(rest);
+
+    Ok(LitStr::new(&output, format.span()))
+}
+
+/// Rejects format specs that need positional arguments.
+fn validate_spec(spec: &str) -> Result<(), &'static str> {
+    if spec.contains('{') {
+        return Err("nested placeholders are not supported in event formats");
+    }
+    if spec.contains(".*") {
+        return Err(
+            "`.*` precision needs a positional argument; use a literal precision \
+             such as `.2` or a named capture such as `.prec$`",
+        );
+    }
+    // `name$` refers to a capture; `N$` refers to a positional argument.
+    let positional_argument = spec.match_indices('$').any(|(dollar, _)| {
+        let name = spec[..dollar]
+            .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()
+            .unwrap_or_default();
+        !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if positional_argument {
+        return Err(
+            "positional `N$` width/precision arguments are not supported in event \
+             formats; use a literal value or a named capture such as `width$`",
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -203,67 +248,106 @@ mod tests {
     use super::*;
     use syn::{DeriveInput, parse_str};
 
-    // ── rewrite_unnamed_placeholders ──────────────────────────────────────────
+    // ── rewrite_placeholders ──────────────────────────────────────────────────
 
-    fn unnamed_fields_from(src: &str) -> FieldsUnnamed {
-        let input: DeriveInput = parse_str(src).expect("test input should parse");
-        match input.data {
-            syn::Data::Struct(s) => match s.fields {
-                Fields::Unnamed(u) => u,
-                _ => panic!("expected unnamed fields"),
-            },
-            _ => panic!("expected a struct"),
+    fn lit(format: &str) -> LitStr {
+        LitStr::new(format, Span::call_site())
+    }
+
+    fn rewrite_tuple(format: &str, fields: usize) -> syn::Result<String> {
+        rewrite_placeholders(&lit(format), Some(fields)).map(|lit| lit.value())
+    }
+
+    fn rewrite_named(format: &str) -> syn::Result<String> {
+        rewrite_placeholders(&lit(format), None).map(|lit| lit.value())
+    }
+
+    fn tuple_error(format: &str, fields: usize) -> String {
+        match rewrite_tuple(format, fields) {
+            Ok(rewritten) => panic!("`{format}` should be rejected, got `{rewritten}`"),
+            Err(err) => err.to_string(),
         }
     }
 
     #[test]
-    fn rewrite_replaces_all_positional_placeholders() {
-        let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, idents) =
-            rewrite_unnamed_placeholders("{0} and {1}", &fields).expect("valid tuple event format");
-        assert_eq!(fmt, "{_0} and {_1}");
-        assert_eq!(idents.len(), 2);
-        assert_eq!(idents[0], quote::format_ident!("_0"));
-        assert_eq!(idents[1], quote::format_ident!("_1"));
+    fn rewrite_replaces_all_positional_placeholders() -> syn::Result<()> {
+        assert_eq!(rewrite_tuple("{0} and {1}", 2)?, "{_0} and {_1}");
+        Ok(())
     }
 
     #[test]
-    fn rewrite_leaves_non_positional_format_intact() {
-        let fields = unnamed_fields_from("struct Foo(u32);");
-        let (fmt, idents) = rewrite_unnamed_placeholders("no placeholders", &fields)
-            .expect("valid tuple event format");
-        assert_eq!(fmt, "no placeholders");
-        assert_eq!(idents.len(), 1);
+    fn rewrite_leaves_non_positional_format_intact() -> syn::Result<()> {
+        assert_eq!(rewrite_tuple("no placeholders", 1)?, "no placeholders");
+        assert_eq!(rewrite_tuple("{self:?}", 1)?, "{self:?}");
+        Ok(())
     }
 
     #[test]
-    fn rewrite_handles_partial_placeholder_use() {
-        let fields = unnamed_fields_from("struct Foo(u32, String, bool);");
-        let (fmt, _) = rewrite_unnamed_placeholders("only {1} matters", &fields)
-            .expect("valid tuple event format");
-        assert_eq!(fmt, "only {_1} matters");
+    fn rewrite_handles_partial_placeholder_use() -> syn::Result<()> {
+        assert_eq!(rewrite_tuple("only {1} matters", 3)?, "only {_1} matters");
+        Ok(())
     }
 
     #[test]
-    fn rewrite_handles_repeated_placeholder() {
-        let fields = unnamed_fields_from("struct Foo(u32, String);");
-        let (fmt, _) = rewrite_unnamed_placeholders("{0} then {0} again", &fields)
-            .expect("valid tuple event format");
-        assert_eq!(fmt, "{_0} then {_0} again");
+    fn rewrite_handles_repeated_placeholder() -> syn::Result<()> {
+        assert_eq!(
+            rewrite_tuple("{0} then {0} again", 2)?,
+            "{_0} then {_0} again"
+        );
+        Ok(())
     }
 
     #[test]
-    fn rewrite_preserves_escaped_braces_and_format_specs() {
-        let fields = unnamed_fields_from("struct Foo(f32);");
-        let (fmt, _) = rewrite_unnamed_placeholders("literal {{0}}, value {0:.2?}", &fields)
-            .expect("valid tuple event format");
-        assert_eq!(fmt, "literal {{0}}, value {_0:.2?}");
+    fn rewrite_preserves_escaped_braces_and_format_specs() -> syn::Result<()> {
+        assert_eq!(
+            rewrite_tuple("literal {{0}}, value {0:.2?}", 1)?,
+            "literal {{0}}, value {_0:.2?}"
+        );
+        assert_eq!(rewrite_tuple("ü {0:>8} ✓", 1)?, "ü {_0:>8} ✓");
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_accepts_named_width_and_precision_captures() -> syn::Result<()> {
+        assert_eq!(rewrite_named("{x:>width$.prec2$}")?, "{x:>width$.prec2$}");
+        Ok(())
     }
 
     #[test]
     fn rewrite_rejects_invalid_field_indices() {
-        let fields = unnamed_fields_from("struct Foo(u32);");
-        assert!(rewrite_unnamed_placeholders("{1}", &fields).is_err());
+        assert!(tuple_error("{1}", 1).contains("tuple event has no field 1"));
+        assert!(tuple_error("{99999999999999999999999}", 1).contains("has no field"));
+    }
+
+    #[test]
+    fn rewrite_rejects_implicit_positional_placeholders() {
+        for format in ["{}", "value: {:?}", "{:>4}"] {
+            assert!(
+                tuple_error(format, 1).contains("implicit positional placeholders"),
+                "{format}"
+            );
+            assert!(rewrite_named(format).is_err(), "{format}");
+        }
+    }
+
+    #[test]
+    fn rewrite_rejects_positional_precision_and_width_arguments() {
+        assert!(tuple_error("{0:.*}", 2).contains("`.*` precision"));
+        assert!(tuple_error("{0:1$}", 2).contains("`N$`"));
+        assert!(tuple_error("{0:.1$}", 2).contains("`N$`"));
+        assert!(tuple_error("{0:{}}", 2).contains("nested placeholders"));
+    }
+
+    #[test]
+    fn rewrite_rejects_positional_placeholders_outside_tuple_events() {
+        let err = rewrite_named("{0}").expect_err("named events have no positional fields");
+        assert!(err.to_string().contains("only supported in tuple events"));
+    }
+
+    #[test]
+    fn rewrite_rejects_unbalanced_braces() {
+        assert!(tuple_error("open {0", 1).contains("unclosed `{`"));
+        assert!(tuple_error("close }", 1).contains("unmatched `}`"));
     }
 
     // ── get_message_format_from_attrs ─────────────────────────────────────────
@@ -273,7 +357,7 @@ mod tests {
         let input: DeriveInput = parse_str("struct Foo;").expect("test input should parse");
         let result =
             get_message_format_from_attrs(&input.attrs).expect("default format should parse");
-        assert_eq!(result, "{self:?}");
+        assert_eq!(result.value(), "{self:?}");
     }
 
     #[test]
@@ -282,7 +366,7 @@ mod tests {
             parse_str(r#"#[event("hello world")] struct Foo;"#).expect("test input should parse");
         let result =
             get_message_format_from_attrs(&input.attrs).expect("event format should parse");
-        assert_eq!(result, "hello world");
+        assert_eq!(result.value(), "hello world");
     }
 
     #[test]
@@ -298,6 +382,17 @@ mod tests {
             parse_str(r"#[derive(Debug)] struct Foo;").expect("test input should parse");
         let result =
             get_message_format_from_attrs(&input.attrs).expect("default format should parse");
-        assert_eq!(result, "{self:?}");
+        assert_eq!(result.value(), "{self:?}");
+    }
+
+    #[test]
+    fn derive_reports_format_errors_as_compile_errors() {
+        let input: DeriveInput = parse_str(r#"#[event("value: {}")] struct Foo(u32);"#)
+            .expect("test input should parse");
+        let syn::Data::Struct(data) = &input.data else {
+            panic!("expected a struct");
+        };
+        let err = derive_event_struct(&input, data).expect_err("`{}` must be rejected");
+        assert!(err.to_string().contains("implicit positional placeholders"));
     }
 }

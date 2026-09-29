@@ -56,6 +56,29 @@ mod universe;
 /// #[event("server stopped")]
 /// struct ServerStopped;
 /// ```
+///
+/// ## Unsupported placeholders
+///
+/// The format string is expanded without positional arguments, so every
+/// placeholder must name a field. Implicit positional placeholders (`{}`,
+/// `{:?}`), `.*` precision and `N$` width/precision arguments are rejected
+/// with an error pointing at the format string:
+///
+/// ```compile_fail
+/// # pub trait Event: Send + Clone + 'static { fn debug(&self) -> String; }
+/// # use dirk_proc::Event;
+/// #[derive(Event, Clone)]
+/// #[event("key pressed: {}")] // use `{0}` instead
+/// struct KeyPressed(u32);
+/// ```
+///
+/// ```compile_fail
+/// # pub trait Event: Send + Clone + 'static { fn debug(&self) -> String; }
+/// # use dirk_proc::Event;
+/// #[derive(Event, Clone)]
+/// #[event("value {0:.*}")] // use a literal precision such as `{0:.2}`
+/// struct Value(usize, f32);
+/// ```
 #[proc_macro_derive(Event, attributes(event))]
 pub fn derive_event(input: proc_macro::TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
