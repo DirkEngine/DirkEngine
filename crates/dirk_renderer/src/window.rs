@@ -47,8 +47,13 @@ impl Window {
         let swapchain = match Swapchain::build(device, surface, size) {
             Ok(swapchain) => swapchain,
             Err(error) => {
-                // The target remains alive until the failed surface is destroyed.
-                unsafe { device.surface_loader.destroy_surface(surface, None) };
+                // A failed build may still have queued a swapchain for deferred
+                // destruction. Queue the surface behind it so it is destroyed
+                // last, while the target keeps the native window alive.
+                device.clone().destroy(Garbage::Surface {
+                    surface,
+                    target: surface_target,
+                });
                 return Err(error);
             }
         };

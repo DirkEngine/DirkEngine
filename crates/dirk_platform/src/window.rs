@@ -151,6 +151,9 @@ impl Window {
     }
 
     /// Returns an owned native-handle provider suitable for a graphics surface.
+    ///
+    /// The returned target keeps the native window alive. See
+    /// [`WindowSurfaceTarget`] for the thread its last clone must be dropped on.
     #[must_use]
     pub fn surface_target(&self) -> Arc<WindowSurfaceTarget> {
         self.raw.clone()
@@ -192,6 +195,16 @@ impl Window {
 }
 
 /// Owned native window handles retained by presentation backends.
+///
+/// Graphics surfaces hold a clone so the native window outlives them, even
+/// after the platform has removed its [`Window`].
+///
+/// The last clone must be dropped on the main thread, which runs the platform
+/// event loop. Dropping it closes the native window, and on macOS winit
+/// dispatches that close synchronously to the main thread, so dropping it
+/// elsewhere while the main thread waits on that thread deadlocks. The engine
+/// ticks and shuts down subsystems on the main thread, so renderer-owned
+/// clones satisfy this as long as they are not moved to other threads.
 pub struct WindowSurfaceTarget {
     raw: Box<dyn winit::window::Window>,
 }
