@@ -904,6 +904,70 @@ fn menu_commands_still_open_windows() -> anyhow::Result<()> {
 }
 
 #[test]
+fn failing_menu_still_applies_queued_commands() {
+    let services = EditorServices::new();
+    let target = services.add_window_fn(descriptor("target", false), |_ui, _context| Ok(()));
+    services.add_menu_fn(
+        EditorMenuDescriptor {
+            title: "Fail".to_owned(),
+        },
+        move |_ui, _context, editor| {
+            editor.open_window(target);
+            anyhow::bail!("menu failed after queueing a command")
+        },
+    );
+
+    let universe = Universe::builder().build();
+    let ctx = egui::Context::default();
+    let handle = build_context().handle().clone();
+    let frame = EditorRenderContext::new(0.016, &handle);
+    let screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(800.0, 600.0),
+    ));
+    // Click the menu button so the menu contents render on a later pass.
+    let menu_button = egui::pos2(12.0, 10.0);
+    let passes = [
+        Vec::new(),
+        vec![
+            egui::Event::PointerMoved(menu_button),
+            egui::Event::PointerButton {
+                pos: menu_button,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        vec![egui::Event::PointerButton {
+            pos: menu_button,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        Vec::new(),
+    ];
+
+    let mut result = Ok(());
+    for events in passes {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect,
+            events,
+            ..egui::RawInput::default()
+        });
+        result = services.render_ui(&ctx, &frame, &universe);
+        let _ = ctx.end_pass();
+        if result.is_err() {
+            break;
+        }
+    }
+
+    let err = result.expect_err("menu failure must be returned");
+    assert!(format!("{err:#}").contains("menu failed after queueing a command"));
+    assert_eq!(services.is_open(target), Some(true));
+    assert!(services.dock_contains_window_for_tests(target));
+}
+
+#[test]
 fn opening_window_after_closing_every_tab_reuses_empty_main_surface() -> anyhow::Result<()> {
     let services = EditorServices::new();
     let universe = Universe::builder().build();

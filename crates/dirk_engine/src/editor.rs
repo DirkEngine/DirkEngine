@@ -505,21 +505,26 @@ impl EditorServices {
             let state = self.state.lock();
             (state.menus.clone(), state.windows())
         };
-        Self::render_menus(
+        let menu_result = Self::render_menus(
             &menus,
             &window_infos,
             ctx,
             context,
             &editor_commands,
             universe,
-        )?;
+        );
 
         let (windows, mut dock_state) = {
             let mut state = self.state.lock();
+            // Apply commands queued by menus even if a menu failed.
             state.apply_commands(command_receiver.try_iter());
+            menu_result?;
             state.bootstrap_default_dock_layout();
             state.sync_dock_tabs_with_open_windows();
-            (state.windows.clone(), state.dock_state.clone())
+            // Render from the stored layout without holding the lock. Changes
+            // made to the placeholder by callbacks are reconciled below.
+            let dock_state = std::mem::replace(&mut state.dock_state, DockState::new(Vec::new()));
+            (state.windows.clone(), dock_state)
         };
 
         let mut closed_windows = Vec::new();
