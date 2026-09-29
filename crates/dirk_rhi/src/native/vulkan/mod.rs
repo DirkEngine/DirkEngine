@@ -19,6 +19,8 @@ use crate::Error;
 
 fn vk_error(error: ash::vk::Result) -> Error {
     match error {
+        // Status codes returned by timed waits and non-blocking acquisition.
+        ash::vk::Result::TIMEOUT | ash::vk::Result::NOT_READY => Error::Timeout,
         ash::vk::Result::ERROR_DEVICE_LOST => Error::DeviceLost,
         ash::vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SwapchainOutOfDate,
         ash::vk::Result::ERROR_SURFACE_LOST_KHR => Error::SurfaceLost,

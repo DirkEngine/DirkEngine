@@ -376,3 +376,55 @@ fn depth_stencil_pipeline_matches_rendering_attachment() -> Result<()> {
     }
     test.check()
 }
+
+impl TestDevice {
+    /// Submits enough device-local copy traffic to remain pending briefly.
+    fn submit_copy_load(&mut self) -> Result<(Completion, Buffer, Buffer)> {
+        const SIZE: u64 = 64 << 20;
+        let desc = |label| BufferDesc {
+            label,
+            size: SIZE,
+            usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            memory: MemoryDomain::Device,
+        };
+        let src = self.rhi.create_buffer(&desc("copy source"))?;
+        let dst = self.rhi.create_buffer(&desc("copy destination"))?;
+        let mut encoder = self.rhi.create_encoder::<Graphics>("copy load")?;
+        let regions = [BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: SIZE,
+        }; 16];
+        // SAFETY: both buffers outlive the returned completion; their contents are unused.
+        let completion = unsafe {
+            encoder.copy_buffer(&src, &dst, &regions)?;
+            self.rhi
+                .queue::<Graphics>()
+                .submit(vec![encoder.finish()?], &SubmitInfo::default())?
+        };
+        Ok((completion, src, dst))
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan 1.3 and Khronos validation"]
+fn pending_work_reports_timeouts_instead_of_errors() -> Result<()> {
+    let mut test = TestDevice::new()?;
+    let (completion, src, dst) = test.submit_copy_load()?;
+    let pending = !completion.is_complete()?;
+    match completion.wait(0) {
+        Ok(()) | Err(Error::Timeout) => {}
+        Err(error) => return Err(error),
+    }
+    // Collection polls the oldest cycle without blocking while work is pending.
+    for _ in 0..4 {
+        test.rhi.finish_cycle()?;
+    }
+    if !pending {
+        eprintln!("copy load completed before polling; the pending path was not exercised");
+    }
+    completion.wait(u64::MAX)?;
+    assert!(completion.is_complete()?);
+    drop((src, dst));
+    test.check()
+}
