@@ -97,14 +97,31 @@ pub(crate) const ASSETS_PATH: &str = std::env!("ASSETS_PATH");
 /// Handles are created internally by [`AssetRegistry`] during directory
 /// scanning and are not normally constructed by hand. They are serialisable
 /// so they can be stored in scene files or editor state.
+///
+/// # Identity and asset roots
+///
+/// Equality and hashing use only the relative path and type tag, so a handle
+/// read from a scene file matches the handle of the loaded asset. Handles are
+/// therefore only unique within **one** asset root: do not key a shared map
+/// with handles from registries created with different roots via
+/// [`AssetRegistry::init_at`].
+///
+/// Handles issued by a registry remember its root for [`path`] and [`dir`].
+/// Handles built with [`from_raw`] or deserialised are unresolved and fall
+/// back to `ASSETS_PATH`; use [`AssetRegistry::resolve`] to bind them to a
+/// registry root.
+///
+/// [`path`]: AssetHandle::path
+/// [`dir`]: AssetHandle::dir
+/// [`from_raw`]: AssetHandle::from_raw
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct AssetHandle {
-    /// Path relative to `ASSETS_PATH`, including the `.dirkasset` extension.
+    /// Path relative to the asset root, including the `.dirkasset` extension.
     handle: String,
     /// Runtime type tag, validated against the requested `T` in
     /// [`AssetRegistry::load_asset`].
     asset_type: AssetType,
-    /// Runtime asset root; omitted from serialized identity.
+    /// Root of the issuing registry. Excluded from identity and serialisation.
     #[serde(skip)]
     root: Option<PathBuf>,
 }
@@ -151,6 +168,9 @@ impl AssetHandle {
     }
 
     /// Returns the **absolute** path to the `.dirkasset` file on disk.
+    ///
+    /// Unresolved handles resolve against `ASSETS_PATH`; see the
+    /// [type-level docs](AssetHandle#identity-and-asset-roots).
     pub fn path(&self) -> PathBuf {
         self.root
             .as_deref()
@@ -572,10 +592,7 @@ impl AssetRegistry {
         }
 
         let canonical_handle = self
-            .inner
-            .assets
-            .get_key_value(&handle)
-            .map(|(key, _)| key.clone())
+            .resolve(&handle)
             .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
 
         let load_lock = self
@@ -604,6 +621,20 @@ impl AssetRegistry {
         self.cache_handle(&typed_handle);
         self.dispatch_loaded(typed_handle.clone());
         Ok(typed_handle)
+    }
+
+    /// Returns this registry's handle for `handle`, bound to the registry root.
+    ///
+    /// Use this for handles built with [`AssetHandle::from_raw`] or
+    /// deserialised from scene files before calling [`AssetHandle::path`] or
+    /// [`AssetHandle::dir`]. Returns `None` if the registry has no valid
+    /// descriptor with the same path and type.
+    #[must_use]
+    pub fn resolve(&self, handle: &AssetHandle) -> Option<AssetHandle> {
+        self.inner
+            .assets
+            .get_key_value(handle)
+            .map(|(key, _)| key.clone())
     }
 
     fn cached_handle<T: Asset>(&self, handle: &AssetHandle) -> Option<Handle<T>> {

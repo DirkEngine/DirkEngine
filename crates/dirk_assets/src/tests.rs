@@ -811,14 +811,26 @@ mod registry {
         time::{Duration, Instant},
     };
 
-    fn registry_with_model(name: &str) -> (TempDir, EventManager, AssetRegistry, AssetHandle) {
+    fn registry_with_models(
+        names: &[&str],
+    ) -> (TempDir, EventManager, AssetRegistry, Vec<AssetHandle>) {
         let root = TempDir::new().unwrap();
-        write_model_fixture(root.path(), name);
+        for name in names {
+            write_model_fixture(root.path(), name);
+        }
         let workers = WorkerPool::new("asset-test");
         let events = EventManager::new(workers.clone());
         let registry = AssetRegistry::init_at(&events, workers, root.path()).unwrap();
-        let id = AssetHandle::from_raw(format!("{name}.dirkasset"), AssetType::Model);
-        (root, events, registry, id)
+        let ids = names
+            .iter()
+            .map(|name| AssetHandle::from_raw(format!("{name}.dirkasset"), AssetType::Model))
+            .collect();
+        (root, events, registry, ids)
+    }
+
+    fn registry_with_model(name: &str) -> (TempDir, EventManager, AssetRegistry, AssetHandle) {
+        let (root, events, registry, mut ids) = registry_with_models(&[name]);
+        (root, events, registry, ids.remove(0))
     }
 
     fn wait_for_event<E: dirk_events::Event>(consumer: &mut dirk_events::Consumer<E>) -> E {
@@ -875,16 +887,35 @@ mod registry {
     }
 
     #[test]
+    fn resolve_binds_unresolved_handles_to_registry_root() {
+        let (root, _events, registry, id) = registry_with_model("scene");
+        let stored: AssetHandle =
+            serde_json::from_str(&serde_json::to_string(&id).unwrap()).unwrap();
+        let resolved = registry.resolve(&stored).unwrap();
+        assert_eq!(resolved, stored);
+        assert_eq!(
+            resolved.path(),
+            root.path().canonicalize().unwrap().join("scene.dirkasset")
+        );
+        let wrong_type = AssetHandle::from_raw("scene.dirkasset", AssetType::Unknown);
+        assert!(registry.resolve(&wrong_type).is_none());
+    }
+
+    #[test]
     fn cached_load_shares_data_and_emits_one_loaded_event() {
-        let (_root, events, registry, id) = registry_with_model("cached");
+        let (_root, events, registry, ids) = registry_with_models(&["cached", "sentinel"]);
+        let (id, sentinel) = (&ids[0], &ids[1]);
         let mut loaded = events.subscribe::<AssetLoaded<Model>>();
-        let first = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let first = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
         let event = wait_for_event(&mut loaded);
         assert_eq!(event.handle.generation(), first.generation());
         drop(event);
-        let second = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let second = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
         assert_eq!(first.generation(), second.generation());
-        assert_eq!(loaded.consume_all().count(), 0);
+        // Loaded events share one ordered producer queue, so a duplicate
+        // event for `second` would arrive before the sentinel's event.
+        let _sentinel = wait_for_load(registry.load_asset::<Model>(sentinel)).unwrap();
+        assert_eq!(&wait_for_event(&mut loaded).handle.handle(), sentinel);
         first.take().unwrap();
         assert!(matches!(second.take(), Err(Error::AlreadyTaken)));
     }
