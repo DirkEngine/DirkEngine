@@ -2,7 +2,9 @@
 //! Subprocess coverage for Unix signal shutdown behavior.
 
 use std::{
-    process::{Child, Command, ExitStatus},
+    io::{BufRead, BufReader},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -12,18 +14,23 @@ use dirk_engine::{Engine, EngineBuilder, EngineHandle, EnginePlugin, Subsystem};
 const CHILD_ENV: &str = "DIRK_ENGINE_SIGNAL_TEST_CHILD";
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
+const CHILD_READY: &str = "DIRK_ENGINE_SIGNAL_TEST_CHILD_READY";
 
 #[test]
 fn default_engine_does_not_change_host_signal_disposition() -> anyhow::Result<()> {
     use std::os::unix::process::ExitStatusExt;
 
-    let child = Command::new(std::env::current_exe()?)
+    let mut child = Command::new(std::env::current_exe()?)
         .env(CHILD_ENV, "1")
         .arg("--exact")
         .arg("signal_test_child_drops_default_engine")
+        .arg("--nocapture")
+        .stdout(Stdio::piped())
         .spawn()?;
 
-    thread::sleep(Duration::from_secs(1));
+    // Only signal once the engine has been created and dropped; otherwise the
+    // test would pass without exercising the engine at all.
+    wait_for_ready(&mut child, Duration::from_secs(10))?;
     send_signal(&child, "TERM")?;
     let status = wait_for_exit(child, Duration::from_secs(5))?;
     assert_eq!(status.signal(), Some(SIGTERM));
@@ -37,6 +44,7 @@ fn signal_test_child_drops_default_engine() -> anyhow::Result<()> {
     }
 
     drop(Engine::new()?);
+    println!("{CHILD_READY}");
     loop {
         thread::sleep(Duration::from_secs(1));
     }
@@ -121,6 +129,34 @@ fn send_signal(child: &Child, signal: &str) -> anyhow::Result<()> {
 
     anyhow::ensure!(status.success(), "kill command failed with {status:?}");
     Ok(())
+}
+
+fn wait_for_ready(child: &mut Child, timeout: Duration) -> anyhow::Result<()> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("child stdout was not piped"))?;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let ready = BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == CHILD_READY);
+        let _ = ready_tx.send(ready);
+    });
+
+    match ready_rx.recv_timeout(timeout) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let status = child.wait()?;
+            anyhow::bail!("child exited before becoming ready: {status:?}")
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("child did not become ready within {timeout:?}")
+        }
+    }
 }
 
 fn wait_for_exit(mut child: Child, timeout: Duration) -> anyhow::Result<ExitStatus> {
