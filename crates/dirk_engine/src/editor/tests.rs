@@ -902,3 +902,25 @@ fn menu_commands_still_open_windows() -> anyhow::Result<()> {
     assert!(services.dock_contains_window_for_tests(target));
     Ok(())
 }
+
+#[test]
+fn opening_window_after_closing_every_tab_reuses_empty_main_surface() -> anyhow::Result<()> {
+    let services = EditorServices::new();
+    let universe = Universe::builder().build();
+    let first = services.add_window_fn(descriptor("first", true), |_ui, _context| Ok(()));
+    let second = services.add_window_fn(
+        EditorWindowDescriptor {
+            category: "other".to_owned(),
+            ..descriptor("second", false)
+        },
+        |_ui, _context| Ok(()),
+    );
+    render_services(&services, &universe)?;
+
+    services.close_window_tab_for_tests(first);
+    render_services(&services, &universe)?;
+    services.open_window_for_tests(second);
+
+    assert!(services.dock_contains_window_for_tests(second));
+    render_services(&services, &universe)
+}

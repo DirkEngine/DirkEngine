@@ -796,7 +796,7 @@ impl EditorServicesState {
             return;
         }
 
-        if self.dock_state.main_surface().is_empty() {
+        if !self.main_surface_has_tabs() {
             self.dock_state.push_to_first_leaf(id);
             return;
         }
@@ -806,6 +806,19 @@ impl EditorServicesState {
         } else {
             self.dock_state.push_to_focused_leaf(id);
         }
+    }
+
+    /// Returns whether the main dock surface holds any tab.
+    ///
+    /// Closing every tab turns the main surface into `Surface::Empty` (on
+    /// which `DockState::main_surface` panics) or leaves an empty root node
+    /// that cannot be split, so check the tree without indexing it directly.
+    fn main_surface_has_tabs(&self) -> bool {
+        self.dock_state
+            .iter_surfaces()
+            .next()
+            .and_then(|surface| surface.node_tree())
+            .is_some_and(|tree| tree.num_tabs() > 0)
     }
 
     fn insert_near_category(&mut self, id: EditorWindowId, category: &str) {
