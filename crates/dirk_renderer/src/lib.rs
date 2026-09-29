@@ -636,9 +636,7 @@ impl Renderer {
         for target in presentation_targets {
             self.windows
                 .get_mut(&target.window)
-                .ok_or(dirk_rhi::Error::Backend(anyhow::anyhow!(
-                    "presentation window no longer exists"
-                )))?
+                .ok_or(Error::WindowDoesNotExist(target.window))?
                 .present(target.image)?;
         }
 

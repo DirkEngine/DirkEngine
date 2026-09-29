@@ -1,5 +1,5 @@
 use dirk_render_utils::upload::ImageUpload;
-use std::{collections::HashMap, mem::size_of, time::Instant};
+use std::{collections::HashMap, time::Instant};
 
 use dirk_input::{ButtonState, ImeEvent, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
@@ -513,10 +513,8 @@ struct EguiFrameResources {
 
 impl EguiFrameResources {
     fn new(device: &Rhi, allocator: &BindingLayout<EguiFrameSet>) -> Result<Self> {
-        let uniform_size =
-            u64::try_from(size_of::<EguiUbo>()).map_err(|_| invalid_resource(Ir::OutOfRange))?;
         let uniform = UniformBuffer::new(device)?;
-        let set = allocator.uniform_buffer(device, 0, uniform.buffer(), uniform_size)?;
+        let set = allocator.uniform_buffer(device, 0, &uniform)?;
         Ok(Self {
             uniform,
             set,

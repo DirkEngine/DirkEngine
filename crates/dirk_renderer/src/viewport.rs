@@ -72,18 +72,8 @@ impl Viewport {
         let camera_ubo = [UniformBuffer::new(device)?, UniformBuffer::new(device)?];
         let allocator = BindingLayout::<SceneSet>::new(device)?;
         let camera_sets = [
-            allocator.uniform_buffer(
-                device,
-                0,
-                camera_ubo[0].buffer(),
-                size_of::<SceneUbo>() as u64,
-            )?,
-            allocator.uniform_buffer(
-                device,
-                0,
-                camera_ubo[1].buffer(),
-                size_of::<SceneUbo>() as u64,
-            )?,
+            allocator.uniform_buffer(device, 0, &camera_ubo[0])?,
+            allocator.uniform_buffer(device, 0, &camera_ubo[1])?,
         ];
         Ok(Self {
             camera_ubo,

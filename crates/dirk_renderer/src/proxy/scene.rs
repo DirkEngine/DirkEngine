@@ -274,8 +274,8 @@ impl ProxyGpu {
     fn new(rhi: &Rhi, allocator: &BindingLayout<ObjectSet>) -> Result<Self> {
         let ubo = [UniformBuffer::new(rhi)?, UniformBuffer::new(rhi)?];
         let sets = [
-            allocator.uniform_buffer(rhi, 0, ubo[0].buffer(), size_of::<ProxyUbo>() as u64)?,
-            allocator.uniform_buffer(rhi, 0, ubo[1].buffer(), size_of::<ProxyUbo>() as u64)?,
+            allocator.uniform_buffer(rhi, 0, &ubo[0])?,
+            allocator.uniform_buffer(rhi, 0, &ubo[1])?,
         ];
         Ok(Self { ubo, sets })
     }
