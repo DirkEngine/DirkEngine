@@ -766,10 +766,14 @@ impl Renderer {
                     self.windows[&target.window].presenter.add_pass(
                         &self.rhi,
                         &mut graph,
-                        viewport_source,
+                        &presentation::PresentationSource {
+                            id: viewport.output_id(),
+                            view: viewport.output_rhi_view(),
+                            texture: viewport_source,
+                        },
                         swapchain,
                         target_extent,
-                    );
+                    )?;
                     cleared = true;
                 }
             }

@@ -6,6 +6,7 @@ use dirk_player::PlayerId;
 use dirk_rhi::{Extent3d, ImageUsages, SampleCount, TextureFormat};
 use dirk_shaders::types::SceneUbo;
 use dirk_universe::{Entity, WorldId};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     Result,
@@ -16,6 +17,12 @@ use crate::{
     },
 };
 
+/// Returns an identifier no other viewport output has used.
+pub(crate) fn next_output_id() -> u64 {
+    static NEXT_OUTPUT_ID: AtomicU64 = AtomicU64::new(0);
+    NEXT_OUTPUT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(crate) struct Viewport {
     player: PlayerId,
     camera_ubo: [UniformBuffer<SceneUbo>; crate::MAX_FRAMES_IN_FLIGHT],
@@ -24,6 +31,8 @@ pub(crate) struct Viewport {
     pub world: Option<WorldId>,
     settings: ViewportSettings,
     output: Image,
+    /// Changes whenever `output` is recreated.
+    output_id: u64,
     output_state: dirk_rhi::ImageState,
     output_has_rendered: bool,
 }
@@ -56,6 +65,7 @@ impl Viewport {
             world: None,
             settings,
             output: Self::create_output(device, &settings)?,
+            output_id: next_output_id(),
             output_state: Viewport::undefined_state(),
             output_has_rendered: false,
         })
@@ -90,9 +100,13 @@ impl Viewport {
         &self.settings
     }
 
-    #[cfg(feature = "editor")]
     pub fn output_rhi_view(&self) -> &crate::resources::ImageView {
         self.output.rhi_view()
+    }
+    /// Identifies the current output image; it changes when the output is recreated.
+    #[cfg(not(feature = "editor"))]
+    pub fn output_id(&self) -> u64 {
+        self.output_id
     }
     pub fn is_renderable(&self) -> bool {
         self.world.is_some() && self.camera.is_some()
@@ -118,6 +132,7 @@ impl Viewport {
 
         self.settings = settings;
         self.output = Self::create_output(device, &self.settings)?;
+        self.output_id = next_output_id();
         self.output_state = Self::undefined_state();
         self.output_has_rendered = false;
         Ok(())

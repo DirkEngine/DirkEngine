@@ -1,9 +1,11 @@
 //! Samples the linear scene output and encodes it once for the window's format.
+use std::cell::RefCell;
+
 use dirk_rhi::{
-    AddressMode, BindGroupDesc, BindGroupEntry, BindGroupLayout, BindGroupLayoutDesc,
+    AddressMode, BindGroup, BindGroupDesc, BindGroupEntry, BindGroupLayout, BindGroupLayoutDesc,
     BindingResource, ColorTargetState, ColorWrites, CullMode, Extent3d, FilterMode,
-    GraphicsPipeline, GraphicsPipelineDesc, PipelineLayout, PipelineLayoutDesc, RasterState, Rhi,
-    SampleCount, Sampler, SamplerDesc, ShaderStages, TextureFormat,
+    GraphicsPipeline, GraphicsPipelineDesc, ImageView, PipelineLayout, PipelineLayoutDesc,
+    RasterState, Rhi, SampleCount, Sampler, SamplerDesc, ShaderStages, TextureFormat,
 };
 
 use crate::{
@@ -18,6 +20,15 @@ pub(crate) struct Presenter {
     layout: PipelineLayout,
     bindings: BindGroupLayout,
     sampler: Sampler,
+    /// Binding of the last presented source, keyed by its identity.
+    source_binding: RefCell<Option<(u64, BindGroup)>>,
+}
+
+/// A presented image and an identity that changes whenever it is recreated.
+pub(crate) struct PresentationSource<'a> {
+    pub id: u64,
+    pub view: &'a ImageView,
+    pub texture: TextureHandle,
 }
 
 impl Presenter {
@@ -79,6 +90,7 @@ impl Presenter {
             layout,
             bindings,
             sampler,
+            source_binding: RefCell::new(None),
         })
     }
 
@@ -89,31 +101,48 @@ impl Presenter {
         Ok(())
     }
 
-    pub(crate) fn add_pass<'a>(
-        &'a self,
-        rhi: &'a Rhi,
-        graph: &mut RenderGraph<'a>,
-        source: TextureHandle,
-        target: TextureHandle,
-        extent: Extent3d,
-    ) {
-        graph
-            .add_pass("encode scene for presentation")
-            .read_sampled(source, ShaderStages::FRAGMENT)
-            .write_color_attachment(target, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0))
-            .execute(Box::new(move |cmd, ctx| {
-                let source = ctx.resolve(source)?;
-                let binding = rhi.create_bind_group(&BindGroupDesc {
+    /// Binds `source` for sampling, reusing the previous binding while the
+    /// source is unchanged.
+    fn bind_source(&self, rhi: &Rhi, source: &PresentationSource<'_>) -> Result<()> {
+        let mut binding = self.source_binding.borrow_mut();
+        if binding.as_ref().is_none_or(|(id, _)| *id != source.id) {
+            // Replacing the binding retires the previous one through the RHI.
+            *binding = Some((
+                source.id,
+                rhi.create_bind_group(&BindGroupDesc {
                     label: "presentation texture",
                     layout: &self.bindings,
                     entries: &[BindGroupEntry {
                         binding: 0,
                         resource: BindingResource::SampledImage {
-                            view: &source.view,
+                            view: source.view,
                             sampler: &self.sampler,
                         },
                     }],
-                })?;
+                })?,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_pass<'a>(
+        &'a self,
+        rhi: &Rhi,
+        graph: &mut RenderGraph<'a>,
+        source: &PresentationSource<'_>,
+        target: TextureHandle,
+        extent: Extent3d,
+    ) -> Result<()> {
+        self.bind_source(rhi, source)?;
+        graph
+            .add_pass("encode scene for presentation")
+            .read_sampled(source.texture, ShaderStages::FRAGMENT)
+            .write_color_attachment(target, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0))
+            .execute(Box::new(move |cmd, _| {
+                let binding = self.source_binding.borrow();
+                let (_, binding) = binding.as_ref().ok_or(dirk_rhi::Error::from(
+                    dirk_rhi::InvalidResourceKind::BadState,
+                ))?;
                 // Texture extents are bounded by the backend, well within exact f32 integers.
                 #[allow(clippy::cast_precision_loss)]
                 cmd.set_viewport(dirk_rhi::Viewport {
@@ -131,14 +160,16 @@ impl Presenter {
                     height: extent.height,
                 })?;
                 // SAFETY: the graph declares the sampled texture and attachment. The
-                // window owns the sampler/pipeline; RHI retirement retains this binding.
+                // window owns the sampler, pipeline, and binding; RHI retirement
+                // retains a replaced binding through its GPU use.
                 unsafe {
                     cmd.bind_graphics_pipeline(&self.pipeline)?;
-                    cmd.bind_groups(&self.layout, 0, &[&binding], &[])?;
+                    cmd.bind_groups(&self.layout, 0, &[binding], &[])?;
                     cmd.draw(3, 1, 0, 0)?;
                 }
                 Ok(())
             }));
+        Ok(())
     }
 }
 
@@ -227,7 +258,17 @@ mod tests {
             graph
                 .add_pass("clear target")
                 .write_color_attachment(dst, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0));
-            self.add_pass(rhi, &mut graph, src, dst, extent);
+            self.add_pass(
+                rhi,
+                &mut graph,
+                &PresentationSource {
+                    id: crate::viewport::next_output_id(),
+                    view: &source_view,
+                    texture: src,
+                },
+                dst,
+                extent,
+            )?;
             let mut cmd = rhi.create_encoder::<Graphics>("midtone readback")?;
             // SAFETY: fresh images; graph establishes source/target dependencies;
             // CPU readback happens only after submission completion.
