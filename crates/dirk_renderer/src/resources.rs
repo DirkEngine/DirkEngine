@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 pub mod buffer;
 pub mod descriptors;
 pub mod image;
