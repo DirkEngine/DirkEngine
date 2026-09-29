@@ -5,6 +5,11 @@
 //! into a pipe and a background thread forwards them to the engine. On Windows,
 //! signal-safe atomic flags are polled during the normal tick flow.
 //!
+//! The first handled signal requests a graceful engine shutdown. A second
+//! handled signal terminates the process immediately, so a stuck shutdown can
+//! still be interrupted: Unix re-raises it with the default disposition, and
+//! Windows exits with status `128 + signal`.
+//!
 //! This is intentionally scoped to terminal and service-manager workflows. On
 //! Unix-like systems this covers common termination signals such as `SIGINT`,
 //! `SIGTERM`, `SIGHUP`, and `SIGQUIT`. On Windows, `signal-hook` is limited to
@@ -29,7 +34,9 @@ use signal_hook::low_level::emulate_default_handler;
 use signal_hook::low_level::signal_name;
 #[cfg(windows)]
 use signal_hook::{SigId, flag, low_level::unregister};
-use tracing::{debug, error, info, warn};
+#[cfg(not(windows))]
+use tracing::error;
+use tracing::{debug, info, warn};
 
 #[cfg(windows)]
 use signal_hook::consts::signal::{SIGBREAK, SIGINT};
@@ -114,34 +121,58 @@ impl Drop for SignalListener {
 
 #[cfg(windows)]
 struct SignalListener {
-    registrations: Vec<(i32, std::sync::Arc<AtomicBool>, SigId)>,
+    /// Per-signal flags polled (and cleared) by the engine tick.
+    requested: Vec<(i32, std::sync::Arc<AtomicBool>)>,
+    registrations: Vec<SigId>,
 }
 
 #[cfg(windows)]
 impl SignalListener {
     fn install(_sender: mpsc::Sender<OperatingSystemSignal>) -> anyhow::Result<Self> {
         let mut listener = Self {
+            requested: Vec::new(),
             registrations: Vec::new(),
         };
+        // Set by the first handled signal and never cleared. Mirrors the Unix
+        // listener: a second signal terminates the process immediately, even
+        // if graceful shutdown is stuck.
+        let shutdown_requested = std::sync::Arc::new(AtomicBool::new(false));
         for &signal in handled_signals() {
+            // Actions run in registration order, so the conditional shutdown
+            // must be registered before the flag that arms it.
+            listener
+                .registrations
+                .push(flag::register_conditional_shutdown(
+                    signal,
+                    128 + signal,
+                    std::sync::Arc::clone(&shutdown_requested),
+                )?);
+            listener.registrations.push(flag::register(
+                signal,
+                std::sync::Arc::clone(&shutdown_requested),
+            )?);
+
             let requested = std::sync::Arc::new(AtomicBool::new(false));
-            let id = flag::register(signal, std::sync::Arc::clone(&requested))?;
-            listener.registrations.push((signal, requested, id));
+            listener
+                .registrations
+                .push(flag::register(signal, std::sync::Arc::clone(&requested))?);
+            listener.requested.push((signal, requested));
         }
         Ok(listener)
     }
 
     fn received_signal(&self) -> Option<OperatingSystemSignal> {
-        self.registrations
+        self.requested
             .iter()
-            .find(|(_, requested, _)| requested.swap(false, Ordering::SeqCst))
-            .map(|(signal, _, _)| OperatingSystemSignal::new(*signal))
+            .find(|(_, requested)| requested.swap(false, Ordering::SeqCst))
+            .map(|(signal, _)| OperatingSystemSignal::new(*signal))
     }
 
     fn shutdown(&mut self) {
-        for (_, _, id) in self.registrations.drain(..) {
+        for id in self.registrations.drain(..) {
             unregister(id);
         }
+        self.requested.clear();
     }
 }
 
