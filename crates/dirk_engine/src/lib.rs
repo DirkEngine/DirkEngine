@@ -309,6 +309,10 @@ impl Engine {
 
         let delta_time = self.capture_delta_time();
 
+        // TODO: renders too fast and semaphores have problem.
+        // remove when rendering takes longer
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
         self.universe.tick(delta_time);
 
         for index in 0..self.subsystems.len() {
