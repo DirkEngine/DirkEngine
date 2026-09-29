@@ -63,11 +63,12 @@ use super::{
     handle::AssetRef,
 };
 
-use dirk_events::EventManager;
+use dirk_events::{Consumer, Event, EventManager};
 use dirk_threads::WorkerPool;
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tempfile::TempDir;
 
@@ -96,7 +97,7 @@ fn write_model_fixture(dir: &Path, name: &str) -> PathBuf {
 }
 
 fn wait_for_load<T: Asset>(mut load: AssetLoad<T>) -> Result<Handle<T>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if let Some(result) = load.try_poll() {
             return result;
@@ -108,6 +109,36 @@ fn wait_for_load<T: Asset>(mut load: AssetLoad<T>) -> Result<Handle<T>> {
         );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+/// Waits up to five seconds for the next event on `consumer`.
+fn next_event<E: Event>(consumer: &mut Consumer<E>) -> E {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::time::timeout(Duration::from_secs(5), consumer.consume()).await })
+        .expect("event was not delivered in time")
+        .expect("event bus should remain open")
+}
+
+/// Returns the unload events dispatched before this call.
+///
+/// Unload dispatchers share one ordered routing queue, so the unload of a
+/// throwaway sentinel asset arrives after every earlier unload.
+fn unloads_before_sentinel(
+    events: &EventManager,
+    consumer: &mut Consumer<InternalAssetUnloaded>,
+) -> Vec<InternalAssetUnloaded> {
+    let sentinel = AssetHandle::from_raw("sentinel.dirkasset", AssetType::Unknown);
+    drop(AssetRef::new(
+        sentinel.clone(),
+        FakeAsset { value: 0 },
+        events.register(),
+    ));
+    std::iter::from_fn(|| Some(next_event(consumer)))
+        .take_while(|event| event.handle != sentinel)
+        .collect()
 }
 
 /// A minimal `Asset` implementation used only in tests that need a typed
@@ -619,14 +650,16 @@ mod handle {
         let asset_ref = AssetRef::new(asset_handle.clone(), FakeAsset { value: 0 }, dispatcher);
         let handle = Handle::new(asset_ref);
 
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert_eq!(consumer.consume_all().count(), 0, "no event yet");
+        assert!(
+            unloads_before_sentinel(&events, &mut consumer).is_empty(),
+            "no event yet"
+        );
 
         drop(handle);
 
-        let fired = consumer.consume_blocking().unwrap();
-        assert_eq!(fired.handle, asset_handle);
+        let fired = unloads_before_sentinel(&events, &mut consumer);
+        assert_eq!(fired.len(), 1, "exactly one InternalAssetUnloaded event");
+        assert_eq!(fired[0].handle, asset_handle);
     }
 
     #[test]
@@ -646,17 +679,23 @@ mod handle {
         let h3 = h1.clone();
 
         drop(h1);
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert_eq!(consumer.consume_all().count(), 0, "clones still alive");
+        assert!(
+            unloads_before_sentinel(&events, &mut consumer).is_empty(),
+            "clones still alive"
+        );
 
         drop(h2);
-        // wait for the event to be dispatched
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert_eq!(consumer.consume_all().count(), 0, "one clone still alive");
+        assert!(
+            unloads_before_sentinel(&events, &mut consumer).is_empty(),
+            "one clone still alive"
+        );
 
         drop(h3); // last reference
-        assert!(consumer.consume_blocking().is_some(), "last clone dropped");
+        assert_eq!(
+            unloads_before_sentinel(&events, &mut consumer).len(),
+            1,
+            "last clone dropped"
+        );
     }
 
     #[test]
@@ -671,7 +710,7 @@ mod handle {
         let handle = Handle::new(asset_ref);
         drop(handle);
 
-        let ev = consumer.consume_blocking().unwrap();
+        let ev = next_event(&mut consumer);
         assert_eq!(ev.handle, expected);
     }
 
@@ -803,7 +842,7 @@ mod registry {
             Arc, Barrier,
             atomic::{AtomicUsize, Ordering},
         },
-        time::{Duration, Instant},
+        time::Instant,
     };
 
     fn registry_with_models(
@@ -828,14 +867,22 @@ mod registry {
         (root, events, registry, ids.remove(0))
     }
 
-    fn wait_for_event<E: dirk_events::Event>(consumer: &mut dirk_events::Consumer<E>) -> E {
-        let deadline = Instant::now() + Duration::from_secs(2);
+    /// Ticks `registry` until it re-emits an unload, for at most five seconds.
+    fn wait_for_unload(
+        registry: &AssetRegistry,
+        consumer: &mut Consumer<AssetUnloaded>,
+    ) -> AssetUnloaded {
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(event) = consumer.consume_all().next() {
+            registry.tick();
+            if let Some(event) = consumer.try_consume() {
                 return event;
             }
-            assert!(Instant::now() < deadline, "event was not delivered in time");
-            std::thread::sleep(Duration::from_millis(1));
+            assert!(
+                Instant::now() < deadline,
+                "unload was not delivered in time"
+            );
+            std::thread::yield_now();
         }
     }
 
@@ -902,7 +949,7 @@ mod registry {
         let (id, sentinel) = (&ids[0], &ids[1]);
         let mut loaded = events.subscribe::<AssetLoaded<Model>>();
         let first = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
-        let event = wait_for_event(&mut loaded);
+        let event = next_event(&mut loaded);
         assert_eq!(event.handle.generation(), first.generation());
         drop(event);
         let second = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
@@ -910,7 +957,7 @@ mod registry {
         // Loaded events share one ordered producer queue, so a duplicate
         // event for `second` would arrive before the sentinel's event.
         let _sentinel = wait_for_load(registry.load_asset::<Model>(sentinel)).unwrap();
-        assert_eq!(&wait_for_event(&mut loaded).handle.handle(), sentinel);
+        assert_eq!(&next_event(&mut loaded).handle.handle(), sentinel);
         first.take().unwrap();
         assert!(matches!(second.take(), Err(Error::AlreadyTaken)));
     }
@@ -966,28 +1013,41 @@ mod registry {
         let mut unloaded = events.subscribe::<AssetUnloaded>();
         let first = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
         let first_generation = first.generation();
-        drop(wait_for_event(&mut loaded));
+        drop(next_event(&mut loaded));
         drop(first);
         let second = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
         assert_ne!(first_generation, second.generation());
-        drop(wait_for_event(&mut loaded));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let old_unload = loop {
-            registry.tick();
-            if let Some(event) = unloaded.consume_all().next() {
-                break event;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "old unload was not delivered in time"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        };
+        drop(next_event(&mut loaded));
+        let old_unload = wait_for_unload(&registry, &mut unloaded);
         assert_eq!(old_unload.handle, id);
         assert_eq!(old_unload.generation, first_generation);
         assert_eq!(
             registry.cached_handle::<Model>(&id).unwrap().generation(),
             second.generation()
         );
+        let second_generation = second.generation();
+        drop(second);
+        assert_eq!(
+            wait_for_unload(&registry, &mut unloaded).generation,
+            second_generation
+        );
+    }
+
+    #[test]
+    fn unloads_continue_after_all_assets_are_released() {
+        let (_root, events, registry, id) = registry_with_model("reloaded");
+        let mut unloaded = events.subscribe::<AssetUnloaded>();
+
+        // Every cycle drops the last asset and with it every unload dispatcher.
+        for _ in 0..2 {
+            let handle = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+            let generation = handle.generation();
+            drop(handle);
+
+            let event = wait_for_unload(&registry, &mut unloaded);
+            assert_eq!(event.handle, id);
+            assert_eq!(event.generation, generation);
+            assert!(!registry.inner.loaded_assets.read().contains_key(&id));
+        }
     }
 }
