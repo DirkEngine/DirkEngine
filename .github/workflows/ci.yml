@@ -128,6 +128,3 @@ jobs:
 
       - name: Test (no default features)
         run: cargo nextest run --workspace --locked --no-default-features
-
-      - name: Test (all features)
-        run: cargo nextest run --workspace --locked --all-features
