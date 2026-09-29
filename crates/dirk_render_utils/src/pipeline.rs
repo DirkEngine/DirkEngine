@@ -1,10 +1,13 @@
 //! Typed graphics pipelines with reflected shader interface validation.
+//!
+//! The merge and validation helpers are public so renderers building pipelines
+//! outside [`GraphicsPipeline`] share one implementation of these checks.
 use std::marker::PhantomData;
 
 use dirk_rhi::{
     BindGroupLayoutDesc, BindGroupLayoutEntry, BlendState, ColorTargetState, ColorWrites, CullMode,
     DepthBiasState, DepthState, FrontFace, GraphicsPipelineDesc, IndexFormat, PipelineLayoutDesc,
-    PrimitiveTopology, RasterState, SampleCount,
+    PrimitiveTopology, RasterState, SampleCount, VertexBufferLayout,
 };
 use tracing::debug;
 
@@ -86,8 +89,16 @@ pub trait GraphicsPipelineSpec {
     {
         let reflected =
             merge_shader_set_layouts::<Self::VertexShader, Self::FragmentShader>(Self::NAME)?;
-        validate_pipeline_descriptor_layout::<Self>(Self::NAME, &reflected)?;
-        validate_pipeline_vertex_input::<Self>(Self::NAME)
+        validate_descriptor_layouts(
+            Self::NAME,
+            <Self::DescriptorSets as DescriptorSetInput>::BINDINGS,
+            &reflected,
+        )?;
+        validate_vertex_input(
+            Self::NAME,
+            &Self::Input::layout(),
+            Self::VertexShader::INPUT_LAYOUTS,
+        )
     }
 }
 
@@ -276,8 +287,12 @@ impl<'pass, Spec: GraphicsPipelineSpec> GraphicsPipelineRenderingContext<'_, 'pa
     }
 }
 
-fn merge_shader_set_layouts<V: VertexShader, F: FragmentShader>(
-    pipeline: &'static str,
+/// Merges the reflected vertex and fragment layouts of every descriptor set.
+///
+/// # Errors
+/// Rejects a binding reflected with different types by the two stages.
+pub fn merge_shader_set_layouts<V: VertexShader, F: FragmentShader>(
+    pipeline: &str,
 ) -> Result<Vec<Vec<BindGroupLayoutEntry>>> {
     let max_sets = V::SET_LAYOUTS.len().max(F::SET_LAYOUTS.len());
     (0..max_sets)
@@ -292,8 +307,12 @@ fn merge_shader_set_layouts<V: VertexShader, F: FragmentShader>(
         .collect()
 }
 
-fn merge_descriptor_set_layout(
-    pipeline: &'static str,
+/// Merges one set's per-stage bindings, sorted by binding with unioned visibility.
+///
+/// # Errors
+/// Rejects a binding reflected with different types by the two stages.
+pub fn merge_descriptor_set_layout(
+    pipeline: &str,
     set: usize,
     vertex: &[BindGroupLayoutEntry],
     fragment: &[BindGroupLayoutEntry],
@@ -323,17 +342,20 @@ fn merge_descriptor_set_layout(
     Ok(merged)
 }
 
-fn validate_pipeline_descriptor_layout<S: GraphicsPipelineSpec>(
-    pipeline: &'static str,
+/// Checks host set declarations against merged reflected layouts, set by set.
+///
+/// `expected` bindings must be declared in binding order with the merged visibility.
+///
+/// # Errors
+/// Rejects any set whose declared bindings differ from the reflected ones.
+pub fn validate_descriptor_layouts(
+    pipeline: &str,
+    expected: &[&[BindGroupLayoutEntry]],
     reflected: &[Vec<BindGroupLayoutEntry>],
 ) -> Result<()> {
-    let max_sets = reflected.len().max(S::DescriptorSets::SET_COUNT);
-    for set in 0..max_sets {
+    for set in 0..reflected.len().max(expected.len()) {
         let actual = reflected.get(set).map(Vec::as_slice).unwrap_or_default();
-        let expected = S::DescriptorSets::BINDINGS
-            .get(set)
-            .copied()
-            .unwrap_or_default();
+        let expected = expected.get(set).copied().unwrap_or_default();
         if expected != actual {
             debug!(
                 pipeline,
@@ -348,19 +370,171 @@ fn validate_pipeline_descriptor_layout<S: GraphicsPipelineSpec>(
     Ok(())
 }
 
-fn validate_pipeline_vertex_input<S: GraphicsPipelineSpec>(pipeline: &'static str) -> Result<()> {
-    let expected = S::Input::layout();
-    let actual = S::VertexShader::INPUT_LAYOUTS;
-    let matches = actual.len() == 1
-        && actual[0].stride == expected.stride
-        && actual[0].step_mode == expected.step_mode
-        && actual[0].attributes == expected.attributes;
+/// Checks a host vertex record against the vertex shader's reflected inputs.
+///
+/// # Errors
+/// Rejects anything other than exactly one reflected buffer matching `expected`.
+pub fn validate_vertex_input(
+    pipeline: &str,
+    expected: &VertexBufferLayout<'_>,
+    reflected: &[VertexBufferLayout<'_>],
+) -> Result<()> {
+    let matches = matches!(reflected, [actual] if actual.stride == expected.stride
+        && actual.step_mode == expected.step_mode
+        && actual.attributes == expected.attributes);
     if matches {
         Ok(())
     } else {
-        debug!(pipeline, "pipeline vertex input mismatch");
-        Err(anyhow::anyhow!(
-            "pipeline {pipeline}: vertex input layout mismatch"
-        ))
+        debug!(
+            pipeline,
+            ?expected,
+            ?reflected,
+            "pipeline vertex input mismatch"
+        );
+        anyhow::bail!("pipeline {pipeline}: vertex input layout mismatch")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shader::{Shader, ShaderCode};
+    use dirk_rhi::{BindingType, ShaderStage, ShaderStages, VertexAttribute, VertexFormat};
+
+    const UNIFORM: BindingType = BindingType::UniformBuffer {
+        dynamic_offset: false,
+    };
+
+    const fn entry(
+        binding: u32,
+        ty: BindingType,
+        visibility: ShaderStages,
+    ) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            ty,
+            visibility,
+        }
+    }
+
+    const CAMERA_VERTEX: &[BindGroupLayoutEntry] = &[entry(0, UNIFORM, ShaderStages::VERTEX)];
+    const MATERIAL_FRAGMENT: &[BindGroupLayoutEntry] = &[
+        entry(1, BindingType::SampledImage, ShaderStages::FRAGMENT),
+        entry(0, UNIFORM, ShaderStages::FRAGMENT),
+    ];
+    const MERGED: &[BindGroupLayoutEntry] = &[
+        entry(
+            0,
+            UNIFORM,
+            ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+        ),
+        entry(1, BindingType::SampledImage, ShaderStages::FRAGMENT),
+    ];
+    const POSITION: &[VertexAttribute] = &[VertexAttribute {
+        location: 0,
+        format: VertexFormat::Float32x3,
+        offset: 0,
+    }];
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::NoUninit)]
+    struct Position([f32; 3]);
+    impl VertexInput for Position {
+        const ATTRIBUTES: &'static [VertexAttribute] = POSITION;
+    }
+
+    struct Set;
+    impl SetLayout for Set {
+        const BINDINGS: &'static [BindGroupLayoutEntry] = MERGED;
+    }
+
+    const NO_CODE: ShaderCode = ShaderCode {
+        #[cfg(not(target_vendor = "apple"))]
+        spirv: &[],
+        #[cfg(target_vendor = "apple")]
+        msl: "",
+    };
+
+    struct Vertex;
+    // SAFETY: never created; only the reflected metadata is inspected.
+    unsafe impl Shader for Vertex {
+        const CODE: ShaderCode = NO_CODE;
+        const ENTRYPOINT: &'static str = "main";
+        const STAGE: ShaderStage = ShaderStage::Vertex;
+        const SET_LAYOUTS: &'static [&'static [BindGroupLayoutEntry]] = &[CAMERA_VERTEX];
+    }
+    impl VertexShader for Vertex {
+        const INPUT_LAYOUTS: &'static [VertexBufferLayout<'static>] = &[VertexBufferLayout {
+            stride: 12,
+            step_mode: dirk_rhi::VertexStepMode::Vertex,
+            attributes: POSITION,
+        }];
+    }
+
+    struct Fragment;
+    // SAFETY: never created; only the reflected metadata is inspected.
+    unsafe impl Shader for Fragment {
+        const CODE: ShaderCode = NO_CODE;
+        const ENTRYPOINT: &'static str = "main";
+        const STAGE: ShaderStage = ShaderStage::Fragment;
+        const SET_LAYOUTS: &'static [&'static [BindGroupLayoutEntry]] = &[MATERIAL_FRAGMENT];
+    }
+    impl FragmentShader for Fragment {}
+
+    struct Spec;
+    impl GraphicsPipelineSpec for Spec {
+        type VertexShader = Vertex;
+        type FragmentShader = Fragment;
+        type Input = Position;
+        type DescriptorSets = (Set,);
+        const NAME: &'static str = "test pipeline";
+    }
+
+    #[test]
+    fn merged_layouts_union_visibility_in_binding_order() -> Result<()> {
+        assert_eq!(
+            merge_shader_set_layouts::<Vertex, Fragment>("merge")?,
+            [MERGED]
+        );
+        let conflicting = [entry(0, BindingType::SampledImage, ShaderStages::FRAGMENT)];
+        let error = merge_descriptor_set_layout("merge", 0, CAMERA_VERTEX, &conflicting)
+            .expect_err("conflicting binding types");
+        assert!(
+            error
+                .to_string()
+                .contains("descriptor layout mismatch in set 0")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn descriptor_layouts_must_match_every_reflected_set() {
+        let reflected = [MERGED.to_vec()];
+        assert!(validate_descriptor_layouts("sets", &[MERGED], &reflected).is_ok());
+        for expected in [&[][..], &[CAMERA_VERTEX], &[MERGED, CAMERA_VERTEX]] {
+            let error = validate_descriptor_layouts("sets", expected, &reflected)
+                .expect_err("mismatched descriptor sets");
+            assert!(error.to_string().contains("descriptor layout mismatch"));
+        }
+    }
+
+    #[test]
+    fn vertex_input_must_match_the_single_reflected_buffer() {
+        let expected = Position::layout();
+        assert!(validate_vertex_input("input", &expected, Vertex::INPUT_LAYOUTS).is_ok());
+        let wider = VertexBufferLayout {
+            stride: 16,
+            ..expected
+        };
+        for reflected in [&[][..], &[wider], &[expected, expected]] {
+            let error = validate_vertex_input("input", &expected, reflected)
+                .expect_err("mismatched vertex input");
+            assert!(error.to_string().contains("vertex input layout mismatch"));
+        }
+    }
+
+    #[test]
+    fn specs_validate_reflected_interfaces() {
+        assert!(Spec::validate().is_ok());
     }
 }
