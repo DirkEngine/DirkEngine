@@ -12,10 +12,11 @@ Rendering has three layers:
 ## Ownership and retirement
 
 Resources have unique, non-cloneable owners. CPU writes require `&mut`; reads use
-`&`. Native allocations share only an internal device/context owner. Image views
-and bind groups are non-owning references: keep their source allocations valid
-through the last recording, or retire them in that recording's submission cycle.
-Do not record later work through a binding after its source owner was dropped.
+`&`. Native allocations share an internal device/context owner, and an image view
+keeps its native image alive. Bind groups are non-owning references: keep the
+resources they bind valid through the last recording, or retire them in that
+recording's submission cycle. Do not record later work through a binding after
+its source owner was dropped.
 
 Dropping a resource places its native payload in the current retirement bucket.
 `Rhi::finish_cycle` seals that bucket with all graphics and transfer submissions.
@@ -53,6 +54,8 @@ trusted imports with reflected interface checks in the utility/build layers.
 ## Graph
 
 The graph executes every pass in insertion order, including clear-only passes.
+Passes whose callback kind does not match their declarations (graphics callbacks
+without attachments, transfer callbacks with attachments) fail graph compilation.
 Imports borrow allocations and provide actual initial and desired final states.
 Repeated imports of the same allocation share one graph-local handle; conflicting
 states are errors. Buffers are tracked as whole allocations. Images are tracked
@@ -68,8 +71,12 @@ verified by the compiler. There is no transient allocator or cross-frame registr
 A platform window has one shared native owner, also retained by the surface.
 Mutable focus, occlusion, and theme state stay in the platform wrapper. Retiring a
 native surface keeps its window owner until actual native destruction. Zero-size
-or occluded windows skip acquisition; resize and out-of-date results recreate
-at the next usable acquisition. Device/submission failures remain fatal.
+or occluded windows skip acquisition, and a window whose surface has no
+presentable extent creates or resizes its swapchain at a later frame. Resize and
+out-of-date results recreate at the next usable acquisition; acquisition timeouts
+skip the frame. Viewports are only rendered for windows that acquired an image.
+Device/submission failures remain fatal, but unsupported model content is logged
+and skipped rather than failing the frame.
 
 Universe observers mark dirty IDs. After the universe tick, the renderer extracts
 one final-state delta per changed entity. CPU proxy updates do not write GPU
