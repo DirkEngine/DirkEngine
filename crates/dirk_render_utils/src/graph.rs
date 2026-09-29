@@ -56,6 +56,15 @@ impl TextureDesc<'_> {
         )
     }
 
+    /// Subresources rendered through this texture's attachment view.
+    fn view_range(&self) -> SubresourceRange {
+        self.imported
+            .as_ref()
+            .map_or(SubresourceRange::WHOLE, |imported| {
+                imported.view.info().range
+            })
+    }
+
     fn attachment_extent(&self, range: SubresourceRange) -> Result<Extent3d> {
         anyhow::ensure!(
             range.mip_level_count == 1 && range.array_layer_count == 1,
@@ -78,7 +87,9 @@ pub struct ImportedTexture<'a> {
     /// Image allocation used by the graph.
     pub image: &'a RhiImage,
     /// View of the paired image covering the attachment or sampling range.
-    /// Attachment declarations must match this view's single mip and layer.
+    /// Attachment declarations and resolves must match this view's single mip
+    /// and layer; import one allocation per graph, so rendering several mips
+    /// of one image takes one graph per mip.
     pub view: &'a ImageView,
     /// Actual access state before graph execution.
     pub initial_state: ImageState,
@@ -280,6 +291,9 @@ pub enum TextureWrite {
         /// Load/store behavior and clear value.
         info: AttachmentInfo,
         /// Multisample resolve target written at the end of the pass.
+        ///
+        /// The target is written through its own view: the imported view's
+        /// mip and layer, or the single subresource of a transient texture.
         resolve: Option<TextureHandle>,
     },
     /// Depth/stencil render target.
@@ -408,6 +422,8 @@ struct AccessDecl {
     range: SubresourceRange,
     state: ImageState,
     attachment: Option<AttachmentInfo>,
+    /// Multisample resolve destination whose range comes from its own view.
+    resolve_target: bool,
 }
 
 /// Rendering callback with access to declared graph resources.
@@ -532,6 +548,7 @@ impl<'a> PassBuilder<'_, 'a> {
             range,
             state: read.state(),
             attachment: None,
+            resolve_target: false,
         });
         self
     }
@@ -560,7 +577,8 @@ impl<'a> PassBuilder<'_, 'a> {
 
     /// Declares a write access with an explicit subresource range.
     /// Attachments select one mip and layer matching the imported view, and all
-    /// attachments in a pass must have the same mip extent.
+    /// attachments in a pass must have the same mip extent. A color attachment's
+    /// resolve target ignores `range` and uses its own view instead.
     pub fn write_range(
         &mut self,
         handle: TextureHandle,
@@ -572,6 +590,7 @@ impl<'a> PassBuilder<'_, 'a> {
             range,
             state: write.state(),
             attachment: write.attachment(),
+            resolve_target: false,
         });
         if let TextureWrite::ColorAttachment {
             resolve: Some(resolve_handle),
@@ -580,9 +599,10 @@ impl<'a> PassBuilder<'_, 'a> {
         {
             self.pass.writes.push(AccessDecl {
                 handle: resolve_handle,
-                range,
+                range: SubresourceRange::WHOLE,
                 state: ImageState::ColorAttachment,
                 attachment: None,
+                resolve_target: true,
             });
             self.pass.color_resolves.push((handle, resolve_handle));
         }
@@ -610,7 +630,8 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declares a multisampled colour attachment resolving into
-    /// `resolve_handle`.
+    /// `resolve_handle` through that texture's own view, so an imported view
+    /// selecting a nonzero mip receives the resolve.
     pub fn write_color_attachment_with_resolve(
         &mut self,
         handle: TextureHandle,
@@ -821,6 +842,9 @@ impl<'a> RenderGraph<'a> {
                     anyhow::anyhow!("{}: texture handle is outside this graph", pass.name)
                 })?;
                 let info = desc.image_info();
+                if usage.resolve_target {
+                    usage.range = desc.view_range();
+                }
                 usage.range = usage.range.resolve(&info)?;
                 anyhow::ensure!(
                     usage.range.aspects == info.format.aspects()
@@ -1689,6 +1713,7 @@ mod tests {
                 range: mip_range(2),
                 state: ImageState::CopyDestination,
                 attachment: None,
+                resolve_target: false,
             },
         );
         assert_eq!(barriers.len(), 1);
