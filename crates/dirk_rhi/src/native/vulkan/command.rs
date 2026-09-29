@@ -766,10 +766,6 @@ fn offset3d(origin: crate::Origin3d) -> vk::Offset3D {
 }
 
 fn plus_extent(origin: crate::Origin3d, extent: crate::Extent3d) -> crate::Origin3d {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "texel coordinates fit in 32 bits by the RHI's own range validation"
-    )]
     crate::Origin3d {
         x: origin.x.saturating_add(extent.width),
         y: origin.y.saturating_add(extent.height),

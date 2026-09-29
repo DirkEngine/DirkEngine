@@ -34,9 +34,11 @@ metal = "0.33"
 # Obtains the `CAMetalLayer` backing an AppKit or UIKit view.
 raw-window-metal = "1.1"
 
-# This crate contains the audited boundary between safe wrappers and native operations.
+# Unlike the workspace, which forbids `unsafe`, this crate is the audited boundary
+# between native graphics APIs and their safe wrappers, so unsafe code is allowed
+# here. Every native operation documents its contract with a `# Safety` section.
 [lints.rust]
-unsafe_code = "warn"
+unsafe_code = "allow"
 missing_docs = "warn"
 [lints.clippy]
 pedantic = "warn"

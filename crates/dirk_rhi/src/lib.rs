@@ -7,10 +7,6 @@
 //! have explicit unsafe contracts: callers provide synchronization, resource states,
 //! valid non-owning bindings, and shader/resource bounds. No resource tracker or
 //! implicit state reconciliation runs at submission. See `Rhi::finish_cycle`.
-#![allow(
-    unsafe_code,
-    reason = "native GPU operations and their explicit caller contracts"
-)]
 
 mod backend;
 mod command;

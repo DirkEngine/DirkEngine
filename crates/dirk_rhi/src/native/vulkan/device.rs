@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::{CStr, CString, c_void},
+    ffi::{CStr, CString, c_char, c_void},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -136,46 +136,11 @@ impl Drop for Bootstrap {
 }
 
 impl Context {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Vulkan instance and device setup is kept linear so borrowed create-info data remains auditable"
-    )]
     pub(crate) fn new(info: &RhiCreateInfo<'_>) -> Result<Arc<Self>> {
         // Stable storage outlives every callback, including bootstrap cleanup.
         let validation_errors = Box::new(AtomicUsize::new(0));
         let entry = unsafe { ash::Entry::load() }.map_err(backend_error)?;
-        let application_name = CString::new(info.application_name).map_err(|_| {
-            Ir::Malformed.with_detail("application name contains an interior NUL byte")
-        })?;
-        let engine_name = CString::new(info.engine_name)
-            .map_err(|_| Ir::Malformed.with_detail("engine name contains an interior NUL byte"))?;
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(&application_name)
-            .application_version(version(info.application_version))
-            .engine_name(&engine_name)
-            .engine_version(version(info.engine_version))
-            .api_version(vk::API_VERSION_1_3);
-
-        let mut extensions = if let Some((display, _window)) = info.compatible_surface {
-            ash_window::enumerate_required_extensions(display.into())
-                .map_err(vk_error)?
-                .to_vec()
-        } else {
-            Vec::new()
-        };
-        let available_extensions =
-            unsafe { entry.enumerate_instance_extension_properties(None) }.map_err(vk_error)?;
-        if extension_available(
-            &available_extensions,
-            ash::khr::portability_enumeration::NAME,
-        ) {
-            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
-        }
-        if info.validation {
-            extensions.push(debug_utils::NAME.as_ptr());
-        }
-        extensions.sort_unstable();
-        extensions.dedup();
+        let extensions = instance_extensions(&entry, info)?;
         let enabled_instance_extensions = extensions
             .iter()
             .map(|&extension| {
@@ -184,47 +149,7 @@ impl Context {
                     .into_owned()
             })
             .collect();
-
-        for &extension in &extensions {
-            let name = unsafe { CStr::from_ptr(extension) };
-            if !extension_available(&available_extensions, name) {
-                return Err(backend_error(anyhow::anyhow!(
-                    "required Vulkan instance extension is unavailable"
-                )));
-            }
-        }
-
-        let mut layers = Vec::new();
-        if info.validation {
-            let available_layers =
-                unsafe { entry.enumerate_instance_layer_properties() }.map_err(vk_error)?;
-            if available_layers.iter().any(|layer| unsafe {
-                CStr::from_ptr(layer.layer_name.as_ptr()) == VALIDATION_LAYER
-            }) {
-                layers.push(VALIDATION_LAYER.as_ptr());
-            } else {
-                warn!(
-                    "Vulkan validation was requested, but the Khronos validation layer is unavailable"
-                );
-            }
-        }
-
-        let mut create_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&extensions)
-            .enabled_layer_names(&layers);
-        let mut debug_info = debug_create_info(&validation_errors);
-        if info.validation {
-            create_info = create_info.push_next(&mut debug_info);
-        }
-        if extensions
-            .iter()
-            .any(|&extension| extension == ash::khr::portability_enumeration::NAME.as_ptr())
-        {
-            create_info = create_info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
-        }
-
-        let instance = unsafe { entry.create_instance(&create_info, None) }.map_err(vk_error)?;
+        let instance = create_instance(&entry, info, &extensions, &validation_errors)?;
         let mut bootstrap = Bootstrap {
             instance: Some(instance),
             device: None,
@@ -249,28 +174,7 @@ impl Context {
         };
 
         let surface_loader = surface::Instance::new(&entry, instance);
-        let temporary_surface = if let Some((display, window)) = info.compatible_surface {
-            Some(
-                unsafe {
-                    ash_window::create_surface(
-                        &entry,
-                        instance,
-                        display.into(),
-                        window.into(),
-                        None,
-                    )
-                }
-                .map_err(vk_error)?,
-            )
-        } else {
-            None
-        };
-
-        let selection = select_physical_device(instance, &surface_loader, temporary_surface);
-        if let Some(surface) = temporary_surface {
-            unsafe { surface_loader.destroy_surface(surface, None) };
-        }
-        let selected = selection?;
+        let selected = select_physical_device(&entry, instance, &surface_loader, info)?;
 
         info!(
             device = %selected.name,
@@ -331,7 +235,7 @@ impl Context {
         self.allocator
             .lock()
             .as_mut()
-            .expect("Vulkan allocator exists until context destruction")
+            .ok_or_else(|| backend_error(anyhow::anyhow!("the Vulkan allocator was destroyed")))?
             .allocate(desc)
             .map_err(backend_error)
     }
@@ -427,13 +331,16 @@ impl Context {
         }
     }
 
+    // Destruction paths cannot report errors; failures are logged and the memory leaks.
     fn free(&self, allocation: Allocation) {
-        self.allocator
-            .lock()
-            .as_mut()
-            .expect("Vulkan allocator exists while garbage is collected")
-            .free(allocation)
-            .expect("Vulkan allocation was created by this allocator");
+        let mut allocator = self.allocator.lock();
+        let Some(allocator) = allocator.as_mut() else {
+            error!("a Vulkan allocation outlived its allocator and was leaked");
+            return;
+        };
+        if let Err(error) = allocator.free(allocation) {
+            error!(%error, "failed to free a Vulkan allocation");
+        }
     }
 }
 
@@ -468,24 +375,112 @@ struct SelectedDevice {
     extensions: Vec<vk::ExtensionProperties>,
 }
 
-fn select_physical_device(
-    instance: &ash::Instance,
-    surface_loader: &surface::Instance,
-    surface: Option<vk::SurfaceKHR>,
-) -> Result<SelectedDevice> {
-    let devices = unsafe { instance.enumerate_physical_devices() }.map_err(vk_error)?;
-    devices
-        .into_iter()
-        .filter_map(|raw| inspect_device(instance, surface_loader, surface, raw))
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, selected)| selected)
-        .ok_or(Error::NoDevice)
+/// Instance extensions for presentation, portability, and validation messages.
+fn instance_extensions(entry: &ash::Entry, info: &RhiCreateInfo<'_>) -> Result<Vec<*const c_char>> {
+    let mut extensions = if let Some((display, _window)) = info.compatible_surface {
+        ash_window::enumerate_required_extensions(display.into())
+            .map_err(vk_error)?
+            .to_vec()
+    } else {
+        Vec::new()
+    };
+    let available =
+        unsafe { entry.enumerate_instance_extension_properties(None) }.map_err(vk_error)?;
+    if extension_available(&available, ash::khr::portability_enumeration::NAME) {
+        extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
+    }
+    if info.validation {
+        extensions.push(debug_utils::NAME.as_ptr());
+    }
+    extensions.sort_unstable();
+    extensions.dedup();
+    for &extension in &extensions {
+        if !extension_available(&available, unsafe { CStr::from_ptr(extension) }) {
+            return Err(backend_error(anyhow::anyhow!(
+                "required Vulkan instance extension is unavailable"
+            )));
+        }
+    }
+    Ok(extensions)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "device inspection keeps queried limits, features, and scoring together"
-)]
+fn create_instance(
+    entry: &ash::Entry,
+    info: &RhiCreateInfo<'_>,
+    extensions: &[*const c_char],
+    validation_errors: &AtomicUsize,
+) -> Result<ash::Instance> {
+    let application_name = CString::new(info.application_name)
+        .map_err(|_| Ir::Malformed.with_detail("application name contains an interior NUL byte"))?;
+    let engine_name = CString::new(info.engine_name)
+        .map_err(|_| Ir::Malformed.with_detail("engine name contains an interior NUL byte"))?;
+    let app_info = vk::ApplicationInfo::default()
+        .application_name(&application_name)
+        .application_version(version(info.application_version))
+        .engine_name(&engine_name)
+        .engine_version(version(info.engine_version))
+        .api_version(vk::API_VERSION_1_3);
+    let mut layers = Vec::new();
+    if info.validation {
+        let available_layers =
+            unsafe { entry.enumerate_instance_layer_properties() }.map_err(vk_error)?;
+        if available_layers
+            .iter()
+            .any(|layer| unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) == VALIDATION_LAYER })
+        {
+            layers.push(VALIDATION_LAYER.as_ptr());
+        } else {
+            warn!(
+                "Vulkan validation was requested, but the Khronos validation layer is unavailable"
+            );
+        }
+    }
+    let mut create_info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(extensions)
+        .enabled_layer_names(&layers);
+    let mut debug_info = debug_create_info(validation_errors);
+    if info.validation {
+        create_info = create_info.push_next(&mut debug_info);
+    }
+    if extensions.contains(&ash::khr::portability_enumeration::NAME.as_ptr()) {
+        create_info = create_info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+    }
+    unsafe { entry.create_instance(&create_info, None) }.map_err(vk_error)
+}
+
+/// Selects the best device, requiring presentation support for a compatible surface.
+fn select_physical_device(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    surface_loader: &surface::Instance,
+    info: &RhiCreateInfo<'_>,
+) -> Result<SelectedDevice> {
+    let surface = if let Some((display, window)) = info.compatible_surface {
+        Some(
+            unsafe {
+                ash_window::create_surface(entry, instance, display.into(), window.into(), None)
+            }
+            .map_err(vk_error)?,
+        )
+    } else {
+        None
+    };
+    let devices = unsafe { instance.enumerate_physical_devices() }.map_err(vk_error);
+    let selected = devices.and_then(|devices| {
+        devices
+            .into_iter()
+            .filter_map(|raw| inspect_device(instance, surface_loader, surface, raw))
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, selected)| selected)
+            .ok_or(Error::NoDevice)
+    });
+    if let Some(surface) = surface {
+        unsafe { surface_loader.destroy_surface(surface, None) };
+    }
+    selected
+}
+
 fn inspect_device(
     instance: &ash::Instance,
     surface_loader: &surface::Instance,
@@ -493,75 +488,23 @@ fn inspect_device(
     raw: vk::PhysicalDevice,
 ) -> Option<(u64, SelectedDevice)> {
     let properties = unsafe { instance.get_physical_device_properties(raw) };
-    if properties.api_version < vk::API_VERSION_1_3 {
+    if properties.api_version < vk::API_VERSION_1_3 || !required_features_supported(instance, raw) {
         return None;
     }
-    // Vertex, index, and copy buffers are bounded by the allocation limit;
-    // storage-buffer ranges are reported separately.
-    let max_buffer_size = {
-        let mut vulkan13 = vk::PhysicalDeviceVulkan13Properties::default();
-        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan13);
-        unsafe { instance.get_physical_device_properties2(raw, &mut properties2) };
-        vulkan13.max_buffer_size
-    };
-
     let extensions = unsafe { instance.enumerate_device_extension_properties(raw) }.ok()?;
     if surface.is_some() && !extension_available(&extensions, swapchain::NAME) {
         return None;
     }
-
-    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
-    let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
-    {
-        let mut features = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut vulkan12)
-            .push_next(&mut vulkan13);
-        unsafe { instance.get_physical_device_features2(raw, &mut features) };
-    }
-    if vulkan12.timeline_semaphore != vk::TRUE
-        || vulkan12.vulkan_memory_model != vk::TRUE
-        || vulkan13.dynamic_rendering != vk::TRUE
-        || vulkan13.synchronization2 != vk::TRUE
-    {
-        return None;
-    }
-
-    let queue_properties = unsafe { instance.get_physical_device_queue_family_properties(raw) };
-    let families = QueueFamilies::resolve(&queue_properties, surface_loader, surface, raw)?;
-    let supported_depth_formats: Box<[TextureFormat]> = [
-        TextureFormat::Depth32Float,
-        TextureFormat::Depth24UnormStencil8,
-        TextureFormat::Depth32FloatStencil8,
-        TextureFormat::Depth16Unorm,
-    ]
-    .into_iter()
-    .filter(|format| {
-        unsafe {
-            instance.get_physical_device_format_properties(raw, super::convert::format(*format))
-        }
-        .optimal_tiling_features
-        .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-    })
-    .collect();
-    if supported_depth_formats.is_empty() {
-        return None;
-    }
-
     let features = unsafe { instance.get_physical_device_features(raw) };
     if features.robust_buffer_access != vk::TRUE {
         return None;
     }
-    let sampler_anisotropy = features.sampler_anisotropy == vk::TRUE;
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a supported Vulkan anisotropy limit is finite, positive, and at most 16"
-    )]
-    let max_sampler_anisotropy = if sampler_anisotropy {
-        properties.limits.max_sampler_anisotropy.floor() as u16
-    } else {
-        1
-    };
+    let queue_properties = unsafe { instance.get_physical_device_queue_family_properties(raw) };
+    let families = QueueFamilies::resolve(&queue_properties, surface_loader, surface, raw)?;
+    let supported_depth_formats = depth_formats(instance, raw);
+    if supported_depth_formats.is_empty() {
+        return None;
+    }
 
     let name = properties
         .device_name_as_c_str()
@@ -588,51 +531,105 @@ fn inspect_device(
                 vk::api_version_patch(properties.api_version)
             ),
             families,
-            capabilities: Capabilities {
-                limits: crate::Limits {
-                    max_buffer_size,
-                    max_uniform_buffer_binding_size: u64::from(
-                        properties.limits.max_uniform_buffer_range,
-                    ),
-                    max_storage_buffer_binding_size: u64::from(
-                        properties.limits.max_storage_buffer_range,
-                    ),
-                    max_image_dimension_2d: properties.limits.max_image_dimension2_d,
-                    max_image_dimension_3d: properties.limits.max_image_dimension3_d,
-                    max_image_array_layers: properties.limits.max_image_array_layers,
-                    max_color_attachments: properties.limits.max_color_attachments,
-                    max_bind_groups: properties.limits.max_bound_descriptor_sets,
-                    max_shader_buffers: properties
-                        .limits
-                        .max_per_stage_descriptor_uniform_buffers
-                        .min(properties.limits.max_per_stage_descriptor_storage_buffers),
-                    max_shader_textures: properties
-                        .limits
-                        .max_per_stage_descriptor_sampled_images
-                        .min(properties.limits.max_per_stage_descriptor_storage_images),
-                    max_shader_samplers: properties.limits.max_per_stage_descriptor_samplers,
-                    max_vertex_buffers: properties.limits.max_vertex_input_bindings,
-                },
-                depth_bias_clamp: features.depth_bias_clamp == vk::TRUE,
-                max_sampler_anisotropy,
-                min_uniform_buffer_offset_alignment: properties
-                    .limits
-                    .min_uniform_buffer_offset_alignment,
-                min_storage_buffer_offset_alignment: properties
-                    .limits
-                    .min_storage_buffer_offset_alignment,
-                buffer_copy_offset_alignment: 4,
-                buffer_copy_row_pitch_alignment: 1,
-                dedicated_copy_queue: families.copy != families.graphics,
-            },
+            capabilities: capabilities(instance, raw, &properties, &features, families),
             supported_depth_formats,
-            sampler_anisotropy,
+            sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
             image_cube_array: features.image_cube_array == vk::TRUE,
             independent_blend: features.independent_blend == vk::TRUE,
             non_coherent_atom_size: properties.limits.non_coherent_atom_size,
             extensions,
         },
     ))
+}
+
+/// Vulkan 1.2 and 1.3 features the backend enables unconditionally.
+fn required_features_supported(instance: &ash::Instance, raw: vk::PhysicalDevice) -> bool {
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
+    {
+        let mut features = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut vulkan12)
+            .push_next(&mut vulkan13);
+        unsafe { instance.get_physical_device_features2(raw, &mut features) };
+    }
+    vulkan12.timeline_semaphore == vk::TRUE
+        && vulkan12.vulkan_memory_model == vk::TRUE
+        && vulkan13.dynamic_rendering == vk::TRUE
+        && vulkan13.synchronization2 == vk::TRUE
+}
+
+/// Depth attachment formats in preference order.
+fn depth_formats(instance: &ash::Instance, raw: vk::PhysicalDevice) -> Box<[TextureFormat]> {
+    [
+        TextureFormat::Depth32Float,
+        TextureFormat::Depth24UnormStencil8,
+        TextureFormat::Depth32FloatStencil8,
+        TextureFormat::Depth16Unorm,
+    ]
+    .into_iter()
+    .filter(|format| {
+        unsafe {
+            instance.get_physical_device_format_properties(raw, super::convert::format(*format))
+        }
+        .optimal_tiling_features
+        .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+    })
+    .collect()
+}
+
+fn capabilities(
+    instance: &ash::Instance,
+    raw: vk::PhysicalDevice,
+    properties: &vk::PhysicalDeviceProperties,
+    features: &vk::PhysicalDeviceFeatures,
+    families: QueueFamilies,
+) -> Capabilities {
+    // Vertex, index, and copy buffers are bounded by the allocation limit;
+    // storage-buffer ranges are reported separately.
+    let max_buffer_size = {
+        let mut vulkan13 = vk::PhysicalDeviceVulkan13Properties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan13);
+        unsafe { instance.get_physical_device_properties2(raw, &mut properties2) };
+        vulkan13.max_buffer_size
+    };
+    // The portable API exposes at most 16x anisotropy, the Vulkan and Metal
+    // maximum, as the largest whole level within the device limit.
+    let max_sampler_anisotropy = if features.sampler_anisotropy == vk::TRUE {
+        (1..=16_u16)
+            .rev()
+            .find(|level| f32::from(*level) <= properties.limits.max_sampler_anisotropy)
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    let limits = &properties.limits;
+    Capabilities {
+        limits: crate::Limits {
+            max_buffer_size,
+            max_uniform_buffer_binding_size: u64::from(limits.max_uniform_buffer_range),
+            max_storage_buffer_binding_size: u64::from(limits.max_storage_buffer_range),
+            max_image_dimension_2d: limits.max_image_dimension2_d,
+            max_image_dimension_3d: limits.max_image_dimension3_d,
+            max_image_array_layers: limits.max_image_array_layers,
+            max_color_attachments: limits.max_color_attachments,
+            max_bind_groups: limits.max_bound_descriptor_sets,
+            max_shader_buffers: limits
+                .max_per_stage_descriptor_uniform_buffers
+                .min(limits.max_per_stage_descriptor_storage_buffers),
+            max_shader_textures: limits
+                .max_per_stage_descriptor_sampled_images
+                .min(limits.max_per_stage_descriptor_storage_images),
+            max_shader_samplers: limits.max_per_stage_descriptor_samplers,
+            max_vertex_buffers: limits.max_vertex_input_bindings,
+        },
+        depth_bias_clamp: features.depth_bias_clamp == vk::TRUE,
+        max_sampler_anisotropy,
+        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
+        buffer_copy_offset_alignment: 4,
+        buffer_copy_row_pitch_alignment: 1,
+        dedicated_copy_queue: families.copy != families.graphics,
+    }
 }
 
 impl QueueFamilies {

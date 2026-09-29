@@ -136,8 +136,9 @@ impl MetalSwapchain {
     fn select_image_count(desired: Option<NonZeroU32>) -> NonZeroU32 {
         // CAMetalLayer only supports two or three drawables. The requested
         // count is a preference, as on Vulkan, and image_count reports our choice.
-        NonZeroU32::new(desired.map_or(3, NonZeroU32::get).clamp(2, 3))
-            .expect("the selected drawable count is nonzero")
+        const TWO: NonZeroU32 = NonZeroU32::MIN.saturating_add(1);
+        const THREE: NonZeroU32 = NonZeroU32::MIN.saturating_add(2);
+        desired.map_or(THREE, |count| count.clamp(TWO, THREE))
     }
 }
 

@@ -116,21 +116,21 @@ pub(crate) struct SwapchainGeneration {
     max_acquired: NonZeroU32,
 }
 
+/// Caller preferences reapplied whenever the swapchain is recreated.
+struct SwapchainPolicy {
+    usage: ImageUsages,
+    preferred_formats: Vec<SurfaceFormat>,
+    desired_image_count: Option<NonZeroU32>,
+    present_mode: PresentMode,
+}
+
 impl SwapchainGeneration {
-    #[allow(
-        clippy::too_many_lines,
-        clippy::too_many_arguments,
-        reason = "swapchain creation keeps queried capabilities, format preference, and presentation policy together"
-    )]
     fn create(
         context: &Arc<Context>,
         surface: &VulkanSurface,
+        policy: &SwapchainPolicy,
         width: u32,
         height: u32,
-        usage: ImageUsages,
-        preferred_formats: &[SurfaceFormat],
-        desired_image_count: Option<NonZeroU32>,
-        present_mode: PresentMode,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<Arc<Self>> {
         if !Arc::ptr_eq(context, &surface.0.context) {
@@ -144,96 +144,15 @@ impl SwapchainGeneration {
                 .get_physical_device_surface_capabilities(context.physical_device, surface.raw())
         }
         .map_err(vk_error)?;
-        let extent = if capabilities.current_extent.width == u32::MAX {
-            vk::Extent2D {
-                width: width
-                    .max(capabilities.min_image_extent.width)
-                    .min(capabilities.max_image_extent.width),
-                height: height
-                    .max(capabilities.min_image_extent.height)
-                    .min(capabilities.max_image_extent.height),
-            }
-        } else {
-            capabilities.current_extent
-        };
-        if extent.width == 0 || extent.height == 0 {
-            // A minimized window has no presentable extent; retry once it is visible.
-            return Err(Error::SwapchainOutOfDate);
-        }
-        let formats = unsafe {
-            context
-                .surface_loader
-                .get_physical_device_surface_formats(context.physical_device, surface.raw())
-        }
-        .map_err(vk_error)?;
-        let surface_format = preferred_formats
-            .iter()
-            .find_map(|preferred| {
-                let requested = convert::format(preferred.texture);
-                formats
-                    .iter()
-                    .find(|format| {
-                        format.format == requested
-                            && format.color_space == convert::color_space(preferred.color_space)
-                    })
-                    .copied()
-            })
-            .or_else(|| {
-                formats
-                    .iter()
-                    .find(|format| {
-                        format.format == vk::Format::B8G8R8A8_SRGB
-                            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-                    })
-                    .copied()
-            })
-            .or_else(|| {
-                formats
-                    .iter()
-                    .find(|format| {
-                        convert::rhi_format(format.format).is_some()
-                            && convert::rhi_color_space(format.color_space).is_some()
-                    })
-                    .copied()
-            })
-            .ok_or_else(|| {
-                Error::Backend(anyhow::anyhow!(
-                    "the surface exposes no color format representable by the RHI"
-                ))
-            })?;
-        let texture = convert::rhi_format(surface_format.format).ok_or_else(|| {
-            Error::Backend(anyhow::anyhow!(
-                "surface format is not represented by the RHI"
-            ))
-        })?;
-        let color_space =
-            convert::rhi_color_space(surface_format.color_space).ok_or_else(|| {
-                Error::Backend(anyhow::anyhow!(
-                    "surface color space is not represented by the RHI"
-                ))
-            })?;
-        let format = SurfaceFormat {
-            texture,
-            color_space,
-        };
-        let present_modes = unsafe {
-            context
-                .surface_loader
-                .get_physical_device_surface_present_modes(context.physical_device, surface.raw())
-        }
-        .map_err(vk_error)?;
-        let present_mode = if present_modes.contains(&convert::present_mode(present_mode)) {
-            convert::present_mode(present_mode)
-        } else {
-            vk::PresentModeKHR::FIFO
-        };
-        let image_usage = convert::image_usage(usage);
+        let extent = select_extent(&capabilities, width, height)?;
+        let (surface_format, format) = select_format(context, surface, &policy.preferred_formats)?;
+        let image_usage = convert::image_usage(policy.usage);
         if image_usage.is_empty() || !capabilities.supported_usage_flags.contains(image_usage) {
             return Err(Error::Backend(anyhow::anyhow!(
                 "the surface does not support the requested swapchain image usage"
             )));
         }
-        let mut image_count = desired_image_count.map_or_else(
+        let mut image_count = policy.desired_image_count.map_or_else(
             || capabilities.min_image_count.saturating_add(1),
             NonZeroU32::get,
         );
@@ -241,6 +160,7 @@ impl SwapchainGeneration {
         if capabilities.max_image_count > 0 {
             image_count = image_count.min(capabilities.max_image_count);
         }
+        let composite_alpha = select_composite_alpha(&capabilities)?;
         let mut queue_families = vec![context.families.graphics, context.families.present];
         queue_families.sort_unstable();
         queue_families.dedup();
@@ -249,19 +169,6 @@ impl SwapchainGeneration {
         } else {
             (vk::SharingMode::EXCLUSIVE, &[][..])
         };
-        let composite_alpha = [
-            vk::CompositeAlphaFlagsKHR::OPAQUE,
-            vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
-            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
-            vk::CompositeAlphaFlagsKHR::INHERIT,
-        ]
-        .into_iter()
-        .find(|mode| capabilities.supported_composite_alpha.contains(*mode))
-        .ok_or_else(|| {
-            Error::Backend(anyhow::anyhow!(
-                "the surface exposes no supported composite alpha mode"
-            ))
-        })?;
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.raw())
             .min_image_count(image_count)
@@ -274,7 +181,7 @@ impl SwapchainGeneration {
             .queue_family_indices(family_slice)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(composite_alpha)
-            .present_mode(present_mode)
+            .present_mode(select_present_mode(context, surface, policy.present_mode)?)
             .clipped(true)
             .old_swapchain(old_swapchain);
         let raw = unsafe {
@@ -283,39 +190,17 @@ impl SwapchainGeneration {
                 .create_swapchain(&create_info, None)
         }
         .map_err(vk_error)?;
-        let images = match unsafe { context.swapchain_loader.get_swapchain_images(raw) } {
-            Ok(images) => images,
-            Err(error) => {
-                unsafe { context.swapchain_loader.destroy_swapchain(raw, None) };
-                return Err(vk_error(error));
-            }
-        };
-        let mut views = Vec::with_capacity(images.len());
-        for &image in &images {
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface_format.format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-            match unsafe { context.device.create_image_view(&view_info, None) } {
-                Ok(view) => views.push(view),
+        let (images, views, semaphores) =
+            match create_image_resources(context, raw, surface_format.format) {
+                Ok(resources) => resources,
                 Err(error) => {
-                    for view in views {
-                        unsafe { context.device.destroy_image_view(view, None) };
-                    }
                     unsafe { context.swapchain_loader.destroy_swapchain(raw, None) };
-                    return Err(vk_error(error));
+                    return Err(error);
                 }
-            }
-        }
+            };
         let Some(image_count) = u32::try_from(images.len()).ok().and_then(NonZeroU32::new) else {
-            destroy_partial(context, raw, views, Vec::new());
+            destroy_image_resources(context, views, semaphores);
+            unsafe { context.swapchain_loader.destroy_swapchain(raw, None) };
             return Err(Error::Backend(anyhow::anyhow!(
                 "Vulkan returned an unusable swapchain image count"
             )));
@@ -328,28 +213,6 @@ impl SwapchainGeneration {
             .checked_sub(capabilities.min_image_count)
             .and_then(|spare| NonZeroU32::new(spare + 1))
             .unwrap_or(NonZeroU32::MIN);
-        let mut semaphores = Vec::with_capacity(images.len());
-        for _ in 0..images.len() {
-            let create_info = vk::SemaphoreCreateInfo::default();
-            let image_available =
-                match unsafe { context.device.create_semaphore(&create_info, None) } {
-                    Ok(semaphore) => semaphore,
-                    Err(error) => {
-                        destroy_partial(context, raw, views, semaphores);
-                        return Err(vk_error(error));
-                    }
-                };
-            let render_finished =
-                match unsafe { context.device.create_semaphore(&create_info, None) } {
-                    Ok(semaphore) => semaphore,
-                    Err(error) => {
-                        unsafe { context.device.destroy_semaphore(image_available, None) };
-                        destroy_partial(context, raw, views, semaphores);
-                        return Err(vk_error(error));
-                    }
-                };
-            semaphores.push((image_available, render_finished));
-        }
         Ok(Arc::new(Self {
             context: context.clone(),
             surface: surface.clone(),
@@ -363,6 +226,191 @@ impl SwapchainGeneration {
             image_count,
             max_acquired,
         }))
+    }
+}
+
+/// Uses the surface's fixed extent, or the requested one clamped to its bounds.
+fn select_extent(
+    capabilities: &vk::SurfaceCapabilitiesKHR,
+    width: u32,
+    height: u32,
+) -> Result<vk::Extent2D> {
+    let extent = if capabilities.current_extent.width == u32::MAX {
+        vk::Extent2D {
+            width: width
+                .max(capabilities.min_image_extent.width)
+                .min(capabilities.max_image_extent.width),
+            height: height
+                .max(capabilities.min_image_extent.height)
+                .min(capabilities.max_image_extent.height),
+        }
+    } else {
+        capabilities.current_extent
+    };
+    if extent.width == 0 || extent.height == 0 {
+        // A minimized window has no presentable extent; retry once it is visible.
+        return Err(Error::SwapchainOutOfDate);
+    }
+    Ok(extent)
+}
+
+fn select_composite_alpha(
+    capabilities: &vk::SurfaceCapabilitiesKHR,
+) -> Result<vk::CompositeAlphaFlagsKHR> {
+    [
+        vk::CompositeAlphaFlagsKHR::OPAQUE,
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::INHERIT,
+    ]
+    .into_iter()
+    .find(|mode| capabilities.supported_composite_alpha.contains(*mode))
+    .ok_or_else(|| {
+        Error::Backend(anyhow::anyhow!(
+            "the surface exposes no supported composite alpha mode"
+        ))
+    })
+}
+
+/// Picks the first supported preference, then sRGB BGRA8, then any representable format.
+fn select_format(
+    context: &Context,
+    surface: &VulkanSurface,
+    preferred_formats: &[SurfaceFormat],
+) -> Result<(vk::SurfaceFormatKHR, SurfaceFormat)> {
+    let formats = unsafe {
+        context
+            .surface_loader
+            .get_physical_device_surface_formats(context.physical_device, surface.raw())
+    }
+    .map_err(vk_error)?;
+    let find = |predicate: &dyn Fn(&vk::SurfaceFormatKHR) -> bool| {
+        formats.iter().copied().find(|format| predicate(format))
+    };
+    preferred_formats
+        .iter()
+        .find_map(|preferred| {
+            find(&|format| {
+                format.format == convert::format(preferred.texture)
+                    && format.color_space == convert::color_space(preferred.color_space)
+            })
+        })
+        .or_else(|| {
+            find(&|format| {
+                format.format == vk::Format::B8G8R8A8_SRGB
+                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+        })
+        .into_iter()
+        .chain(formats.iter().copied())
+        .find_map(|native| {
+            Some((
+                native,
+                SurfaceFormat {
+                    texture: convert::rhi_format(native.format)?,
+                    color_space: convert::rhi_color_space(native.color_space)?,
+                },
+            ))
+        })
+        .ok_or_else(|| {
+            Error::Backend(anyhow::anyhow!(
+                "the surface exposes no color format representable by the RHI"
+            ))
+        })
+}
+
+/// Uses the requested mode when available and FIFO, which is always supported, otherwise.
+fn select_present_mode(
+    context: &Context,
+    surface: &VulkanSurface,
+    requested: PresentMode,
+) -> Result<vk::PresentModeKHR> {
+    let modes = unsafe {
+        context
+            .surface_loader
+            .get_physical_device_surface_present_modes(context.physical_device, surface.raw())
+    }
+    .map_err(vk_error)?;
+    let requested = convert::present_mode(requested);
+    Ok(if modes.contains(&requested) {
+        requested
+    } else {
+        vk::PresentModeKHR::FIFO
+    })
+}
+
+type ImageResources = (
+    Vec<vk::Image>,
+    Vec<vk::ImageView>,
+    Vec<(vk::Semaphore, vk::Semaphore)>,
+);
+
+/// Creates per-image views and binary semaphores, destroying partial results on failure.
+fn create_image_resources(
+    context: &Context,
+    swapchain: vk::SwapchainKHR,
+    format: vk::Format,
+) -> Result<ImageResources> {
+    let images =
+        unsafe { context.swapchain_loader.get_swapchain_images(swapchain) }.map_err(vk_error)?;
+    let mut views = Vec::with_capacity(images.len());
+    for &image in &images {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        match unsafe { context.device.create_image_view(&view_info, None) } {
+            Ok(view) => views.push(view),
+            Err(error) => {
+                destroy_image_resources(context, views, Vec::new());
+                return Err(vk_error(error));
+            }
+        }
+    }
+    let mut semaphores = Vec::with_capacity(images.len());
+    let create_info = vk::SemaphoreCreateInfo::default();
+    for _ in 0..images.len() {
+        let pair =
+            unsafe { context.device.create_semaphore(&create_info, None) }.and_then(|available| {
+                match unsafe { context.device.create_semaphore(&create_info, None) } {
+                    Ok(finished) => Ok((available, finished)),
+                    Err(error) => {
+                        unsafe { context.device.destroy_semaphore(available, None) };
+                        Err(error)
+                    }
+                }
+            });
+        match pair {
+            Ok(pair) => semaphores.push(pair),
+            Err(error) => {
+                destroy_image_resources(context, views, semaphores);
+                return Err(vk_error(error));
+            }
+        }
+    }
+    Ok((images, views, semaphores))
+}
+
+fn destroy_image_resources(
+    context: &Context,
+    views: Vec<vk::ImageView>,
+    semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
+) {
+    unsafe {
+        for view in views {
+            context.device.destroy_image_view(view, None);
+        }
+        for (available, finished) in semaphores {
+            context.device.destroy_semaphore(available, None);
+            context.device.destroy_semaphore(finished, None);
+        }
     }
 }
 
@@ -384,10 +432,7 @@ impl Drop for SwapchainGeneration {
 /// Vulkan swapchain and its current recreatable generation.
 pub struct VulkanSwapchain {
     generation: Arc<SwapchainGeneration>,
-    usage: ImageUsages,
-    preferred_formats: Vec<SurfaceFormat>,
-    desired_image_count: Option<NonZeroU32>,
-    present_mode: PresentMode,
+    policy: SwapchainPolicy,
     next_acquisition: usize,
 }
 
@@ -396,22 +441,22 @@ impl VulkanSwapchain {
         context: &Arc<Context>,
         desc: &SwapchainDesc<'_, VulkanBackend>,
     ) -> Result<Self> {
-        Ok(Self {
-            generation: SwapchainGeneration::create(
-                context,
-                desc.surface,
-                desc.width.get(),
-                desc.height.get(),
-                desc.usage,
-                desc.preferred_formats,
-                desc.desired_image_count,
-                desc.present_mode,
-                vk::SwapchainKHR::null(),
-            )?,
+        let policy = SwapchainPolicy {
             usage: desc.usage,
             preferred_formats: desc.preferred_formats.to_vec(),
             desired_image_count: desc.desired_image_count,
             present_mode: desc.present_mode,
+        };
+        Ok(Self {
+            generation: SwapchainGeneration::create(
+                context,
+                desc.surface,
+                &policy,
+                desc.width.get(),
+                desc.height.get(),
+                vk::SwapchainKHR::null(),
+            )?,
+            policy,
             next_acquisition: 0,
         })
     }
@@ -427,12 +472,9 @@ impl VulkanSwapchain {
         let generation = SwapchainGeneration::create(
             &self.generation.context,
             &self.generation.surface,
+            &self.policy,
             width,
             height,
-            self.usage,
-            &self.preferred_formats,
-            self.desired_image_count,
-            self.present_mode,
             self.generation.raw,
         )?;
         self.generation = generation;
@@ -626,23 +668,5 @@ unsafe impl NativeSurfaceFrame<VulkanBackend> for VulkanSurfaceFrame {
 
     fn status(&self) -> SurfaceStatus {
         self.status
-    }
-}
-
-fn destroy_partial(
-    context: &Context,
-    swapchain: vk::SwapchainKHR,
-    views: Vec<vk::ImageView>,
-    semaphores: Vec<(vk::Semaphore, vk::Semaphore)>,
-) {
-    unsafe {
-        for view in views {
-            context.device.destroy_image_view(view, None);
-        }
-        for (available, finished) in semaphores {
-            context.device.destroy_semaphore(available, None);
-            context.device.destroy_semaphore(finished, None);
-        }
-        context.swapchain_loader.destroy_swapchain(swapchain, None);
     }
 }

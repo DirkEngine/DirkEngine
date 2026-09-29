@@ -2,10 +2,6 @@
 //! `VK_LAYER_KHRONOS_validation` installed:
 //! `cargo nextest run -p dirk_rhi --run-ignored only`.
 #![cfg(not(target_vendor = "apple"))]
-#![allow(
-    unsafe_code,
-    reason = "controlled shaders, recording, and loader access in native tests"
-)]
 
 use dirk_rhi::*;
 use std::ffi::CStr;

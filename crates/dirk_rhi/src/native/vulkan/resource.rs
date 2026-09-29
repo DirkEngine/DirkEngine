@@ -615,13 +615,16 @@ struct BindGroupInner {
     pool: vk::DescriptorPool,
 }
 
-enum DescriptorData {
+enum DescriptorInfo {
     Buffer(vk::DescriptorBufferInfo),
     Image(vk::DescriptorImageInfo),
 }
 
-struct DescriptorResources {
-    data: Vec<DescriptorData>,
+/// One validated descriptor write, resolved against its layout entry.
+struct DescriptorData {
+    binding: u32,
+    ty: vk::DescriptorType,
+    info: DescriptorInfo,
 }
 
 impl VulkanBindGroup {
@@ -635,7 +638,7 @@ impl VulkanBindGroup {
         if !Arc::ptr_eq(context, desc.layout.context()) {
             return Err(Ir::ForeignInstance.into());
         }
-        let DescriptorResources { data } = Self::descriptor_resources(context, desc)?;
+        let data = Self::descriptor_resources(context, desc)?;
         let mut counts = std::collections::HashMap::<vk::DescriptorType, u32>::new();
         for entry in &desc.layout.0.entries {
             *counts.entry(convert::binding(entry.ty)).or_default() += 1;
@@ -664,25 +667,16 @@ impl VulkanBindGroup {
             }
         };
 
-        let writes = desc
-            .entries
+        let writes = data
             .iter()
-            .zip(&data)
-            .map(|(entry, data)| {
-                let expected = desc
-                    .layout
-                    .0
-                    .entries
-                    .iter()
-                    .find(|layout| layout.binding == entry.binding)
-                    .expect("bindings were validated while descriptor data was built");
+            .map(|data| {
                 let write = vk::WriteDescriptorSet::default()
                     .dst_set(raw)
-                    .dst_binding(entry.binding)
-                    .descriptor_type(convert::binding(expected.ty));
-                match data {
-                    DescriptorData::Buffer(info) => write.buffer_info(std::slice::from_ref(info)),
-                    DescriptorData::Image(info) => write.image_info(std::slice::from_ref(info)),
+                    .dst_binding(data.binding)
+                    .descriptor_type(data.ty);
+                match &data.info {
+                    DescriptorInfo::Buffer(info) => write.buffer_info(std::slice::from_ref(info)),
+                    DescriptorInfo::Image(info) => write.image_info(std::slice::from_ref(info)),
                 }
             })
             .collect::<Vec<_>>();
@@ -698,10 +692,8 @@ impl VulkanBindGroup {
     fn descriptor_resources(
         context: &Arc<Context>,
         desc: &BindGroupDesc<'_, VulkanBackend>,
-    ) -> Result<DescriptorResources> {
-        let mut resources = DescriptorResources {
-            data: Vec::with_capacity(desc.entries.len()),
-        };
+    ) -> Result<Vec<DescriptorData>> {
+        let mut resources = Vec::with_capacity(desc.entries.len());
         let mut seen = std::collections::HashSet::new();
         for entry in desc.entries {
             if !seen.insert(entry.binding) {
@@ -714,7 +706,7 @@ impl VulkanBindGroup {
                 .iter()
                 .find(|layout| layout.binding == entry.binding)
                 .ok_or(Ir::Mismatch)?;
-            match (&entry.resource, expected.ty) {
+            let info = match (&entry.resource, expected.ty) {
                 (
                     BindingResource::Buffer {
                         buffer,
@@ -728,41 +720,40 @@ impl VulkanBindGroup {
                         .checked_add(*size)
                         .is_some_and(|end| end <= buffer.size()) =>
                 {
-                    resources
-                        .data
-                        .push(DescriptorData::Buffer(vk::DescriptorBufferInfo {
-                            buffer: buffer.raw(),
-                            offset: *offset,
-                            range: *size,
-                        }));
+                    DescriptorInfo::Buffer(vk::DescriptorBufferInfo {
+                        buffer: buffer.raw(),
+                        offset: *offset,
+                        range: *size,
+                    })
                 }
                 (BindingResource::SampledImage { view, sampler }, BindingType::SampledImage)
                     if Arc::ptr_eq(context, view.context())
                         && Arc::ptr_eq(context, sampler.context()) =>
                 {
-                    resources
-                        .data
-                        .push(DescriptorData::Image(vk::DescriptorImageInfo {
-                            sampler: sampler.raw(),
-                            image_view: view.raw(),
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        }));
+                    DescriptorInfo::Image(vk::DescriptorImageInfo {
+                        sampler: sampler.raw(),
+                        image_view: view.raw(),
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    })
                 }
                 (BindingResource::StorageImage(view), BindingType::StorageImage)
                     if Arc::ptr_eq(context, view.context()) =>
                 {
-                    resources
-                        .data
-                        .push(DescriptorData::Image(vk::DescriptorImageInfo {
-                            sampler: vk::Sampler::null(),
-                            image_view: view.raw(),
-                            image_layout: vk::ImageLayout::GENERAL,
-                        }));
+                    DescriptorInfo::Image(vk::DescriptorImageInfo {
+                        sampler: vk::Sampler::null(),
+                        image_view: view.raw(),
+                        image_layout: vk::ImageLayout::GENERAL,
+                    })
                 }
                 _ => {
                     return Err(Ir::Mismatch.into());
                 }
-            }
+            };
+            resources.push(DescriptorData {
+                binding: entry.binding,
+                ty: convert::binding(expected.ty),
+                info,
+            });
         }
         Ok(resources)
     }
@@ -844,77 +835,26 @@ struct GraphicsPipelineInner {
 }
 
 impl VulkanGraphicsPipeline {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "pipeline state translation stays together to keep borrowed Vulkan create-info lifetimes explicit"
-    )]
     pub(crate) fn create(
         context: &Arc<Context>,
         desc: &GraphicsPipelineDesc<'_, VulkanBackend>,
     ) -> Result<Self> {
-        if !context.independent_blend
-            && desc.color_targets.windows(2).any(|targets| {
-                targets[0].blend != targets[1].blend
-                    || targets[0].write_mask != targets[1].write_mask
-            })
-        {
-            return Err(crate::UnsupportedOperation::Capability(
-                "independent color attachment blending",
-            )
-            .into());
-        }
-        if !Arc::ptr_eq(context, desc.layout.context())
-            || !Arc::ptr_eq(context, desc.vertex.context())
-            || desc
-                .fragment
-                .is_some_and(|fragment| !Arc::ptr_eq(context, fragment.context()))
-        {
-            return Err(Ir::ForeignInstance.into());
-        }
-        if desc.vertex.0.stage != ShaderStage::Vertex
-            || desc
-                .fragment
-                .is_some_and(|fragment| fragment.0.stage != ShaderStage::Fragment)
-        {
-            return Err(Ir::Mismatch.into());
-        }
-        let mut shader_stages = vec![
+        Self::validate(context, desc)?;
+        let shader_stages = [
+            Some((vk::ShaderStageFlags::VERTEX, desc.vertex)),
+            desc.fragment
+                .map(|fragment| (vk::ShaderStageFlags::FRAGMENT, fragment)),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(stage, shader)| {
             vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(desc.vertex.raw())
-                .name(&desc.vertex.0.entry),
-        ];
-        if let Some(fragment) = desc.fragment {
-            let fragment_stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(fragment.raw())
-                .name(&fragment.0.entry);
-            shader_stages.push(fragment_stage);
-        }
-        let bindings = desc
-            .vertex_buffers
-            .iter()
-            .enumerate()
-            .map(|(index, layout)| {
-                Ok(vk::VertexInputBindingDescription {
-                    binding: u32::try_from(index).map_err(|_| Ir::OutOfRange)?,
-                    stride: layout.stride,
-                    input_rate: convert::input_rate(layout.step_mode),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut attributes = Vec::new();
-        for (binding, layout) in desc.vertex_buffers.iter().enumerate() {
-            let binding = u32::try_from(binding).map_err(|_| Ir::OutOfRange)?;
-            attributes.extend(layout.attributes.iter().map(|attribute| {
-                vk::VertexInputAttributeDescription {
-                    location: attribute.location,
-                    binding,
-                    format: convert::vertex_format(attribute.format),
-                    offset: attribute.offset,
-                }
-            }));
-        }
+                .stage(stage)
+                .module(shader.raw())
+                .name(&shader.0.entry)
+        })
+        .collect::<Vec<_>>();
+        let (bindings, attributes) = Self::vertex_input(desc)?;
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&bindings)
             .vertex_attribute_descriptions(&attributes);
@@ -941,50 +881,15 @@ impl VulkanGraphicsPipeline {
         let color_attachments = desc
             .color_targets
             .iter()
-            .map(|target| match target.blend {
-                Some(blend) => vk::PipelineColorBlendAttachmentState::default()
-                    .blend_enable(true)
-                    .src_color_blend_factor(convert::blend_factor(blend.color.source))
-                    .dst_color_blend_factor(convert::blend_factor(blend.color.destination))
-                    .color_blend_op(convert::blend_op(blend.color.operation))
-                    .src_alpha_blend_factor(convert::blend_factor(blend.alpha.source))
-                    .dst_alpha_blend_factor(convert::blend_factor(blend.alpha.destination))
-                    .alpha_blend_op(convert::blend_op(blend.alpha.operation))
-                    .color_write_mask(convert::color_write_mask(target.write_mask)),
-                None => vk::PipelineColorBlendAttachmentState::default()
-                    .blend_enable(false)
-                    .color_write_mask(convert::color_write_mask(target.write_mask)),
-            })
+            .map(|target| color_blend_attachment(*target))
             .collect::<Vec<_>>();
         let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op(vk::LogicOp::COPY)
             .attachments(&color_attachments);
-        let depth =
-            desc.depth
-                .map_or_else(vk::PipelineDepthStencilStateCreateInfo::default, |depth| {
-                    let mut info = vk::PipelineDepthStencilStateCreateInfo::default()
-                        .depth_test_enable(true)
-                        .depth_write_enable(depth.write_enabled)
-                        .depth_compare_op(convert::compare(depth.compare));
-                    if let Some(stencil) = depth.stencil {
-                        let face = |face: crate::StencilFaceState| {
-                            vk::StencilOpState::default()
-                                .fail_op(convert::stencil_op(face.fail_op))
-                                .pass_op(convert::stencil_op(face.pass_op))
-                                .depth_fail_op(convert::stencil_op(face.depth_fail_op))
-                                .compare_op(convert::compare(face.compare))
-                                .compare_mask(stencil.read_mask)
-                                .write_mask(stencil.write_mask)
-                        };
-                        info = info
-                            .stencil_test_enable(true)
-                            .front(face(stencil.front))
-                            .back(face(stencil.back));
-                    } else {
-                        info = info.stencil_test_enable(false);
-                    }
-                    info
-                });
+        let depth = desc.depth.map_or_else(
+            vk::PipelineDepthStencilStateCreateInfo::default,
+            depth_stencil_state,
+        );
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
@@ -997,21 +902,14 @@ impl VulkanGraphicsPipeline {
             .iter()
             .map(|target| convert::format(target.format))
             .collect::<Vec<_>>();
+        let depth_format = desc.depth.map(|depth| depth.format);
+        let stencil_format =
+            depth_format.filter(|format| format.aspects().contains(crate::ImageAspects::STENCIL));
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)
-            .depth_attachment_format(
-                desc.depth
-                    .map_or(vk::Format::UNDEFINED, |depth| convert::format(depth.format)),
-            )
+            .depth_attachment_format(depth_format.map_or(vk::Format::UNDEFINED, convert::format))
             .stencil_attachment_format(
-                desc.depth
-                    .filter(|depth| {
-                        depth
-                            .format
-                            .aspects()
-                            .contains(crate::ImageAspects::STENCIL)
-                    })
-                    .map_or(vk::Format::UNDEFINED, |depth| convert::format(depth.format)),
+                stencil_format.map_or(vk::Format::UNDEFINED, convert::format),
             );
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -1039,6 +937,66 @@ impl VulkanGraphicsPipeline {
         }))
     }
 
+    fn validate(
+        context: &Arc<Context>,
+        desc: &GraphicsPipelineDesc<'_, VulkanBackend>,
+    ) -> Result<()> {
+        if !context.independent_blend
+            && desc.color_targets.windows(2).any(|targets| {
+                targets[0].blend != targets[1].blend
+                    || targets[0].write_mask != targets[1].write_mask
+            })
+        {
+            return Err(crate::UnsupportedOperation::Capability(
+                "independent color attachment blending",
+            )
+            .into());
+        }
+        if !Arc::ptr_eq(context, desc.layout.context())
+            || !Arc::ptr_eq(context, desc.vertex.context())
+            || desc
+                .fragment
+                .is_some_and(|fragment| !Arc::ptr_eq(context, fragment.context()))
+        {
+            return Err(Ir::ForeignInstance.into());
+        }
+        if desc.vertex.0.stage != ShaderStage::Vertex
+            || desc
+                .fragment
+                .is_some_and(|fragment| fragment.0.stage != ShaderStage::Fragment)
+        {
+            return Err(Ir::Mismatch.into());
+        }
+        Ok(())
+    }
+
+    fn vertex_input(
+        desc: &GraphicsPipelineDesc<'_, VulkanBackend>,
+    ) -> Result<(
+        Vec<vk::VertexInputBindingDescription>,
+        Vec<vk::VertexInputAttributeDescription>,
+    )> {
+        let mut bindings = Vec::with_capacity(desc.vertex_buffers.len());
+        let mut attributes = Vec::new();
+        for (binding, layout) in desc.vertex_buffers.iter().enumerate() {
+            let binding = u32::try_from(binding).map_err(|_| Ir::OutOfRange)?;
+            bindings.push(vk::VertexInputBindingDescription {
+                binding,
+                stride: layout.stride,
+                input_rate: convert::input_rate(layout.step_mode),
+            });
+            attributes.extend(layout.attributes.iter().map(|attribute| {
+                vk::VertexInputAttributeDescription {
+                    location: attribute.location,
+                    binding,
+                    format: convert::vertex_format(attribute.format),
+                    offset: attribute.offset,
+                }
+            }));
+        }
+        Ok((bindings, attributes))
+    }
+
     #[must_use]
     /// Returns the native graphics-pipeline handle.
     pub fn raw(&self) -> vk::Pipeline {
@@ -1054,6 +1012,48 @@ impl Drop for GraphicsPipelineInner {
     fn drop(&mut self) {
         self.context.retire(Garbage::Pipeline(self.raw));
     }
+}
+
+fn color_blend_attachment(
+    target: crate::ColorTargetState,
+) -> vk::PipelineColorBlendAttachmentState {
+    let state = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(convert::color_write_mask(target.write_mask));
+    match target.blend {
+        Some(blend) => state
+            .blend_enable(true)
+            .src_color_blend_factor(convert::blend_factor(blend.color.source))
+            .dst_color_blend_factor(convert::blend_factor(blend.color.destination))
+            .color_blend_op(convert::blend_op(blend.color.operation))
+            .src_alpha_blend_factor(convert::blend_factor(blend.alpha.source))
+            .dst_alpha_blend_factor(convert::blend_factor(blend.alpha.destination))
+            .alpha_blend_op(convert::blend_op(blend.alpha.operation)),
+        None => state.blend_enable(false),
+    }
+}
+
+fn depth_stencil_state(
+    depth: crate::DepthState,
+) -> vk::PipelineDepthStencilStateCreateInfo<'static> {
+    let info = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(depth.write_enabled)
+        .depth_compare_op(convert::compare(depth.compare));
+    let Some(stencil) = depth.stencil else {
+        return info.stencil_test_enable(false);
+    };
+    let face = |face: crate::StencilFaceState| {
+        vk::StencilOpState::default()
+            .fail_op(convert::stencil_op(face.fail_op))
+            .pass_op(convert::stencil_op(face.pass_op))
+            .depth_fail_op(convert::stencil_op(face.depth_fail_op))
+            .compare_op(convert::compare(face.compare))
+            .compare_mask(stencil.read_mask)
+            .write_mask(stencil.write_mask)
+    };
+    info.stencil_test_enable(true)
+        .front(face(stencil.front))
+        .back(face(stencil.back))
 }
 
 macro_rules! sync_resource {

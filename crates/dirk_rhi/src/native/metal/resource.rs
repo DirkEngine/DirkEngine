@@ -563,10 +563,6 @@ pub struct MetalGraphicsPipeline {
 }
 
 impl MetalGraphicsPipeline {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "pipeline translation keeps vertex layout, blending, and depth/stencil state together"
-    )]
     pub(crate) fn create(
         context: &Arc<Context>,
         desc: &GraphicsPipelineDesc<'_, super::MetalBackend>,
@@ -594,6 +590,51 @@ impl MetalGraphicsPipeline {
             return Err(crate::Error::from(Ir::Mismatch));
         }
         let vertex_descriptor = VertexDescriptor::new();
+        Self::set_vertex_layout(vertex_descriptor, desc)?;
+        let descriptor = RenderPipelineDescriptor::new();
+        descriptor.set_label(desc.label);
+        descriptor.set_vertex_function(Some(&desc.vertex.function));
+        if let Some(fragment) = desc.fragment {
+            descriptor.set_fragment_function(Some(&fragment.function));
+        }
+        descriptor.set_vertex_descriptor(Some(vertex_descriptor));
+        descriptor.set_sample_count(convert::samples(desc.samples));
+        descriptor.set_alpha_to_coverage_enabled(desc.alpha_to_coverage);
+        Self::set_color_targets(&descriptor, desc.color_targets)?;
+        let depth = desc.depth.map(|depth| {
+            descriptor.set_depth_attachment_pixel_format(convert::format(depth.format));
+            if depth.format.aspects().contains(ImageAspects::STENCIL) {
+                descriptor.set_stencil_attachment_pixel_format(convert::format(depth.format));
+            }
+            context
+                .device
+                .new_depth_stencil_state(&depth_stencil_descriptor(depth))
+        });
+        let bias_enabled =
+            desc.depth_bias.constant_factor != 0.0 || desc.depth_bias.slope_factor != 0.0;
+        let raw = context
+            .device
+            .new_render_pipeline_state(&descriptor)
+            .map_err(backend_error)?;
+        Ok(Self {
+            context: context.clone(),
+            raw,
+            depth,
+            depth_bias: if bias_enabled {
+                desc.depth_bias
+            } else {
+                crate::DepthBiasState::default()
+            },
+            topology: convert::topology(desc.raster.topology),
+            winding: convert::winding(desc.raster.front_face),
+            cull: convert::cull(desc.raster.cull_mode),
+        })
+    }
+
+    fn set_vertex_layout(
+        vertex_descriptor: &metal::VertexDescriptorRef,
+        desc: &GraphicsPipelineDesc<'_, super::MetalBackend>,
+    ) -> Result<()> {
         for (buffer_index, layout) in desc.vertex_buffers.iter().enumerate() {
             let metal_index =
                 VERTEX_BUFFER_BASE + u64::try_from(buffer_index).map_err(|_| Ir::OutOfRange)?;
@@ -614,16 +655,14 @@ impl MetalGraphicsPipeline {
                 metal_attribute.set_buffer_index(metal_index);
             }
         }
-        let descriptor = RenderPipelineDescriptor::new();
-        descriptor.set_label(desc.label);
-        descriptor.set_vertex_function(Some(&desc.vertex.function));
-        if let Some(fragment) = desc.fragment {
-            descriptor.set_fragment_function(Some(&fragment.function));
-        }
-        descriptor.set_vertex_descriptor(Some(vertex_descriptor));
-        descriptor.set_sample_count(convert::samples(desc.samples));
-        descriptor.set_alpha_to_coverage_enabled(desc.alpha_to_coverage);
-        for (index, target) in desc.color_targets.iter().enumerate() {
+        Ok(())
+    }
+
+    fn set_color_targets(
+        descriptor: &metal::RenderPipelineDescriptorRef,
+        targets: &[crate::ColorTargetState],
+    ) -> Result<()> {
+        for (index, target) in targets.iter().enumerate() {
             let state = descriptor
                 .color_attachments()
                 .object_at(u64::try_from(index).map_err(|_| Ir::OutOfRange)?)
@@ -655,55 +694,29 @@ impl MetalGraphicsPipeline {
                 state.set_alpha_blend_operation(convert::blend_op(blend.alpha.operation));
             }
         }
-        descriptor.set_alpha_to_coverage_enabled(desc.alpha_to_coverage);
-        let depth = desc.depth.map(|depth| {
-            descriptor.set_depth_attachment_pixel_format(convert::format(depth.format));
-            if matches!(
-                depth.format,
-                crate::TextureFormat::Depth24UnormStencil8
-                    | crate::TextureFormat::Depth32FloatStencil8
-            ) {
-                descriptor.set_stencil_attachment_pixel_format(convert::format(depth.format));
-            }
-            let state = DepthStencilDescriptor::new();
-            state.set_depth_compare_function(convert::compare(depth.compare));
-            state.set_depth_write_enabled(depth.write_enabled);
-            if let Some(stencil) = depth.stencil {
-                let face = |face: crate::StencilFaceState| {
-                    let info = StencilDescriptor::new();
-                    info.set_stencil_failure_operation(convert::stencil_op(face.fail_op));
-                    info.set_depth_failure_operation(convert::stencil_op(face.depth_fail_op));
-                    info.set_depth_stencil_pass_operation(convert::stencil_op(face.pass_op));
-                    info.set_stencil_compare_function(convert::compare(face.compare));
-                    info.set_read_mask(stencil.read_mask);
-                    info.set_write_mask(stencil.write_mask);
-                    info
-                };
-                state.set_front_face_stencil(Some(&face(stencil.front)));
-                state.set_back_face_stencil(Some(&face(stencil.back)));
-            }
-            context.device.new_depth_stencil_state(&state)
-        });
-        let bias_enabled =
-            desc.depth_bias.constant_factor != 0.0 || desc.depth_bias.slope_factor != 0.0;
-        let raw = context
-            .device
-            .new_render_pipeline_state(&descriptor)
-            .map_err(backend_error)?;
-        Ok(Self {
-            context: context.clone(),
-            raw,
-            depth,
-            depth_bias: if bias_enabled {
-                desc.depth_bias
-            } else {
-                crate::DepthBiasState::default()
-            },
-            topology: convert::topology(desc.raster.topology),
-            winding: convert::winding(desc.raster.front_face),
-            cull: convert::cull(desc.raster.cull_mode),
-        })
+        Ok(())
     }
+}
+
+fn depth_stencil_descriptor(depth: crate::DepthState) -> DepthStencilDescriptor {
+    let state = DepthStencilDescriptor::new();
+    state.set_depth_compare_function(convert::compare(depth.compare));
+    state.set_depth_write_enabled(depth.write_enabled);
+    if let Some(stencil) = depth.stencil {
+        let face = |face: crate::StencilFaceState| {
+            let info = StencilDescriptor::new();
+            info.set_stencil_failure_operation(convert::stencil_op(face.fail_op));
+            info.set_depth_failure_operation(convert::stencil_op(face.depth_fail_op));
+            info.set_depth_stencil_pass_operation(convert::stencil_op(face.pass_op));
+            info.set_stencil_compare_function(convert::compare(face.compare));
+            info.set_read_mask(stencil.read_mask);
+            info.set_write_mask(stencil.write_mask);
+            info
+        };
+        state.set_front_face_stencil(Some(&face(stencil.front)));
+        state.set_back_face_stencil(Some(&face(stencil.back)));
+    }
+    state
 }
 
 /// CPU-waitable completion of the actual native command buffers, including errors.
