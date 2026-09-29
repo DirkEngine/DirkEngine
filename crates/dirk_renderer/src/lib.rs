@@ -746,15 +746,13 @@ impl Renderer {
         for target in targets {
             let swapchain =
                 graph.import_texture(frame_graph::ImportedTexture::surface(&target.image))?;
-
-            graph.add_pass("clear swapchain").write_color_attachment(
-                swapchain,
-                frame_graph::AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
-            );
+            // Presentation and egui passes clear the image they draw into.
+            let mut cleared = false;
 
             #[cfg(feature = "editor")]
             if Some(target.window) == self.egui_window {
                 egui_target = Some((swapchain, target.extent));
+                cleared = true;
             }
 
             #[cfg(not(feature = "editor"))]
@@ -777,7 +775,15 @@ impl Renderer {
                         swapchain,
                         target_extent,
                     );
+                    cleared = true;
                 }
+            }
+
+            if !cleared {
+                graph.add_pass("clear swapchain").write_color_attachment(
+                    swapchain,
+                    frame_graph::AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0),
+                );
             }
         }
 

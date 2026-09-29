@@ -100,7 +100,7 @@ impl Presenter {
         graph
             .add_pass("encode scene for presentation")
             .read_sampled(source, ShaderStages::FRAGMENT)
-            .write_color_attachment(target, AttachmentInfo::load_store())
+            .write_color_attachment(target, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0))
             .execute(Box::new(move |cmd, ctx| {
                 let source = ctx.resolve(source)?;
                 let binding = rhi.create_bind_group(&BindGroupDesc {

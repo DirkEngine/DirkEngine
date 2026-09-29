@@ -262,7 +262,7 @@ impl EguiState {
             }
         }
         let mut pass = graph.add_pass("egui");
-        pass.write_color_attachment(target, AttachmentInfo::load_store());
+        pass.write_color_attachment(target, AttachmentInfo::clear_color(0.0, 0.0, 0.0, 1.0));
         for image in images {
             pass.read_sampled(image, ShaderStages::FRAGMENT);
         }
