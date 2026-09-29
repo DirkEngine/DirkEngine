@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use dirk_rhi::{
     Color, DependencyInfo, Extent3d, ImageBarrier, ImageDesc, ImageState, ImageUsages, LoadOp,
-    RenderingInfo, SampleCount, ShaderStages, StoreOp, TextureFormat,
+    RenderingInfo, ResourceAccess, SampleCount, ShaderStages, StoreOp, TextureFormat,
 };
 use dirk_rhi::{CommandEncoder as CommandBuffer, Image as RhiImage, ImageView, RenderPass, Rhi};
 
@@ -130,19 +130,17 @@ pub struct BufferHandle(usize);
 pub struct ImportedBuffer<'a> {
     /// Allocation owner, borrowed for graph recording.
     pub buffer: &'a dirk_rhi::Buffer,
-    /// Access before this graph.
     /// Actual access state before graph execution.
-    pub initial_state: ImageState,
-    /// Access after this graph.
+    pub initial_state: ResourceAccess,
     /// Required access state after graph execution.
-    pub final_state: ImageState,
+    pub final_state: ResourceAccess,
 }
 struct GraphBuffer<'a> {
     size: u64,
     imported: Option<ImportedBuffer<'a>>,
 }
 impl GraphBuffer<'_> {
-    fn exports(buffers: &[Self], buffer_states: &[ImageState]) -> Vec<BufferDependency> {
+    fn exports(buffers: &[Self], buffer_states: &[ResourceAccess]) -> Vec<BufferDependency> {
         buffers
             .iter()
             .enumerate()
@@ -162,7 +160,7 @@ impl GraphBuffer<'_> {
     fn compile_pass(
         pass: &PassNode<'_>,
         buffers: &[Self],
-        buffer_states: &mut [ImageState],
+        buffer_states: &mut [ResourceAccess],
         buffer_usages: &mut [dirk_rhi::BufferUsages],
     ) -> Result<Vec<BufferDependency>> {
         let mut buffer_barriers = Vec::new();
@@ -194,7 +192,7 @@ impl GraphBuffer<'_> {
             }
             let previous = &mut buffer_states[usage.handle.0];
             anyhow::ensure!(
-                usage.write || *previous != ImageState::Undefined,
+                usage.write || *previous != ResourceAccess::Undefined,
                 "{}: first use reads an uninitialized buffer",
                 pass.name
             );
@@ -214,13 +212,13 @@ impl GraphBuffer<'_> {
 #[derive(Clone, Copy)]
 struct BufferUse {
     handle: BufferHandle,
-    state: ImageState,
+    state: ResourceAccess,
     write: bool,
 }
 struct BufferDependency {
     handle: BufferHandle,
-    old: ImageState,
-    new: ImageState,
+    old: ResourceAccess,
+    new: ResourceAccess,
 }
 impl BufferDependency {
     unsafe fn record_all(
@@ -341,7 +339,6 @@ impl AttachmentInfo {
         }
     }
 
-    #[allow(unused)]
     #[must_use]
     /// Preserves and stores existing attachment contents.
     pub fn load_store() -> Self {
@@ -352,7 +349,6 @@ impl AttachmentInfo {
         }
     }
 
-    #[allow(unused)]
     #[must_use]
     /// Clears and stores depth/stencil contents.
     pub fn clear_depth(depth: f32, stencil: u32) -> Self {
@@ -480,7 +476,7 @@ pub struct PassBuilder<'graph, 'a> {
 
 impl<'a> PassBuilder<'_, 'a> {
     /// Declares a whole-buffer read; byte ranges remain a copy/binding concern.
-    pub fn read_buffer(&mut self, handle: BufferHandle, state: ImageState) -> &mut Self {
+    pub fn read_buffer(&mut self, handle: BufferHandle, state: ResourceAccess) -> &mut Self {
         self.pass.buffers.push(BufferUse {
             handle,
             state,
@@ -489,7 +485,7 @@ impl<'a> PassBuilder<'_, 'a> {
         self
     }
     /// Declares a whole-buffer write.
-    pub fn write_buffer(&mut self, handle: BufferHandle, state: ImageState) -> &mut Self {
+    pub fn write_buffer(&mut self, handle: BufferHandle, state: ResourceAccess) -> &mut Self {
         self.pass.buffers.push(BufferUse {
             handle,
             state,
@@ -520,7 +516,6 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declares a sampled read covering every subresource.
-    #[allow(unused)]
     pub fn read_sampled(&mut self, handle: TextureHandle, stages: ShaderStages) -> &mut Self {
         self.read(handle, TextureRead::Sampled { stages })
     }
@@ -528,7 +523,6 @@ impl<'a> PassBuilder<'_, 'a> {
     /// Declares a shader-storage write covering every subresource.
     ///
     /// Compute dispatch support is tracked in .agents/plans/01.
-    #[allow(unused)]
     pub fn write_storage(&mut self, handle: TextureHandle, stages: ShaderStages) -> &mut Self {
         self.write(handle, TextureWrite::Storage { stages })
     }
@@ -753,6 +747,7 @@ impl<'a> RenderGraph<'a> {
         PassBuilder { pass }
     }
 
+    /// Compiles the graph, allocates used transients, and records every pass into `cmd`.
     ///
     /// # Safety
     /// Imports must belong to this device and describe their actual boundary states.
@@ -900,7 +895,7 @@ impl<'a> RenderGraph<'a> {
             .map(|b| {
                 b.imported
                     .as_ref()
-                    .map_or(ImageState::Undefined, |i| i.initial_state)
+                    .map_or(ResourceAccess::Undefined, |i| i.initial_state)
             })
             .collect::<Vec<_>>();
         let mut buffer_usages = vec![dirk_rhi::BufferUsages::NONE; self.buffers.len()];
@@ -1027,11 +1022,11 @@ fn transition_barriers(states: &mut Vec<RangeState>, usage: &AccessDecl) -> Vec<
     barriers
 }
 
-fn barrier_needed(old: ImageState, new: ImageState) -> bool {
+fn barrier_needed(old: ResourceAccess, new: ResourceAccess) -> bool {
     old != new || is_write(old) || is_write(new)
 }
 
-fn is_write(state: ImageState) -> bool {
+fn is_write(state: ResourceAccess) -> bool {
     state.writes()
 }
 
@@ -1506,7 +1501,7 @@ mod tests {
         let buffer = graph.create_buffer(64);
         graph
             .add_pass("uninitialized buffer")
-            .read_buffer(buffer, ImageState::Vertex);
+            .read_buffer(buffer, ResourceAccess::Vertex);
         assert!(graph.compile().is_err());
     }
 
@@ -1519,7 +1514,7 @@ mod tests {
             .write_buffer(buffer, ImageState::CopyDestination);
         graph
             .add_pass("vertices")
-            .read_buffer(buffer, ImageState::Vertex);
+            .read_buffer(buffer, ResourceAccess::Vertex);
         let compiled = graph.compile().expect("valid graph");
         assert_eq!(
             compiled.passes[1].buffer_barriers[0].old,
@@ -1527,7 +1522,7 @@ mod tests {
         );
         assert_eq!(
             compiled.passes[1].buffer_barriers[0].new,
-            ImageState::Vertex
+            ResourceAccess::Vertex
         );
     }
 
