@@ -159,7 +159,6 @@ unsafe impl Backend for MetalBackend {
                     min_storage_buffer_offset_alignment: 16,
                     buffer_copy_offset_alignment: 4,
                     buffer_copy_row_pitch_alignment: 256,
-                    dedicated_compute_queue: false,
                     dedicated_copy_queue: false,
                 },
             })

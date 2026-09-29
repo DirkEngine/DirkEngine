@@ -1,10 +1,10 @@
 //! Command recording is currently focused on graphics and transfer work.
 //!
-//! Compute queue and shader types are part of the shared resource vocabulary,
-//! but this layer intentionally does not yet define compute-pipeline creation,
-//! binding, or dispatch. A future compute-capable command contract will add
-//! those operations together rather than making the existing partial surface
-//! look complete.
+//! Compute shader stages are part of the shared shader vocabulary used by
+//! reflection, but this layer intentionally does not yet define compute queues,
+//! compute-pipeline creation, binding, or dispatch. A future compute-capable
+//! command contract will add those operations together rather than making the
+//! existing partial surface look complete.
 
 use std::num::NonZeroU32;
 

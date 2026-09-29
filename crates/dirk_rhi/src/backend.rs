@@ -50,8 +50,6 @@ pub struct Capabilities {
     pub buffer_copy_offset_alignment: u64,
     /// Required alignment of buffer row pitches used for buffer/image copies.
     pub buffer_copy_row_pitch_alignment: u32,
-    /// Whether a distinct compute queue is available.
-    pub dedicated_compute_queue: bool,
     /// Whether a distinct copy queue is available.
     pub dedicated_copy_queue: bool,
 }

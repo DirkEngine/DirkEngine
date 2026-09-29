@@ -50,7 +50,11 @@ pub use types::{
 mod tests;
 
 mod access;
-pub use access::*;
+pub(crate) use access::BufferRange;
+pub use access::{
+    BindingMap, BindingSlots, BlitSupport, ImageInfo, ImageSubresourceRange, Limits,
+    ResourceAccess, UploadLayout,
+};
 mod api;
 pub use api::{BufferInfo, CopyQueue, Graphics, QueueKind, SamplerInfo, ViewMetadata};
 pub(crate) use backend::{Api, Backend, NativeFence, Submission};

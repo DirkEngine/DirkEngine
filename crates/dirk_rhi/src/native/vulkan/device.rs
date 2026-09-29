@@ -22,7 +22,7 @@ use gpu_allocator::{
 use parking_lot::Mutex;
 use tracing::{debug, error, info, warn};
 
-use super::{backend_error, convert::QueueKind, vk_error};
+use super::{backend_error, vk_error};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -31,26 +31,14 @@ type DebugMessenger = (debug_utils::Instance, vk::DebugUtilsMessengerEXT);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct QueueFamilies {
     pub(crate) graphics: u32,
-    pub(crate) compute: u32,
     pub(crate) copy: u32,
     pub(crate) present: u32,
 }
 
 pub(crate) struct Queues {
     pub(crate) graphics: vk::Queue,
-    pub(crate) compute: vk::Queue,
     pub(crate) copy: vk::Queue,
     pub(crate) present: vk::Queue,
-}
-
-impl Queues {
-    pub(crate) fn get(&self, kind: QueueKind) -> vk::Queue {
-        match kind {
-            QueueKind::Graphics => self.graphics,
-            QueueKind::Compute => self.compute,
-            QueueKind::Copy => self.copy,
-        }
-    }
 }
 
 pub(crate) enum Garbage {
@@ -374,13 +362,15 @@ impl Context {
     }
 
     pub(crate) fn queue(&self, queue: QueueType) -> vk::Queue {
-        self.queues.get(super::convert::queue(queue))
+        match queue {
+            QueueType::Graphics => self.queues.graphics,
+            QueueType::Copy => self.queues.copy,
+        }
     }
 
     pub(crate) fn queue_family(&self, queue: QueueType) -> u32 {
         match queue {
             QueueType::Graphics => self.families.graphics,
-            QueueType::Compute => self.families.compute,
             QueueType::Copy => self.families.copy,
         }
     }
@@ -633,9 +623,7 @@ fn inspect_device(
                     .min_storage_buffer_offset_alignment,
                 buffer_copy_offset_alignment: 4,
                 buffer_copy_row_pitch_alignment: 1,
-                dedicated_compute_queue: families.compute != families.graphics,
-                dedicated_copy_queue: families.copy != families.graphics
-                    && families.copy != families.compute,
+                dedicated_copy_queue: families.copy != families.graphics,
             },
             supported_depth_formats,
             sampler_anisotropy,
@@ -655,13 +643,11 @@ impl QueueFamilies {
         physical_device: vk::PhysicalDevice,
     ) -> Option<Self> {
         let graphics = queue_index(properties, |flags| flags.contains(vk::QueueFlags::GRAPHICS))?;
-        // Compute dispatch is deferred; do not allocate a separate compute queue.
-        let compute = graphics;
         let copy = queue_index(properties, |flags| {
             flags.contains(vk::QueueFlags::TRANSFER)
                 && !flags.intersects(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
         })
-        .unwrap_or(compute);
+        .unwrap_or(graphics);
         let present = if let Some(surface) = surface {
             properties.iter().enumerate().find_map(|(index, _)| {
                 let index = u32::try_from(index).ok()?;
@@ -678,7 +664,6 @@ impl QueueFamilies {
         };
         Some(Self {
             graphics,
-            compute,
             copy,
             present,
         })
@@ -702,7 +687,6 @@ fn create_device(
 ) -> Result<(ash::Device, Queues)> {
     let unique_families = HashSet::from([
         selected.families.graphics,
-        selected.families.compute,
         selected.families.copy,
         selected.families.present,
     ]);
@@ -745,7 +729,6 @@ fn create_device(
     let queues = unsafe {
         Queues {
             graphics: device.get_device_queue(selected.families.graphics, 0),
-            compute: device.get_device_queue(selected.families.compute, 0),
             copy: device.get_device_queue(selected.families.copy, 0),
             present: device.get_device_queue(selected.families.present, 0),
         }

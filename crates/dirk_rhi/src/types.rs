@@ -5,8 +5,6 @@ use crate::flags::define_flags;
 pub enum QueueType {
     /// Rendering and general-purpose graphics commands.
     Graphics,
-    /// Compute-only work.
-    Compute,
     /// Resource copies and uploads.
     Copy,
 }

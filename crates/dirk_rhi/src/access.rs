@@ -54,23 +54,18 @@ impl Default for Limits {
 
 /// A checked byte range. The whole-remainder convention is shared by bindings and barriers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BufferRange {
+pub(crate) struct BufferRange {
     /// First byte.
-    pub offset: u64,
+    pub(crate) offset: u64,
     /// Byte count; `u64::MAX` selects the remainder.
-    pub size: u64,
+    pub(crate) size: u64,
 }
 impl BufferRange {
-    /// All bytes.
-    pub const WHOLE: Self = Self {
-        offset: 0,
-        size: u64::MAX,
-    };
     /// Resolves the remainder and rejects empty or out-of-bounds ranges.
     ///
     /// # Errors
     /// Returns `OutOfRange` if the range is empty or extends past `total`.
-    pub fn resolve(self, total: u64) -> Result<Self> {
+    pub(crate) fn resolve(self, total: u64) -> Result<Self> {
         let size = if self.size == u64::MAX {
             total.checked_sub(self.offset)
         } else {

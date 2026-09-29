@@ -2,8 +2,8 @@ use crate::{
     AccessTypes, AddressMode, BindingType, BlendFactor, BlendOp, BufferUsages, ColorSpace,
     ColorWrites, CompareOp, CullMode, FilterMode, FrontFace, ImageAspects, ImageState, ImageUsages,
     ImageViewType, IndexFormat, MemoryDomain, PipelineStages, PresentMode, PrimitiveTopology,
-    QueueType, SampleCount, SampleCounts, ShaderStages, StencilOp, StoreOp, TextureFormat,
-    VertexFormat, VertexStepMode,
+    SampleCount, SampleCounts, ShaderStages, StencilOp, StoreOp, TextureFormat, VertexFormat,
+    VertexStepMode,
 };
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -552,21 +552,6 @@ pub(crate) fn present_mode(value: PresentMode) -> vk::PresentModeKHR {
         PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
         PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
     }
-}
-
-pub(crate) fn queue(value: QueueType) -> QueueKind {
-    match value {
-        QueueType::Graphics => QueueKind::Graphics,
-        QueueType::Compute => QueueKind::Compute,
-        QueueType::Copy => QueueKind::Copy,
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum QueueKind {
-    Graphics,
-    Compute,
-    Copy,
 }
 
 #[cfg(test)]
