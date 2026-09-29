@@ -179,6 +179,11 @@ impl GraphBuffer<'_> {
                 "{}: invalid buffer access",
                 pass.name
             );
+            anyhow::ensure!(
+                names_shader_stages(usage.state),
+                "{}: shader accesses must name at least one shader stage",
+                pass.name
+            );
             if let Some(imported) = &desc.imported {
                 anyhow::ensure!(
                     imported
@@ -258,7 +263,7 @@ impl BufferDependency {
 pub enum TextureRead {
     /// Sampled by shaders in the given stages.
     Sampled {
-        /// Stages that sample the texture.
+        /// Stages that sample the texture; compilation rejects an empty set.
         stages: ShaderStages,
     },
     /// Source of a copy or blit.
@@ -279,7 +284,7 @@ pub enum TextureWrite {
     DepthStencilAttachment(AttachmentInfo),
     /// Shader storage image access.
     Storage {
-        /// Stages accessing the image.
+        /// Stages accessing the image; compilation rejects an empty set.
         stages: ShaderStages,
     },
     /// Destination of a copy or blit.
@@ -664,8 +669,10 @@ impl<'a> RenderGraph<'a> {
     /// Canonicalizes repeated imports, rejecting conflicting boundary states.
     ///
     /// # Errors
-    /// Rejects conflicting boundary states for an already imported allocation.
+    /// Rejects boundary states naming no shader stages, or conflicting boundary
+    /// states for an already imported allocation.
     pub fn import_buffer(&mut self, imported: ImportedBuffer<'a>) -> Result<BufferHandle> {
+        ensure_boundary_stages(imported.initial_state, imported.final_state)?;
         for (index, existing) in self.buffers.iter().enumerate() {
             if let Some(existing) = &existing.imported
                 && std::ptr::eq(existing.buffer, imported.buffer)
@@ -701,8 +708,10 @@ impl<'a> RenderGraph<'a> {
     /// Imports allocation metadata from the image itself.
     ///
     /// # Errors
-    /// Rejects conflicting boundary states or view ranges for an already imported allocation.
+    /// Rejects boundary states naming no shader stages, or conflicting boundary
+    /// states or view ranges for an already imported allocation.
     pub fn import_texture(&mut self, imported: ImportedTexture<'a>) -> Result<TextureHandle> {
+        ensure_boundary_stages(imported.initial_state, imported.final_state)?;
         for (index, desc) in self.textures.iter().enumerate() {
             if let Some(existing) = &desc.imported
                 && std::ptr::eq(existing.image, imported.image)
@@ -795,6 +804,11 @@ impl<'a> RenderGraph<'a> {
                 anyhow::ensure!(
                     !usage.state.image_usage().is_empty(),
                     "{}: invalid image access",
+                    pass.name
+                );
+                anyhow::ensure!(
+                    names_shader_stages(usage.state),
+                    "{}: shader accesses must name at least one shader stage",
                     pass.name
                 );
                 if desc.imported.is_some() {
@@ -1020,6 +1034,28 @@ fn transition_barriers(states: &mut Vec<RangeState>, usage: &AccessDecl) -> Vec<
     });
     *states = updated;
     barriers
+}
+
+/// Whether a shader-visible access names the stages that perform it.
+///
+/// Barriers derive their source and destination scopes from these stages, so
+/// an empty set would synchronize nothing and silently drop the hazard.
+pub(crate) fn names_shader_stages(state: ResourceAccess) -> bool {
+    match state {
+        ResourceAccess::Uniform(stages)
+        | ResourceAccess::ShaderRead(stages)
+        | ResourceAccess::StorageRead(stages)
+        | ResourceAccess::ShaderWrite(stages) => !stages.is_empty(),
+        _ => true,
+    }
+}
+
+fn ensure_boundary_stages(initial: ResourceAccess, last: ResourceAccess) -> Result<()> {
+    anyhow::ensure!(
+        names_shader_stages(initial) && names_shader_stages(last),
+        "imported boundary states must name at least one shader stage"
+    );
+    Ok(())
 }
 
 fn barrier_needed(old: ResourceAccess, new: ResourceAccess) -> bool {
@@ -1471,6 +1507,45 @@ mod tests {
                     .contains("attachment mip extents must match")
             );
         }
+    }
+
+    #[test]
+    fn shader_accesses_without_stages_are_rejected() {
+        let no_stages = ShaderStages::NONE;
+        let declarations: [fn(&mut PassBuilder<'_, '_>, TextureHandle, BufferHandle); 4] = [
+            |pass, texture, _| {
+                pass.read_sampled(texture, ShaderStages::NONE);
+            },
+            |pass, texture, _| {
+                pass.write_storage(texture, ShaderStages::NONE);
+            },
+            |pass, _, buffer| {
+                pass.read_buffer(buffer, ResourceAccess::Uniform(ShaderStages::NONE));
+            },
+            |pass, _, buffer| {
+                pass.write_buffer(buffer, ResourceAccess::ShaderWrite(ShaderStages::NONE));
+            },
+        ];
+        for declare in declarations {
+            let mut graph = RenderGraph::new();
+            let texture = graph.create_texture(color_desc());
+            let buffer = graph.create_buffer(64);
+            graph
+                .add_pass("producer")
+                .write_transfer_dst(texture)
+                .write_buffer(buffer, ResourceAccess::CopyDestination);
+            declare(&mut graph.add_pass("stageless"), texture, buffer);
+            let error = graph.compile().err().expect("stageless shader access");
+            assert!(
+                error
+                    .to_string()
+                    .contains("must name at least one shader stage")
+            );
+        }
+        assert!(names_shader_stages(
+            ResourceAccess::DepthStencilAttachmentReadOnly(no_stages)
+        ));
+        assert!(!names_shader_stages(ResourceAccess::StorageRead(no_stages)));
     }
 
     #[test]
