@@ -423,13 +423,15 @@ impl Context {
                         );
                         return;
                     }
+                    // Views reference swapchain images; acquire semaphores may
+                    // still be referenced by the swapchain until it is destroyed.
                     for view in views {
                         self.device.destroy_image_view(view, None);
                     }
+                    self.swapchain_loader.destroy_swapchain(raw, None);
                     for semaphore in semaphores {
                         self.device.destroy_semaphore(semaphore, None);
                     }
-                    self.swapchain_loader.destroy_swapchain(raw, None);
                 }
             }
         }

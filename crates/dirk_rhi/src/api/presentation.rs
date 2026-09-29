@@ -19,9 +19,6 @@ struct Chain<B: Backend> {
 }
 /// Reconfigurable chain. Resizing requires all acquisitions to be consumed.
 pub struct GpuSwapchain<B: Backend> {
-    format: SurfaceFormat,
-    extent: Extent3d,
-    image_count: NonZeroU32,
     device: Arc<super::device::Device<B>>,
     chain: Arc<Chain<B>>,
 }
@@ -39,6 +36,9 @@ pub struct GpuSurfaceFrame<B: Backend> {
 }
 impl<B: Backend> Rhi<B> {
     /// Creates a presentation chain, retaining its platform target through the native surface.
+    ///
+    /// Returns [`Error::SwapchainOutOfDate`](crate::Error::SwapchainOutOfDate) while the
+    /// surface has no presentable extent, such as a minimized window; retry once it is visible.
     pub fn create_swapchain(&self, desc: &SwapchainDesc<'_, Self>) -> Result<GpuSwapchain<B>> {
         let _gate = self.device.gate.lock();
         let raw = unsafe {
@@ -54,9 +54,6 @@ impl<B: Backend> Rhi<B> {
             })?
         };
         Ok(GpuSwapchain {
-            format: raw.format(),
-            extent: raw.extent(),
-            image_count: raw.image_count(),
             device: self.device.clone(),
             chain: Arc::new(Chain {
                 raw: Mutex::new(raw),
@@ -68,17 +65,19 @@ impl<B: Backend> Rhi<B> {
     }
 }
 impl<B: Backend> GpuSwapchain<B> {
+    // Native chains may recreate themselves when a frame is discarded, so
+    // configuration is read from the current native generation.
     /// Selected surface format.
     pub fn format(&self) -> SurfaceFormat {
-        self.format
+        self.chain.raw.lock().format()
     }
     /// Selected surface extent.
     pub fn extent(&self) -> Extent3d {
-        self.extent
+        self.chain.raw.lock().extent()
     }
     /// Actual native image count.
     pub fn image_count(&self) -> NonZeroU32 {
-        self.image_count
+        self.chain.raw.lock().image_count()
     }
     /// Acquires a frame, respecting the caller's timeout and in-flight budget.
     ///
@@ -167,6 +166,9 @@ impl<B: Backend> GpuSwapchain<B> {
         Ok(())
     }
     /// Waits for device work and recreates the chain after all frames have ended.
+    ///
+    /// Returns [`Error::SwapchainOutOfDate`](crate::Error::SwapchainOutOfDate) while the
+    /// surface has no presentable extent; the chain stays invalid until a later resize succeeds.
     pub fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
         if self.chain.acquired.load(Ordering::Acquire) != 0 {
             return Err(Ir::BadState
@@ -177,12 +179,7 @@ impl<B: Backend> GpuSwapchain<B> {
         let _gate = self.device.gate.lock();
         let result = unsafe { self.chain.raw.lock().resize(width, height) };
         self.chain.invalid.store(result.is_err(), Ordering::Release);
-        result?;
-        let raw = self.chain.raw.lock();
-        self.format = raw.format();
-        self.extent = raw.extent();
-        self.image_count = raw.image_count();
-        Ok(())
+        result
     }
 }
 impl<B: Backend> GpuSurfaceFrame<B> {

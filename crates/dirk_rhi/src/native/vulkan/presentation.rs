@@ -111,6 +111,7 @@ pub(crate) struct SwapchainGeneration {
     acquisitions: Mutex<Vec<AcquireSlot>>,
     format: SurfaceFormat,
     extent: Extent3d,
+    image_count: NonZeroU32,
     /// Images the application may hold while acquisition still makes progress.
     max_acquired: NonZeroU32,
 }
@@ -145,18 +146,20 @@ impl SwapchainGeneration {
         .map_err(vk_error)?;
         let extent = if capabilities.current_extent.width == u32::MAX {
             vk::Extent2D {
-                width: width.clamp(
-                    capabilities.min_image_extent.width,
-                    capabilities.max_image_extent.width,
-                ),
-                height: height.clamp(
-                    capabilities.min_image_extent.height,
-                    capabilities.max_image_extent.height,
-                ),
+                width: width
+                    .max(capabilities.min_image_extent.width)
+                    .min(capabilities.max_image_extent.width),
+                height: height
+                    .max(capabilities.min_image_extent.height)
+                    .min(capabilities.max_image_extent.height),
             }
         } else {
             capabilities.current_extent
         };
+        if extent.width == 0 || extent.height == 0 {
+            // A minimized window has no presentable extent; retry once it is visible.
+            return Err(Error::SwapchainOutOfDate);
+        }
         let formats = unsafe {
             context
                 .surface_loader
@@ -311,12 +314,18 @@ impl SwapchainGeneration {
                 }
             }
         }
+        let Some(image_count) = u32::try_from(images.len()).ok().and_then(NonZeroU32::new) else {
+            destroy_partial(context, raw, views, Vec::new());
+            return Err(Error::Backend(anyhow::anyhow!(
+                "Vulkan returned an unusable swapchain image count"
+            )));
+        };
         // VUID-vkAcquireNextImageKHR-surface-07783: an unbounded acquire is
         // only guaranteed to progress while at most `images - minImageCount`
         // images are already held.
-        let max_acquired = u32::try_from(images.len())
-            .ok()
-            .and_then(|count| count.checked_sub(capabilities.min_image_count))
+        let max_acquired = image_count
+            .get()
+            .checked_sub(capabilities.min_image_count)
             .and_then(|spare| NonZeroU32::new(spare + 1))
             .unwrap_or(NonZeroU32::MIN);
         let mut semaphores = Vec::with_capacity(images.len());
@@ -351,6 +360,7 @@ impl SwapchainGeneration {
             semaphores,
             format,
             extent: Extent3d::new_2d(extent.width, extent.height),
+            image_count,
             max_acquired,
         }))
     }
@@ -411,6 +421,24 @@ impl VulkanSwapchain {
     pub fn raw(&self) -> vk::SwapchainKHR {
         self.generation.raw
     }
+
+    /// Replaces the current generation, retiring the old one.
+    fn recreate(&mut self, width: u32, height: u32) -> Result<()> {
+        let generation = SwapchainGeneration::create(
+            &self.generation.context,
+            &self.generation.surface,
+            width,
+            height,
+            self.usage,
+            &self.preferred_formats,
+            self.desired_image_count,
+            self.present_mode,
+            self.generation.raw,
+        )?;
+        self.generation = generation;
+        self.next_acquisition = 0;
+        Ok(())
+    }
 }
 
 unsafe impl NativeSwapchain<VulkanBackend> for VulkanSwapchain {
@@ -423,8 +451,7 @@ unsafe impl NativeSwapchain<VulkanBackend> for VulkanSwapchain {
     }
 
     fn image_count(&self) -> NonZeroU32 {
-        NonZeroU32::new(self.generation.images.len().try_into().unwrap_or(u32::MAX))
-            .expect("a Vulkan swapchain always has at least one image")
+        self.generation.image_count
     }
 
     fn max_acquired_frames(&self) -> NonZeroU32 {
@@ -495,31 +522,15 @@ unsafe impl NativeSwapchain<VulkanBackend> for VulkanSwapchain {
                 .with_detail("a submitted frame must be presented")
                 .into());
         }
+        // Without swapchain_maintenance1 an acquired image can only be
+        // returned by presenting it, so abandoning it recreates the chain.
         let extent = self.extent();
         unsafe { self.generation.context.device.device_wait_idle() }.map_err(vk_error)?;
-        unsafe {
-            self.resize(
-                NonZeroU32::new(extent.width).expect("swapchain width is non-zero"),
-                NonZeroU32::new(extent.height).expect("swapchain height is non-zero"),
-            )
-        }
+        self.recreate(extent.width, extent.height)
     }
 
     unsafe fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<()> {
-        let generation = SwapchainGeneration::create(
-            &self.generation.context,
-            &self.generation.surface,
-            width.get(),
-            height.get(),
-            self.usage,
-            &self.preferred_formats,
-            self.desired_image_count,
-            self.present_mode,
-            self.generation.raw,
-        )?;
-        self.generation = generation;
-        self.next_acquisition = 0;
-        Ok(())
+        self.recreate(width.get(), height.get())
     }
 
     unsafe fn present(&mut self, frame: VulkanSurfaceFrame) -> Result<SurfaceStatus> {
