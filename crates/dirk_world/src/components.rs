@@ -8,8 +8,8 @@ use dirk_assets::{AssetHandle, AssetLease, AssetRegistry, Model};
 use dirk_universe::{
     Entity,
     components::Component,
-    query::{Query, filter::Changed},
-    systems::{RemovedComponents, System},
+    query::{Delta, Query},
+    systems::System,
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::warn;
@@ -61,25 +61,24 @@ impl ModelUploadSystem {
 }
 
 impl System for ModelUploadSystem {
-    type Params<'u> = (
-        Query<'u, (Entity, &'u Renderable), Changed<Renderable>>,
-        RemovedComponents<'u, Renderable>,
-    );
+    type Params<'u> = Query<'u, (Entity, Delta<'u, Renderable>)>;
 
-    fn run(&mut self, (renderables, removed): Self::Params<'_>) {
-        // Remove first, then reconcile current values so remove/reinsert in one
-        // tick leases the final model rather than losing it.
-        for entity in removed.iter() {
-            self.leases.remove(&entity);
-        }
-        for (entity, component) in &renderables {
-            if self
-                .leases
-                .get(&entity)
-                .is_none_or(|lease| lease.asset() != &component.model)
-            {
-                self.leases
-                    .insert(entity, self.assets.lease(&component.model));
+    fn run(&mut self, renderables: Self::Params<'_>) {
+        for (entity, delta) in &renderables {
+            match delta {
+                Delta::Set(component) => {
+                    if self
+                        .leases
+                        .get(&entity)
+                        .is_none_or(|lease| lease.asset() != &component.model)
+                    {
+                        self.leases
+                            .insert(entity, self.assets.lease(&component.model));
+                    }
+                }
+                Delta::Removed => {
+                    self.leases.remove(&entity);
+                }
             }
         }
     }

@@ -3,11 +3,12 @@
 use dirk_universe::{
     Entity, EntityBuilder, Universe, World, WorldId,
     components::Component,
+    prelude::{Delta, InWorld},
     query::{
         Query,
         filter::{Added, Changed, Without},
     },
-    systems::{Commands, DeltaTime, IntoSystem, Lifecycle, RemovedComponents, System},
+    systems::{Commands, DeltaTime, IntoSystem, System},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -21,6 +22,18 @@ struct Counter(i32);
 
 #[derive(Debug, Component)]
 struct Step(i32);
+
+/// Returns the IDs of the universe's worlds, in creation order.
+fn world_ids<const N: usize>(universe: &Universe) -> [WorldId; N] {
+    let mut ids: Vec<_> = universe.worlds().map(|world| world.id()).collect();
+    ids.sort_by_key(|id| id.raw());
+    ids.try_into().expect("unexpected world count")
+}
+
+/// Returns a world's name, if the world is alive.
+fn world_name(universe: &Universe, world: WorldId) -> Option<String> {
+    universe.world(world).map(|world| world.name().to_owned())
+}
 
 fn spawn_entity(universe: &mut Universe, world: WorldId, builder: EntityBuilder) -> Entity {
     let mut cmd = universe.handle().command_buffer();
@@ -38,8 +51,7 @@ fn universe_public_api_supports_entity_lifecycle_across_worlds() {
         .build();
     universe.tick(0.0);
 
-    let overworld = dirk_universe::WorldId::default();
-    let dungeon = overworld + 1;
+    let [overworld, dungeon] = world_ids(&universe);
 
     let entity = spawn_entity(
         &mut universe,
@@ -71,7 +83,7 @@ fn universe_public_api_supports_entity_lifecycle_across_worlds() {
 fn buffered_spawns_are_applied_on_tick_and_components_are_readable() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
-    let world = dirk_universe::WorldId::default();
+    let [world] = world_ids(&universe);
 
     let mut cmd = universe.handle().command_buffer();
     let e0 = cmd.spawn(world, Entity::builder().with_component(Position(1, 1)));
@@ -85,7 +97,7 @@ fn buffered_spawns_are_applied_on_tick_and_components_are_readable() {
 
     universe.tick(0.016);
 
-    assert_eq!(universe.alive_count(), 2);
+    assert_eq!(universe.entities().count(), 2);
 
     assert_eq!(
         universe.component::<Position>(e0).map(|p| (p.0, p.1)),
@@ -124,9 +136,9 @@ fn public_command_buffers_allocate_unique_handles() {
 
     assert_ne!(first_world, second_world);
     assert_ne!(first_entity, second_entity);
-    assert_eq!(universe.world(first_world).map(World::name), Some("first"));
+    assert_eq!(world_name(&universe, first_world).as_deref(), Some("first"));
     assert_eq!(
-        universe.world(second_world).map(World::name),
+        world_name(&universe, second_world).as_deref(),
         Some("second")
     );
     assert!(universe.is_in_world(first_world, first_entity));
@@ -172,7 +184,7 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
 
     let mut cmd = universe.handle().command_buffer();
     let entity = cmd.spawn(
-        WorldId::default(),
+        world_ids::<1>(&universe)[0],
         Entity::builder().with_component(Position(2, 3)),
     );
     cmd.submit();
@@ -223,7 +235,7 @@ fn struct_systems_name_their_parameters_once() {
     universe.tick(0.0);
     let mut cmd = universe.handle().command_buffer();
     let counted = cmd.spawn(
-        WorldId::default(),
+        world_ids::<1>(&universe)[0],
         Entity::builder()
             .with_component(Position(2, 0))
             .with_component(Counter(0)),
@@ -238,16 +250,18 @@ fn struct_systems_name_their_parameters_once() {
 #[test]
 fn optional_query_data_matches_entities_without_the_component() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    universe.tick(0.0);
+    let [world] = world_ids(&universe);
     let with = spawn_entity(
         &mut universe,
-        WorldId::default(),
+        world,
         Entity::builder()
             .with_component(Position(1, 0))
             .with_component(Counter(7)),
     );
     let without = spawn_entity(
         &mut universe,
-        WorldId::default(),
+        world,
         Entity::builder().with_component(Position(2, 0)),
     );
 
@@ -464,7 +478,7 @@ fn destroyed_world_rejects_later_spawns_and_transfers() {
     assert!(universe.world(destroyed).is_none());
     assert!(!universe.is_alive(rejected));
     assert_eq!(universe.get_world(existing), Some(surviving));
-    assert_eq!(universe.alive_count(), 1);
+    assert_eq!(universe.entities().count(), 1);
 }
 
 #[test]
@@ -484,19 +498,21 @@ fn despawn_discards_later_component_writes() {
 }
 
 #[test]
-fn systems_run_once_per_tick_even_without_entities_and_share_lifecycle() {
+fn systems_run_once_per_tick_even_without_entities_and_share_deltas() {
     use std::{cell::RefCell, rc::Rc};
     let observed = Rc::new(RefCell::new(Vec::new()));
     let mut builder = Universe::builder();
     for id in [1, 2] {
         let observed = Rc::clone(&observed);
         let mut calls = 0;
-        builder = builder.with_system(move |lifecycle: Lifecycle<'_>, DeltaTime(delta_time)| {
-            calls += 1;
-            observed
-                .borrow_mut()
-                .push((id, calls, lifecycle.iter().count(), delta_time));
-        });
+        builder = builder.with_system(
+            move |worlds: Query<(Entity, Delta<World>)>, DeltaTime(delta_time)| {
+                calls += 1;
+                observed
+                    .borrow_mut()
+                    .push((id, calls, worlds.iter().count(), delta_time));
+            },
+        );
     }
     let mut universe = builder.build();
     universe.tick(0.25);
@@ -518,10 +534,60 @@ fn systems_run_once_per_tick_even_without_entities_and_share_lifecycle() {
     );
 }
 
+/// What one observed `Delta` looked like: the component value, or `None` when
+/// it was removed.
+type Observed<T> = Vec<(Entity, Option<T>)>;
+
+/// Records every structural delta a system observes, one entry per tick.
+#[derive(Default)]
+struct Structure {
+    worlds: Observed<String>,
+    locations: Observed<WorldId>,
+    positions: Observed<i32>,
+}
+
+fn observe<C: Component, T>(
+    query: &Query<(Entity, Delta<C>)>,
+    value: impl Fn(&C) -> T,
+) -> Observed<T> {
+    let mut observed: Vec<_> = query
+        .iter()
+        .map(|(entity, delta)| match delta {
+            Delta::Set(component) => (entity, Some(value(&component))),
+            Delta::Removed => (entity, None),
+        })
+        .collect();
+    observed.sort_by_key(|(entity, _)| entity.raw());
+    observed
+}
+
+fn structure_observer(
+    universe: dirk_universe::UniverseBuilder,
+) -> (
+    dirk_universe::UniverseBuilder,
+    std::rc::Rc<std::cell::RefCell<Vec<Structure>>>,
+) {
+    use std::{cell::RefCell, rc::Rc};
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let system_seen = Rc::clone(&seen);
+    let universe = universe.with_system(
+        move |worlds: Query<(Entity, Delta<World>)>,
+              locations: Query<(Entity, Delta<InWorld>)>,
+              positions: Query<(Entity, Delta<Position>)>| {
+            system_seen.borrow_mut().push(Structure {
+                worlds: observe(&worlds, |world| world.name().to_owned()),
+                locations: observe(&locations, |in_world| in_world.0),
+                positions: observe(&positions, |position| position.0),
+            });
+        },
+    );
+    (universe, seen)
+}
+
 #[test]
-fn structural_records_preserve_order_and_only_record_successful_removals() {
-    use dirk_universe::lifecycle::LifecycleEvent;
-    let mut universe = Universe::builder().build();
+fn deltas_report_the_net_structural_change_since_the_last_run() {
+    let (builder, seen) = structure_observer(Universe::builder());
+    let mut universe = builder.build();
     let mut cmd = universe.handle().command_buffer();
     let first = cmd.create_world(World::builder("first"));
     let second = cmd.create_world(World::builder("second"));
@@ -531,44 +597,80 @@ fn structural_records_preserve_order_and_only_record_successful_removals() {
     cmd.remove_component::<Position>(entity);
     cmd.set_component(entity, Position(3, 0));
     cmd.send(entity, second);
-    cmd.destroy_world(second);
-    cmd.despawn(entity);
-    cmd.destroy_world(first);
+    let transient = cmd.spawn(first, Entity::builder().with_component(Position(9, 0)));
+    cmd.despawn(transient);
     cmd.submit();
     universe.tick(0.0);
+
+    let mut cmd = universe.handle().command_buffer();
+    cmd.destroy_world(second);
+    cmd.submit();
+    universe.tick(0.0);
+    universe.tick(0.0);
+
+    let seen = seen.borrow();
+    // Spawning, replacing, re-adding and moving collapse into final values;
+    // the transient entity never appears.
     assert_eq!(
-        universe.lifecycle().copied().collect::<Vec<_>>(),
+        seen[0].worlds,
         vec![
-            LifecycleEvent::WorldCreated { world: first },
-            LifecycleEvent::WorldCreated { world: second },
-            LifecycleEvent::EntitySpawned {
-                entity,
-                world: first
-            },
-            LifecycleEvent::ComponentRemoved {
-                entity,
-                type_id: std::any::TypeId::of::<Position>()
-            },
-            LifecycleEvent::EntityMoved {
-                entity,
-                from: first,
-                to: second
-            },
-            LifecycleEvent::ComponentRemoved {
-                entity,
-                type_id: std::any::TypeId::of::<Position>()
-            },
-            LifecycleEvent::EntityDespawned {
-                entity,
-                world: second
-            },
-            LifecycleEvent::WorldDestroyed { world: second },
-            LifecycleEvent::WorldDestroyed { world: first },
+            (first.entity(), Some("first".to_owned())),
+            (second.entity(), Some("second".to_owned())),
         ]
     );
-    assert_eq!(universe.alive_count(), 0);
+    assert_eq!(seen[0].locations, vec![(entity, Some(second))]);
+    assert_eq!(seen[0].positions, vec![(entity, Some(3))]);
+    // Destroying a world removes it and everything in it.
+    assert_eq!(seen[1].worlds, vec![(second.entity(), None)]);
+    assert_eq!(seen[1].locations, vec![(entity, None)]);
+    assert_eq!(seen[1].positions, vec![(entity, None)]);
+    assert!(!universe.is_alive(entity));
+    // Removals are reported once.
+    assert!(seen[2].worlds.is_empty() && seen[2].locations.is_empty());
+    assert!(seen[2].positions.is_empty());
+}
+
+#[test]
+fn deltas_outside_systems_report_present_components_as_set() {
+    let mut universe = Universe::builder()
+        .with_world(
+            World::builder("w").with_entity(Entity::builder().with_component(Position(5, 0))),
+        )
+        .build();
     universe.tick(0.0);
-    assert_eq!(universe.lifecycle().count(), 0);
+
+    let query = universe.query::<(Entity, Delta<Position>)>();
+    let observed = observe(&query, |position| position.0);
+
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].1, Some(5));
+}
+
+#[test]
+fn world_entities_carry_world_level_components() {
+    let mut universe = Universe::builder()
+        .with_world(World::builder("sky"))
+        .build();
+    universe.tick(0.0);
+    let [sky] = world_ids(&universe);
+
+    let mut cmd = universe.handle().command_buffer();
+    cmd.set_component(sky.entity(), Position(0, -10));
+    cmd.submit();
+    universe.tick(0.0);
+
+    let worlds: Vec<_> = universe
+        .query::<(&World, &Position)>()
+        .iter()
+        .map(|(world, gravity)| (world.id(), gravity.1))
+        .collect();
+    assert_eq!(worlds, vec![(sky, -10)]);
+
+    let mut cmd = universe.handle().command_buffer();
+    cmd.despawn(sky.entity());
+    cmd.submit();
+    universe.tick(0.0);
+    assert!(universe.world(sky).is_none());
 }
 
 #[test]
@@ -609,14 +711,14 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
         .with_system(
             move |added: Query<&Counter, Added<Counter>>,
                   changed: Query<&Counter, Changed<Counter>>,
-                  removed: RemovedComponents<Counter>| {
+                  deltas: Query<(Entity, Delta<Counter>)>| {
                 observer_seen.borrow_mut().push((
                     added.iter().map(|value| value.0).collect::<Vec<_>>(),
                     changed.iter().map(|value| value.0).collect::<Vec<_>>(),
                 ));
                 observer_removed
                     .borrow_mut()
-                    .push(removed.iter().collect::<Vec<_>>());
+                    .push(observe(&deltas, |c| c.0));
             },
         )
         .build();
@@ -650,9 +752,16 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
             (vec![], vec![]),
         ]
     );
+    // Removing and re-adding within one tick is a net `Set`.
     assert_eq!(
         *removed_seen.borrow(),
-        vec![vec![], vec![], vec![entity], vec![entity], vec![]]
+        vec![
+            vec![(entity, Some(1))],
+            vec![(entity, Some(3))],
+            vec![(entity, Some(4))],
+            vec![(entity, None)],
+            vec![],
+        ]
     );
 }
 

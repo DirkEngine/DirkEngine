@@ -95,41 +95,43 @@ reinserting it is both. On a system's first run, all present matching components
 count as added and changed. Outside a system, these filters also match all
 present components because there is no previous invocation.
 
+`Delta<C>` reports what happened to `C` since the observing system last ran:
+`Delta::Set` with the current value, or `Delta::Removed`. It reports the net
+change, so a component removed and re-added is `Set`, and one added and removed
+again between two runs is not reported at all. Despawned entities report
+`Removed`, which is why a `Delta` can only be combined with `Entity`; the
+compiler rejects other combinations. Removals are kept until every system has
+run once after them.
+
 ```rust
-use dirk_universe::{
-    Entity, Universe, components::Component,
-    query::{Query, filter::Changed}, systems::RemovedComponents,
-};
+use dirk_universe::prelude::*;
 
 #[derive(Debug, Component)]
 struct Health(u32);
 
-fn synchronize(health: Query<(Entity, &Health), Changed<Health>>, removed: RemovedComponents<Health>) {
-    // Clean up first: a removed component may have been reinserted this tick.
-    for entity in removed.iter() {
-        println!("remove cached health for {entity:?}");
-    }
-    for (entity, value) in &health {
-        println!("{entity:?} now has {} health", value.0);
+fn synchronize(health: Query<(Entity, Delta<Health>)>) {
+    for (entity, delta) in &health {
+        match delta {
+            Delta::Set(value) => println!("{entity:?} now has {} health", value.0),
+            Delta::Removed => println!("remove cached health for {entity:?}"),
+        }
     }
 }
 let universe = Universe::builder().with_system(synchronize).build();
 ```
 
+Structure is data too. A world is an entity carrying a `World` component, and
+may carry any other world-level components. Every other entity carries an
+`InWorld` component naming its world: spawning adds it, `send` replaces it and
+despawning removes it. `Delta<World>` and `Delta<InWorld>` therefore observe
+world creation and destruction and entity spawns, moves and despawns. `World`
+and `InWorld` are read-only: queries can read them, but only the engine writes
+them. Because worlds are entities, `Query<Entity>` includes them; add
+`With<InWorld>` to match only entities inside worlds.
+
 Structural changes use `Commands` or submitted command buffers and apply at the
 start of the next tick. Buffers execute in submission order and commands in
-insertion order. `RemovedComponents<C>` yields IDs for successful removals,
-including despawns, without retaining removed values. Every system may read
-these records; unlike component counters, removal records expire next tick.
-
-`Lifecycle` exposes the current tick's ordered world creation/destruction,
-entity spawn/move/despawn, and component removal notifications. Records contain
-only IDs and component types. World creation precedes entity spawn; component
-removals precede despawn; world destruction follows its entity despawns. Bulk
-entity/component order is unspecified. No-op commands produce no records.
-Ordinary component additions and updates are observed through query filters.
-Consumers replay structure before synchronizing current component values, so
-transient entities and remove/reinsert sequences are handled correctly.
+insertion order. Destroying or despawning a world despawns its entities too.
 
 Systems run sequentially. `UniverseBuilder::with_other` appends another
 builder's systems; builders with outstanding handles or queued commands cannot

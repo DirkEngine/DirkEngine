@@ -4,18 +4,16 @@
 //! receive. The universe fetches those parameters before each run.
 
 use std::{
-    any::{TypeId, type_name},
+    any::type_name,
     cell::{RefCell, RefMut},
     marker::PhantomData,
     ops::{Deref, DerefMut},
 };
 
 use crate::{
-    CommandBuffer, Entity, Universe,
-    components::Component,
-    lifecycle::LifecycleEvent,
+    CommandBuffer, Universe,
     macros::sealed::Sealed,
-    query::{Query, QueryAccess, QueryData, filter::QueryFilter},
+    query::{Join, Query, QueryAccess, QueryData, filter::QueryFilter},
 };
 
 /// Everything a system parameter can be fetched from during one run.
@@ -28,7 +26,7 @@ pub struct SystemContext<'u> {
 }
 
 /// Data supplied to one system invocation: queries, [`Commands`],
-/// [`DeltaTime`], lifecycle records, or tuples of these.
+/// [`DeltaTime`], or tuples of these.
 pub trait SystemParam: Sealed {
     /// The value supplied while the universe is borrowed for this invocation.
     type Item<'u>;
@@ -68,7 +66,10 @@ macro_rules! impl_system_param_for_tuple {
 all_tuples!(impl_system_param_for_tuple);
 
 impl<D: QueryData, F: QueryFilter> Sealed for Query<'_, D, F> {}
-impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
+impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F>
+where
+    D::Liveness: Join<F::Liveness>,
+{
     type Item<'u> = Query<'u, D, F>;
 
     fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
@@ -113,68 +114,6 @@ impl SystemParam for Commands<'_> {
     fn register_access(access: &mut QueryAccess) {
         access.commands();
     }
-}
-
-/// Structural notifications for this tick. Ordinary component updates use
-/// `Changed<C>` queries. Records contain IDs and types, never component values.
-pub struct Lifecycle<'u> {
-    universe: &'u Universe,
-}
-
-impl<'u> Lifecycle<'u> {
-    /// Iterates over structural transitions in command order.
-    pub fn iter(&self) -> impl Iterator<Item = &'u LifecycleEvent> {
-        self.universe.lifecycle()
-    }
-}
-
-impl Sealed for Lifecycle<'_> {}
-impl SystemParam for Lifecycle<'_> {
-    type Item<'u> = Lifecycle<'u>;
-
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
-        Lifecycle {
-            universe: context.universe,
-        }
-    }
-
-    fn register_access(_: &mut QueryAccess) {}
-}
-
-/// Entities whose component was removed during this tick, including despawns.
-/// Every system can read the same records. Values are dropped on removal, and
-/// records expire at the next tick. An entity may have re-added the component.
-pub struct RemovedComponents<'u, C: Component> {
-    universe: &'u Universe,
-    _marker: PhantomData<C>,
-}
-
-impl<C: Component> RemovedComponents<'_, C> {
-    /// Iterates over removed entity IDs, in command order.
-    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.universe.lifecycle().filter_map(|event| match *event {
-            LifecycleEvent::ComponentRemoved { entity, type_id }
-                if type_id == TypeId::of::<C>() =>
-            {
-                Some(entity)
-            }
-            _ => None,
-        })
-    }
-}
-
-impl<C: Component> Sealed for RemovedComponents<'_, C> {}
-impl<C: Component> SystemParam for RemovedComponents<'_, C> {
-    type Item<'u> = RemovedComponents<'u, C>;
-
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
-        RemovedComponents {
-            universe: context.universe,
-            _marker: PhantomData,
-        }
-    }
-
-    fn register_access(_: &mut QueryAccess) {}
 }
 
 /// Time since the previous tick, in seconds.
