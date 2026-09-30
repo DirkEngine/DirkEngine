@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use dirk_assets::{AssetHandle, AssetLoad, AssetRegistry, Handle, Model};
+use dirk_assets::{AssetHandle, AssetLease, AssetRegistry, Model};
 use dirk_universe::{
     Entity,
     components::Component,
@@ -12,7 +12,7 @@ use dirk_universe::{
     systems::{RemovedComponents, System},
 };
 use glam::{Mat4, Quat, Vec3};
-use tracing::{error, warn};
+use tracing::warn;
 
 /// Marks an entity as having a renderable mesh.
 ///
@@ -42,44 +42,11 @@ impl Renderable {
     }
 }
 
-/// Loads models referenced by added or updated [`Renderable`] components.
+/// Keeps the models referenced by [`Renderable`] components loaded. The
+/// asset registry loads them in the background and reports failures.
 pub struct ModelUploadSystem {
     assets: AssetRegistry,
-    requests: HashMap<Entity, ModelRequest>,
-}
-
-struct ModelRequest {
-    model: AssetHandle,
-    status: ModelLoad,
-}
-
-enum ModelLoad {
-    Pending(AssetLoad<Model>),
-    Ready { _handle: Handle<Model> },
-    Failed,
-}
-
-impl ModelRequest {
-    fn new(assets: &AssetRegistry, model: AssetHandle) -> Self {
-        let status = ModelLoad::Pending(assets.load_asset::<Model>(&model));
-        Self { model, status }
-    }
-
-    fn poll(&mut self, entity: Entity) {
-        let result = match &mut self.status {
-            ModelLoad::Pending(load) => load.try_poll(),
-            ModelLoad::Ready { .. } | ModelLoad::Failed => None,
-        };
-        if let Some(result) = result {
-            self.status = match result {
-                Ok(handle) => ModelLoad::Ready { _handle: handle },
-                Err(error) => {
-                    error!(?entity, asset = %self.model, error = ?error, "failed to load model");
-                    ModelLoad::Failed
-                }
-            };
-        }
-    }
+    leases: HashMap<Entity, AssetLease<Model>>,
 }
 
 impl ModelUploadSystem {
@@ -88,7 +55,7 @@ impl ModelUploadSystem {
     pub fn new(assets: AssetRegistry) -> Self {
         Self {
             assets,
-            requests: HashMap::new(),
+            leases: HashMap::new(),
         }
     }
 }
@@ -107,24 +74,19 @@ impl
         ),
     ) {
         // Remove first, then reconcile current values so remove/reinsert in one
-        // tick starts a request for the final component rather than losing it.
+        // tick leases the final model rather than losing it.
         for entity in removed.iter() {
-            self.requests.remove(&entity);
+            self.leases.remove(&entity);
         }
         for (entity, component) in &renderables {
             if self
-                .requests
+                .leases
                 .get(&entity)
-                .is_none_or(|request| request.model != component.model)
+                .is_none_or(|lease| lease.asset() != &component.model)
             {
-                self.requests.insert(
-                    entity,
-                    ModelRequest::new(&self.assets, component.model.clone()),
-                );
+                self.leases
+                    .insert(entity, self.assets.lease(&component.model));
             }
-        }
-        for (entity, request) in &mut self.requests {
-            request.poll(*entity);
         }
     }
 }
