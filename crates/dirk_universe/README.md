@@ -133,6 +133,36 @@ and `InWorld` are read-only: queries can read them, but only the engine writes
 them. Because worlds are entities, `Query<Entity>` includes them; add
 `With<InWorld>` to match only entities inside worlds.
 
+## Derived components
+
+Some components are just functions of others. `with_derived` computes them:
+
+```rust
+use dirk_universe::prelude::*;
+
+#[derive(Debug, Component)]
+struct Velocity(f64);
+#[derive(Debug, Component)]
+struct Mass(f64);
+#[derive(Debug, PartialEq, Component)]
+#[component(read_only)]
+struct Momentum(f64);
+
+fn momentum(velocity: &Velocity, mass: &Mass) -> Momentum {
+    Momentum(velocity.0 * mass.0)
+}
+
+let universe = Universe::builder().with_derived(momentum).build();
+assert!(universe.is_ok());
+```
+
+Every entity with the inputs gets the output, and loses it with them;
+`Option<&C>` arguments are not required. The function reruns only for entities
+whose inputs changed, and the output is written only when its value changes.
+Outputs are `#[component(read_only)]`, so no system or command can write them
+and they never drift out of sync. Derivations are scheduled like systems, so
+readers of `Momentum` see it updated in the same tick as `Velocity`.
+
 ## Worlds
 
 Worlds are like dimensions: entities in different worlds can interact, and a

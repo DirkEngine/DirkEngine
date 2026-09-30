@@ -97,29 +97,59 @@ pub fn derive_event(input: proc_macro::TokenStream) -> TokenStream {
 /// Derive `dirk_universe`'s `Component` trait for any type.
 ///
 /// The component is mutable: systems may edit it through `&mut C` queries and
-/// commands may insert or remove it. Generics on the type are respected:
+/// commands may insert or remove it. `#[component(read_only)]` makes it
+/// read-only instead, so only the engine writes it, as with derived
+/// components. Generics on the type are respected:
 ///
 /// ```rust
 /// # extern crate self as dirk_universe;
 /// # pub mod components {
 /// #     pub trait Component { type Mutability; }
 /// #     pub enum Mutable {}
+/// #     pub enum ReadOnly {}
 /// # }
 /// # use components::Component;
 /// # use dirk_proc::Component;
 /// #[derive(Component, Clone)]
 /// struct Transform { position: (i32, i32) }
+///
+/// #[derive(Component, Clone)]
+/// #[component(read_only)]
+/// struct Speed(f32);
 /// # fn main() {}
 /// ```
-#[proc_macro_derive(Component)]
+#[proc_macro_derive(Component, attributes(component))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let mut read_only = false;
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("component"))
+    {
+        let parsed = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("read_only") {
+                read_only = true;
+                Ok(())
+            } else {
+                Err(meta.error("expected `read_only`"))
+            }
+        });
+        if let Err(error) = parsed {
+            return error.to_compile_error().into();
+        }
+    }
+    let mutability = if read_only {
+        quote!(::dirk_universe::components::ReadOnly)
+    } else {
+        quote!(::dirk_universe::components::Mutable)
+    };
     let name = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     quote! {
         impl #impl_generics ::dirk_universe::components::Component for #name #ty_generics #where_clause {
-            type Mutability = ::dirk_universe::components::Mutable;
+            type Mutability = #mutability;
         }
     }
     .into()

@@ -28,6 +28,9 @@ use systems::{ErasedSystem, IntoSystem};
 pub mod schedule;
 use schedule::{Schedule, ScheduleError, SystemConfig};
 
+pub mod derived;
+use derived::IntoDerived;
+
 mod command_buffer;
 use command_buffer::Command;
 pub use command_buffer::CommandBuffer;
@@ -112,9 +115,8 @@ pub struct Universe {
     handle: UniverseHandle,
     buffer_receiver: Receiver<CommandBuffer>,
 
-    // Systems mutate their own state while borrowing the universe's component
-    // data. Only tick borrows this private list, so callbacks cannot reborrow it.
-    systems: RefCell<Vec<Box<dyn ErasedSystem>>>,
+    /// Systems in schedule order. `tick` moves them out while they run.
+    systems: Vec<Box<dyn ErasedSystem>>,
     schedule: Schedule,
 
     components: Components,
@@ -137,7 +139,7 @@ impl Universe {
             alive: HashSet::new(),
             handle: builder.handle,
             buffer_receiver: builder.buffer_receiver,
-            systems: RefCell::new(systems),
+            systems,
             schedule,
             components: Components::default(),
             removals: Vec::new(),
@@ -193,9 +195,11 @@ impl Universe {
             self.apply_command(command);
         }
 
-        for system in self.systems.borrow_mut().iter_mut() {
+        let mut systems = std::mem::take(&mut self.systems);
+        for system in &mut systems {
             system.run(self, delta_time, &cmd);
         }
+        self.systems = systems;
 
         cmd.into_inner().submit();
     }
@@ -515,6 +519,14 @@ impl UniverseBuilder {
     #[must_use]
     pub fn with_system<Marker>(mut self, system: impl IntoSystem<Marker>) -> Self {
         self.systems.push(system.into_config());
+        self
+    }
+
+    /// Adds a derived component: `derive` computes a read-only component from
+    /// each entity's other components. See [`derived`] for the rules.
+    #[must_use]
+    pub fn with_derived<Marker>(mut self, derive: impl IntoDerived<Marker>) -> Self {
+        self.systems.push(derive.into_config());
         self
     }
 
