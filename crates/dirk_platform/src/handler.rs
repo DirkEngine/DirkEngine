@@ -120,9 +120,9 @@ impl PlatformHandler {
                     self.pointer_positions.remove(&id);
                     // Focus loss can consume the matching key/button and
                     // modifier releases.
-                    self.dispatch_input(id, InputEvent::PointerLeft);
                     self.set_modifiers(id, ModifiersState::default());
                 }
+                self.dispatch_input(id, InputEvent::FocusChanged(*focused));
                 self.window_dispatcher
                     .dispatch(PlatformWindowEvent::FocusChanged {
                         id,

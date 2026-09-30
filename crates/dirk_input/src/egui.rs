@@ -288,9 +288,13 @@ pub fn input_events_from_egui_response(
                     out.push(InputEvent::PointerLeft);
                     previous_pointer = None;
                 }
-                egui::Event::WindowFocused(false) if keyboard_routes => {
-                    out.push(InputEvent::PointerLeft);
+                // `has_focus()` is already false after native focus loss.
+                // Every viewport must release any input it previously owned.
+                egui::Event::WindowFocused(false) => {
+                    out.push(InputEvent::FocusChanged(false));
                     out.push(InputEvent::ModifiersChanged(Modifiers::default()));
+                    previous_pointer = None;
+                    request_focus = false;
                 }
                 _ => {}
             }
@@ -432,5 +436,32 @@ mod tests {
         assert_eq!(deltas.len(), 2);
         assert!((deltas[0].x - 0.1).abs() < f32::EPSILON);
         assert!((deltas[1].x - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn native_focus_loss_releases_viewport_without_pointer_capture() {
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                focused: false,
+                events: vec![egui::Event::WindowFocused(false)],
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let response = ui
+                        .allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click_and_drag());
+                    assert!(!response.has_focus());
+                    let events = input_events_from_egui_response(ui, &response, None);
+                    assert_eq!(
+                        events,
+                        vec![
+                            InputEvent::FocusChanged(false),
+                            InputEvent::ModifiersChanged(Modifiers::default())
+                        ]
+                    );
+                });
+            },
+        );
     }
 }

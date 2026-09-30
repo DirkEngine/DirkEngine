@@ -350,11 +350,13 @@ fn draw_viewport_window(
                 state: ButtonState::Released,
                 ..
             }
-            | InputEvent::PointerLeft => captured = false,
+            | InputEvent::PointerLeft
+            | InputEvent::FocusChanged(false) => captured = false,
             InputEvent::Key { .. }
             | InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. }
+            | InputEvent::FocusChanged(true)
             | InputEvent::ModifiersChanged(_) => {}
         }
     }
