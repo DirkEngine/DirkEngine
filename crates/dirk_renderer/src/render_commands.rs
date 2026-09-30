@@ -74,7 +74,8 @@ mod tests {
         let changes = RenderChanges::default();
         let mut universe = Universe::builder()
             .with_system(RendererSystem::new(changes.clone()))
-            .build();
+            .build()
+            .expect("the renderer system should schedule");
         let mut commands = universe.handle().command_buffer();
         let first = commands.create_world(World::builder("first"));
         let second = commands.create_world(World::builder("second"));

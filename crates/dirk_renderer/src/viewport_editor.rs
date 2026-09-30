@@ -298,8 +298,7 @@ fn draw_viewport_window(
             | InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. }
-            | InputEvent::FocusChanged(true)
-            | InputEvent::ModifiersChanged(_) => {}
+            | InputEvent::FocusChanged(true) => {}
         }
     }
     let latest_pointer = ui.input(|input| input.pointer.latest_pos());

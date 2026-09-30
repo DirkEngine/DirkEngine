@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn ime_composition_and_commit_reach_egui() {
-        let events = translate_events(
+        let events = EguiInputState::default().translate_events(
             window_id(1),
             glam::UVec2 { x: 100, y: 100 },
             1.0,
