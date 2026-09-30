@@ -7,7 +7,8 @@ use crate::{
     components::{AnyComponent, Component},
 };
 
-/// A buffer to record edits to the [`Universe`].
+/// A buffer to record edits to the [`Universe`](crate::Universe).
+/// Commands are applied in submission order on the next tick.
 pub struct CommandBuffer {
     commands: Vec<Command>,
     handle: UniverseHandle,
@@ -37,7 +38,7 @@ impl CommandBuffer {
         self.commands
     }
 
-    /// Will submit the [`CommandBuffer`] to the [`Universe`]'s queue.
+    /// Will submit the [`CommandBuffer`] to the [`Universe`](crate::Universe)'s queue.
     pub fn submit(self) {
         let sender = self.handle.buffer_sender.clone();
         if sender.send(self).is_err() {
@@ -65,7 +66,7 @@ impl CommandBuffer {
         id
     }
 
-    /// Will destroy the world & call all its destruction systems.
+    /// Destroys the world and its entities, recording their removal changes.
     pub fn destroy_world(&mut self, world: WorldId) {
         self.commands.push(Command::DestroyWorld(world));
     }
@@ -75,7 +76,7 @@ impl CommandBuffer {
     /// Will spawn a new [`Entity`] using the provided [`EntityBuilder`].
     /// Returns the handle of the new [`Entity`].
     ///
-    /// If the [`World`] does not exist when this command is applied, the
+    /// If the [`World`](crate::World) does not exist when this command is applied, the
     /// returned handle will not become alive.
     pub fn spawn(&mut self, world: WorldId, builder: EntityBuilder) -> Entity {
         let entity = self.handle.allocator.allocate_entity();
@@ -85,8 +86,7 @@ impl CommandBuffer {
 
     /// Will despawn the provided [`Entity`].
     ///
-    /// Calls [`ComponentSystem::removed`] for every component still attached
-    /// to the entity before the components are actually dropped.
+    /// Records component removals before the entity despawn change.
     pub fn despawn(&mut self, entity: Entity) {
         self.commands.push(Command::Despawn(entity));
     }
@@ -100,20 +100,19 @@ impl CommandBuffer {
     /// Attaches a [`Component`] to [`Entity`], replacing any existing component of
     /// the same type.
     ///
-    /// [`ComponentSystem::added`] is called every time.
-    ///
-    /// When replacing, [`ComponentSystem::removed`] is called.
+    /// The component counts as added, or as changed when it replaces one; the
+    /// previous value is dropped.
     ///
     /// [`Entity`]: crate::Entity
     pub fn set_component<C: Component>(&mut self, entity: Entity, component: C) {
         self.commands
             .push(Command::SetComponent(entity, Box::new(component)));
     }
-    /// Removes a single component from an entity, calling [`ComponentSystem::removed`]
-    /// if the component was present.
+    /// Removes a single component, dropping its value immediately and
+    /// recording a `ComponentRemoved` event.
     ///
     /// The entity itself is **not** despawned. If the component is not
-    /// present this is a no-op.
+    /// present this is a no-op and records nothing.
     pub fn remove_component<C: Component>(&mut self, entity: Entity) {
         self.commands
             .push(Command::RemoveComponent(entity, TypeId::of::<C>()));
