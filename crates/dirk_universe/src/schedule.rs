@@ -47,6 +47,17 @@ pub enum ScheduleError {
         /// The system registered second.
         second: &'static str,
     },
+    /// Two derivations compute the same component. Each derived component
+    /// has one derivation.
+    #[error("`{first}` and `{second}` both derive `{component}`; a component has one derivation")]
+    DuplicateDerivation {
+        /// The derived component.
+        component: &'static str,
+        /// The derivation registered first.
+        first: &'static str,
+        /// The derivation registered second.
+        second: &'static str,
+    },
     /// Systems depend on each other in a loop. Ordering one of them
     /// explicitly breaks it, since explicit orders replace derived ones: that
     /// system then reads the other's output from the previous tick.
@@ -242,6 +253,8 @@ pub struct SystemConfig {
     pub(crate) system: BoxedSystem,
     pub(crate) id: SystemId,
     pub(crate) access: Access,
+    /// The component a derivation computes; `None` for systems.
+    pub(crate) derives: Option<SystemId>,
     pub(crate) before: Vec<SystemId>,
     pub(crate) after: Vec<SystemId>,
 }
@@ -255,6 +268,7 @@ impl SystemConfig {
             system: BoxedSystem::new(system),
             id,
             access,
+            derives: None,
             before: Vec::new(),
             after: Vec::new(),
         }
@@ -313,6 +327,20 @@ impl<'a> Graph<'a> {
                 return Err(ScheduleError::ConflictingAccess {
                     system: config.id.name,
                     component,
+                });
+            }
+        }
+
+        let mut derivations = HashMap::new();
+        for config in configs {
+            let Some(output) = config.derives else {
+                continue;
+            };
+            if let Some(first) = derivations.insert(output.id, config.id.name) {
+                return Err(ScheduleError::DuplicateDerivation {
+                    component: output.name,
+                    first,
+                    second: config.id.name,
                 });
             }
         }
