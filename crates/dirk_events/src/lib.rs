@@ -4,10 +4,10 @@ use parking_lot::RwLock;
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tracing::{error, trace};
+use tracing::trace;
 
 use dirk_threads::WorkerPool;
 
@@ -144,12 +144,12 @@ struct RoutedEvent<T: Event> {
 }
 
 impl<T: Event> Topic<T> {
-    fn new(router: UnboundedSender<RoutedEvent<T>>, closed: bool) -> Self {
+    fn new(router: UnboundedSender<RoutedEvent<T>>) -> Self {
         Self {
             state: RwLock::new(TopicState {
                 subscribers: Arc::default(),
                 next_id: 0,
-                closed,
+                closed: false,
             }),
             router,
         }
@@ -198,7 +198,23 @@ impl<T: Event> AnyTopic for Topic<T> {
     }
 }
 
-async fn route<T: Event>(mut receiver: UnboundedReceiver<RoutedEvent<T>>) {
+/// Closes a topic when its routing task ends, including by panic (e.g. in the
+/// event's [`Clone`]) or cancellation, so consumers observe closure instead of
+/// waiting forever.
+struct CloseOnExit<T: Event>(Weak<Topic<T>>);
+
+impl<T: Event> Drop for CloseOnExit<T> {
+    fn drop(&mut self) {
+        if let Some(topic) = self.0.upgrade() {
+            topic.close();
+        }
+    }
+}
+
+/// The single routing task of `topic`: forwards each queued event to the
+/// subscribers captured when it was dispatched, in dispatch order.
+async fn route<T: Event>(topic: Weak<Topic<T>>, mut receiver: UnboundedReceiver<RoutedEvent<T>>) {
+    let _close = CloseOnExit(topic);
     while let Some(RoutedEvent { event, subscribers }) = receiver.recv().await {
         if let Some((last, rest)) = subscribers.split_last() {
             for subscriber in rest {
@@ -246,6 +262,7 @@ impl EventManager {
         self.topic::<T>().subscribe()
     }
 
+    /// Returns the topic for `T`, creating it and its routing task on first use.
     fn topic<T: Event>(&self) -> Arc<Topic<T>> {
         let type_id = TypeId::of::<T>();
         let existing = self.bus.topics.read().get(&type_id).cloned();
@@ -258,17 +275,19 @@ impl EventManager {
                     .or_insert_with(|| self.spawn_topic::<T>()),
             )
         });
-        topic.into_any().downcast::<Topic<T>>().unwrap_or_else(|_| {
-            // Unreachable: topics are keyed by the TypeId of their event type.
-            error!("event topic type mismatch; returning a closed topic");
-            Arc::new(Topic::new(mpsc::unbounded_channel().0, true))
-        })
+        topic
+            .into_any()
+            .downcast::<Topic<T>>()
+            .expect("topic type invariant violated: TypeId key must match Topic<T>")
     }
 
     fn spawn_topic<T: Event>(&self) -> Arc<dyn AnyTopic> {
         let (router, receiver) = mpsc::unbounded_channel();
-        self.bus.workers.spawn(route(receiver));
-        Arc::new(Topic::<T>::new(router, false))
+        let topic = Arc::new(Topic::<T>::new(router));
+        self.bus
+            .workers
+            .spawn(route(Arc::downgrade(&topic), receiver));
+        topic
     }
 }
 
@@ -336,8 +355,10 @@ impl<T: Event> std::fmt::Debug for Dispatcher<T> {
 ///
 /// The subscription stays open while the [`EventManager`] is alive, even when
 /// no dispatcher exists. Once the last `EventManager` clone is dropped, the
-/// consumer yields the remaining queued events and then reports closure. When a
-/// `Consumer` is dropped its subscription is removed immediately.
+/// consumer yields the remaining queued events and then reports closure. The
+/// consumer also closes if routing for its event type fails, e.g. because the
+/// event's [`Clone`] implementation panicked. When a `Consumer` is dropped its
+/// subscription is removed immediately.
 pub struct Consumer<T: Event> {
     receiver: UnboundedReceiver<T>,
     topic: Arc<Topic<T>>,

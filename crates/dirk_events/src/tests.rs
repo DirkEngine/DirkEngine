@@ -856,7 +856,7 @@ mod event_manager {
     fn new_subscriber_is_excluded_from_already_dispatched_event() {
         // Intercept the routing queue so routing cannot race with subscription.
         let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let topic = Arc::new(Topic::new(queue, false));
+        let topic = Arc::new(Topic::new(queue));
         let dispatcher = Dispatcher {
             topic: Arc::clone(&topic),
         };
@@ -910,5 +910,46 @@ mod event_manager {
         second.consume_blocking().expect("event should arrive");
         // The last subscriber receives the original; consuming never clones.
         assert_eq!(clones.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn router_panic_closes_consumers() {
+        #[derive(Debug)]
+        struct PanicOnClone;
+
+        impl Clone for PanicOnClone {
+            fn clone(&self) -> Self {
+                panic!("clone failed");
+            }
+        }
+
+        impl Event for PanicOnClone {
+            fn debug(&self) -> String {
+                "panic-on-clone".into()
+            }
+        }
+
+        let mgr = EventManager::new(WorkerPool::new("test"));
+        let dispatcher = mgr.register::<PanicOnClone>();
+        // Two subscribers force the router to clone, which panics.
+        let consumers: [Consumer<PanicOnClone>; 2] = [mgr.subscribe(), mgr.subscribe()];
+        dispatcher.dispatch(PanicOnClone);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let closed = consumers
+                .into_iter()
+                .all(|mut consumer| consumer.consume_blocking().is_none());
+            done_tx
+                .send(closed)
+                .expect("test receiver should remain open");
+        });
+        // `mgr` is still alive, so closure can only come from the failed router.
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("consumers should close after the router panics")
+        );
+        drop(mgr);
     }
 }
