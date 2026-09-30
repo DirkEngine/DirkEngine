@@ -1,16 +1,18 @@
 //! Operating system signal integration.
 //!
 //! The signal handler installed by this module does not touch engine state from
-//! inside the OS signal context. `signal-hook` writes notifications into a pipe,
-//! a background thread forwards them to this subsystem, and the subsystem asks
-//! the engine to exit during the normal tick flow.
+//! inside the OS signal context. `signal-hook` writes notifications into a pipe
+//! and a background thread forwards them to the engine.
 //!
-//! This is intentionally scoped to terminal and service-manager workflows. On
-//! Unix-like systems this covers common termination signals such as `SIGINT`,
-//! `SIGTERM`, `SIGHUP`, and `SIGQUIT`. On Windows, `signal-hook` is limited to
-//! CRT signal emulation, so this covers `SIGINT` and `SIGBREAK` only. Console
-//! close, logoff, shutdown events, and normal game-window close events are
-//! handled elsewhere by platform/window integration.
+//! The first handled signal requests a graceful engine shutdown. A second
+//! handled signal re-raises it with the default disposition, so a stuck shutdown
+//! can still be interrupted.
+//!
+//! This is scoped to Unix terminal and service-manager workflows, covering
+//! `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`. Game-window close events are
+//! handled separately by platform/window integration. Signal handling is opt-in
+//! because `signal-hook` cannot restore the host process's previous disposition
+//! after an engine is dropped.
 
 use std::{
     sync::{
@@ -21,15 +23,11 @@ use std::{
 };
 
 use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM},
     iterator::{Handle as SignalIteratorHandle, Signals},
     low_level::{emulate_default_handler, signal_name},
 };
 use tracing::{debug, error, info, warn};
-
-#[cfg(windows)]
-use signal_hook::consts::signal::{SIGBREAK, SIGINT};
-#[cfg(not(windows))]
-use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OperatingSystemSignal {
@@ -124,6 +122,14 @@ impl OperatingSystemSignals {
         })
     }
 
+    pub(crate) fn disabled() -> Self {
+        let (_sender, receiver) = mpsc::channel();
+        Self {
+            receiver,
+            listener: None,
+        }
+    }
+
     #[cfg(test)]
     fn from_receiver(receiver: Receiver<OperatingSystemSignal>) -> Self {
         Self {
@@ -134,8 +140,7 @@ impl OperatingSystemSignals {
 
     #[cfg(test)]
     pub(crate) fn empty_for_tests() -> Self {
-        let (_sender, receiver) = mpsc::channel();
-        Self::from_receiver(receiver)
+        Self::disabled()
     }
 
     #[cfg(test)]
@@ -166,35 +171,16 @@ impl OperatingSystemSignals {
     }
 }
 
-#[cfg(not(windows))]
 fn handled_signals() -> &'static [i32] {
     &[SIGINT, SIGTERM, SIGHUP, SIGQUIT]
-}
-
-#[cfg(windows)]
-fn handled_signals() -> &'static [i32] {
-    &[SIGINT, SIGBREAK]
 }
 
 fn handled_signal_names() -> Vec<&'static str> {
     handled_signals()
         .iter()
         .copied()
-        .map(signal_display_name)
+        .map(|signal| OperatingSystemSignal::new(signal).name())
         .collect()
-}
-
-fn signal_display_name(signal: i32) -> &'static str {
-    if let Some(name) = signal_name(signal) {
-        return name;
-    }
-
-    #[cfg(windows)]
-    if signal == SIGBREAK {
-        return "SIGBREAK";
-    }
-
-    "unknown signal"
 }
 
 #[cfg(test)]

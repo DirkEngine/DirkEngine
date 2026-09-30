@@ -136,17 +136,26 @@ impl UniverseWindows {
         };
         entities.sort_by_key(|(entity, _)| entity.raw());
 
-        for (entity, world) in entities {
-            let label = format!("{} (world {})", entity.raw(), world.raw());
-            if ui
-                .selectable_label(self.selected_entity == Some(entity), label)
-                .clicked()
-            {
-                self.selected_entity = Some(entity);
-                self.selected_world = Some(world);
-                entity_clicked = true;
+        // Virtualized rows must stay one line tall, including with custom fonts.
+        let row_height = ui.spacing().interact_size.y.max(
+            ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
+        );
+        egui::ScrollArea::vertical().show_rows(ui, row_height, entities.len(), |ui, visible| {
+            for &(entity, world) in &entities[visible] {
+                let label = format!("{} (world {})", entity.raw(), world.raw());
+                if ui
+                    .add(
+                        egui::Button::selectable(self.selected_entity == Some(entity), label)
+                            .truncate(),
+                    )
+                    .clicked()
+                {
+                    self.selected_entity = Some(entity);
+                    self.selected_world = Some(world);
+                    entity_clicked = true;
+                }
             }
-        }
+        });
 
         entity_clicked
     }
@@ -177,5 +186,69 @@ impl UniverseWindows {
                 ui.monospace(format!("{:#?}", component.debug));
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirk_universe::World;
+
+    #[test]
+    fn entity_list_only_builds_visible_rows() {
+        let mut world = World::builder("many entities");
+        for _ in 0..5_000 {
+            world = world.with_entity(Entity::builder());
+        }
+        let mut universe = Universe::builder().with_world(world).build();
+        universe.tick(0.0);
+
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        });
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            UniverseWindows::default().entity_list_ui(ui, &universe);
+        });
+        let output = ctx.end_pass();
+
+        assert!(output.shapes.len() < 500, "too many entity rows rendered");
+    }
+
+    #[test]
+    fn narrow_entity_list_keeps_rows_on_one_line() {
+        let mut world = World::builder("entities");
+        for _ in 0..100 {
+            world = world.with_entity(Entity::builder());
+        }
+        let mut universe = Universe::builder().with_world(world).build();
+        universe.tick(0.0);
+
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(80.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        });
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            UniverseWindows::default().entity_list_ui(ui, &universe);
+        });
+        let output = ctx.end_pass();
+        let mut entity_rows = 0;
+        for shape in output.shapes {
+            if let egui::epaint::Shape::Text(text) = shape.shape
+                && text.galley.job.text.contains("(world ")
+            {
+                entity_rows += 1;
+                assert_eq!(text.galley.rows.len(), 1, "entity label wrapped");
+            }
+        }
+        assert!(entity_rows > 1, "entity rows must be rendered");
     }
 }

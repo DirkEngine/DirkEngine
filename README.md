@@ -16,6 +16,9 @@ The engine is assembled with plugins and runtime subsystems:
 ```rust,no_run
 # fn main() -> anyhow::Result<()> {
 let mut builder = dirk_engine::Engine::builder();
+// Let Ctrl-C request a graceful shutdown. Disabled by default so libraries
+// embedding the engine keep the host's signal handling.
+builder.with_os_signals(true);
 builder.with_plugin(dirk_assets::AssetsPlugin)?;
 builder.with_plugin(dirk_platform::PlatformPlugin)?;
 builder.with_plugin(dirk_player::PlayerPlugin)?;
