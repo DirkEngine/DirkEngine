@@ -48,7 +48,8 @@ fn builder_creates_worlds_and_initial_entities() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha").with_entity(Entity::builder()))
         .with_world(World::builder("beta").with_entity(Entity::builder()))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [alpha, beta] = world_ids(&universe);
@@ -71,7 +72,8 @@ fn builder_creates_worlds_and_initial_entities() {
 fn spawn_entity_in_missing_world_is_ignored() {
     let mut universe = Universe::builder()
         .with_world(World::builder("home"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [home] = world_ids(&universe);
     let mut cmd = universe.handle().command_buffer();
@@ -94,7 +96,8 @@ fn query_filters_by_components_and_world_membership() {
     let mut universe = Universe::builder()
         .with_world(World::builder("a"))
         .with_world(World::builder("b"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [world_a, world_b] = world_ids(&universe);
@@ -126,7 +129,10 @@ fn query_filters_by_components_and_world_membership() {
 
 #[test]
 fn component_getter_returns_expected_values() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -145,7 +151,8 @@ fn worlds_returns_all_live_worlds() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let mut worlds: Vec<_> = universe
@@ -165,7 +172,8 @@ fn entities_returns_live_entity_world_pairs() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [first_world, second_world] = world_ids(&universe);
@@ -192,7 +200,8 @@ fn entities_in_world_filters_correctly() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [first_world, second_world] = world_ids(&universe);
@@ -209,7 +218,10 @@ fn entities_in_world_filters_correctly() {
 
 #[test]
 fn component_infos_exposes_type_name_and_debug_value() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
     let entity = spawn_entity(
@@ -234,7 +246,8 @@ fn inspection_helpers_update_after_despawn_and_world_destruction() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [first_world, second_world] = world_ids(&universe);
@@ -267,7 +280,8 @@ fn query_iter_applies_filters() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [world_a, world_b] = world_ids(&universe);
@@ -300,7 +314,10 @@ fn query_iter_applies_filters() {
 
 #[test]
 fn query_tuple_params_require_every_component() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -328,7 +345,10 @@ fn query_tuple_params_require_every_component() {
 
 #[test]
 fn query_fetch_skips_entities_missing_parameters() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -365,7 +385,8 @@ fn query_matches_entities_across_all_worlds() {
     let mut universe = Universe::builder()
         .with_world(World::builder("alpha"))
         .with_world(World::builder("beta"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [first_world, second_world] = world_ids(&universe);
@@ -392,7 +413,10 @@ fn query_matches_entities_across_all_worlds() {
 
 #[test]
 fn query_on_empty_universe_yields_nothing() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     assert_eq!(universe.query::<(Entity, &Health)>().iter().count(), 0);
@@ -409,7 +433,10 @@ fn query_on_empty_universe_yields_nothing() {
 
 #[test]
 fn query_excludes_despawned_entities() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -430,7 +457,10 @@ fn query_excludes_despawned_entities() {
 
 #[test]
 fn with_and_without_filters_compose() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -503,7 +533,10 @@ fn with_and_without_filters_compose() {
 fn function_system_iterates_filtered_query() {
     use std::{cell::RefCell, rc::Rc};
 
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -542,7 +575,10 @@ fn function_system_iterates_filtered_query() {
 fn function_system_sums_all_matching_entities() {
     use std::{cell::Cell, rc::Rc};
 
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 

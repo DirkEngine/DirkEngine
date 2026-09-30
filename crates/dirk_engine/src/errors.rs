@@ -67,6 +67,9 @@ pub enum Error {
         /// The requested resource type name.
         type_name: &'static str,
     },
+    /// When the universe's systems cannot be ordered.
+    #[error("universe systems cannot be scheduled")]
+    Schedule(#[from] dirk_universe::schedule::ScheduleError),
     /// When an engine subsystem failed to tick.
     #[error("subsystem {name} failed tick: {source}")]
     SubsystemFailedTick {

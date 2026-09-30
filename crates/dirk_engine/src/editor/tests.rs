@@ -468,7 +468,9 @@ fn open_windows_render_through_dock_tabs() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     render_services(&services, &universe)?;
 
     assert_eq!(*calls.lock(), vec!["window"]);
@@ -487,7 +489,7 @@ fn window_callback_can_query_and_mutate_services() -> anyhow::Result<()> {
         Ok(())
     });
 
-    render_services(&services, &Universe::builder().build())?;
+    render_services(&services, &Universe::builder().build()?)?;
 
     assert_eq!(*observed.lock(), Some(1));
     assert_eq!(services.window_count(), 2);
@@ -514,9 +516,10 @@ fn menu_callback_can_query_services() -> anyhow::Result<()> {
     ctx.begin_pass(egui::RawInput::default());
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
+    let universe = Universe::builder().build()?;
     let mut result = Ok(());
     egui::CentralPanel::default().show(&ctx, |ui| {
-        result = services.render_menu_for_tests("query", ui, &frame, &Universe::builder().build());
+        result = services.render_menu_for_tests("query", ui, &frame, &universe);
     });
     let _ = ctx.end_pass();
     result?;
@@ -589,7 +592,7 @@ fn same_title_windows_have_distinct_widget_ids() -> anyhow::Result<()> {
         );
     }
 
-    render_services(&services, &Universe::builder().build())?;
+    render_services(&services, &Universe::builder().build()?)?;
 
     let ids = ids.lock();
     assert_eq!(ids.len(), 2);
@@ -652,7 +655,9 @@ fn editor_style_is_applied_before_registered_capabilities_render() -> anyhow::Re
         });
     }
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     render_services(&services, &universe)?;
 
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -694,7 +699,9 @@ fn editor_styles_stack_in_registration_order() -> anyhow::Result<()> {
         });
     }
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     render_services(&services, &universe)?;
 
     assert_eq!(*calls.lock(), vec!["first", "second"]);
@@ -715,7 +722,9 @@ fn editor_style_can_be_cleared() -> anyhow::Result<()> {
     }
     services.clear_style();
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     render_services(&services, &universe)?;
 
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -760,7 +769,9 @@ fn window_render_errors_include_window_title() {
         Err(anyhow::anyhow!("window failed"))
     });
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     let err = render_services(&services, &universe).expect_err("render should fail");
 
     assert!(err.to_string().contains("window `error`"));
@@ -840,7 +851,9 @@ fn windows_can_request_other_windows_to_open_during_render() -> anyhow::Result<(
         Ok(())
     });
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     render_services(&services, &universe)?;
 
     assert_eq!(services.is_open(target), Some(true));
@@ -880,7 +893,9 @@ fn menu_commands_still_open_windows() -> anyhow::Result<()> {
         },
     );
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     let ctx = egui::Context::default();
     ctx.begin_pass(egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -917,7 +932,9 @@ fn failing_menu_still_applies_queued_commands() {
         },
     );
 
-    let universe = Universe::builder().build();
+    let universe = Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     let ctx = egui::Context::default();
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
@@ -970,7 +987,7 @@ fn failing_menu_still_applies_queued_commands() {
 #[test]
 fn opening_window_after_closing_every_tab_reuses_empty_main_surface() -> anyhow::Result<()> {
     let services = EditorServices::new();
-    let universe = Universe::builder().build();
+    let universe = Universe::builder().build()?;
     let first = services.add_window_fn(descriptor("first", true), |_ui, _context| Ok(()));
     let second = services.add_window_fn(
         EditorWindowDescriptor {

@@ -8,11 +8,12 @@ use crate::{
     Entity, Universe, WorldId,
     components::{Component, ComponentMut, MutableComponent},
     macros::sealed::Sealed,
+    schedule::Access,
 };
 use std::{
-    any::{TypeId, type_name},
+    any::TypeId,
     cell::Ref,
-    collections::{HashMap, HashSet, hash_set},
+    collections::{HashSet, hash_set},
     marker::PhantomData,
 };
 
@@ -218,7 +219,7 @@ pub trait QueryData: Sealed + Sized {
 
     /// Registers component access for conflict validation.
     #[doc(hidden)]
-    fn register_access(access: &mut QueryAccess);
+    fn register_access(access: &mut Access);
 }
 
 /// Query data that does not require mutable access.
@@ -279,62 +280,6 @@ impl Join<AnyEntity> for TrackedEntity {
     type Output = TrackedEntity;
 }
 
-/// Tracks the component access declared by one system.
-#[doc(hidden)]
-#[derive(Default)]
-pub struct QueryAccess {
-    components: HashMap<TypeId, AccessKind>,
-    commands: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AccessKind {
-    Read,
-    Write,
-}
-
-impl QueryAccess {
-    /// Registers a read of `C`.
-    ///
-    /// # Panics
-    /// Panics when this system also declares mutable access to `C`.
-    pub fn read<C: Component>(&mut self) {
-        assert!(
-            self.components.get(&TypeId::of::<C>()) != Some(&AccessKind::Write),
-            "system reads and writes {} through overlapping queries",
-            type_name::<C>()
-        );
-        self.components
-            .entry(TypeId::of::<C>())
-            .or_insert(AccessKind::Read);
-    }
-
-    /// Registers a write of `C`.
-    ///
-    /// # Panics
-    /// Panics when this system already declares any access to `C`.
-    pub fn write<C: Component>(&mut self) {
-        assert!(
-            self.components
-                .insert(TypeId::of::<C>(), AccessKind::Write)
-                .is_none(),
-            "system accesses {} through overlapping mutable queries",
-            type_name::<C>()
-        );
-    }
-
-    /// Registers structural command access.
-    ///
-    /// # Panics
-    /// Panics when this system declares `Commands` more than once.
-    pub fn commands(&mut self) {
-        assert!(
-            !std::mem::replace(&mut self.commands, true),
-            "system requests Commands more than once"
-        );
-    }
-}
-
 impl QueryData for () {
     type Item<'u> = ();
     type Liveness = AnyEntity;
@@ -343,7 +288,7 @@ impl QueryData for () {
         Some(())
     }
 
-    fn register_access(_: &mut QueryAccess) {}
+    fn register_access(_: &mut Access) {}
 }
 impl ReadOnlyQueryData for () {}
 
@@ -370,7 +315,7 @@ macro_rules! impl_query_data_for_tuple {
                 $($ty::candidates(universe, last_run, entities);)*
             }
 
-            fn register_access(access: &mut QueryAccess) {
+            fn register_access(access: &mut Access) {
                 $first::register_access(access);
                 $($ty::register_access(access);)*
             }
@@ -395,7 +340,7 @@ impl<C: Component> QueryData for &C {
         universe.component::<C>(entity)
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         access.read::<C>();
     }
 }
@@ -412,7 +357,7 @@ impl<C: MutableComponent> QueryData for &mut C {
             .get_mut::<C>(entity, universe.change_tick.get())
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         access.write::<C>();
     }
 }
@@ -429,7 +374,7 @@ where
         Some(D::fetch(entity, universe, last_run))
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         D::register_access(access);
     }
 }
@@ -456,11 +401,36 @@ impl<C: Component> QueryData for Delta<'_, C> {
         entities.extend(universe.removed_since::<C>(last_run));
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         access.read::<C>();
     }
 }
 impl<C: Component> ReadOnlyQueryData for Delta<'_, C> {}
+
+/// Reads `D` before this tick's systems write it: systems writing `D`'s
+/// components run after this one, which breaks dependency cycles. Commands
+/// applied at the start of the tick are already visible, and an explicit
+/// `.before()` placing a writer first takes precedence.
+pub struct Lagged<D>(PhantomData<D>);
+
+impl<D: ReadOnlyQueryData> Sealed for Lagged<D> {}
+impl<D: ReadOnlyQueryData> QueryData for Lagged<D> {
+    type Item<'u> = D::Item<'u>;
+    type Liveness = D::Liveness;
+
+    fn fetch(entity: Entity, universe: &Universe, last_run: u64) -> Option<Self::Item<'_>> {
+        D::fetch(entity, universe, last_run)
+    }
+
+    fn candidates(universe: &Universe, last_run: u64, entities: &mut HashSet<Entity>) {
+        D::candidates(universe, last_run, entities);
+    }
+
+    fn register_access(access: &mut Access) {
+        access.lagged(D::register_access);
+    }
+}
+impl<D: ReadOnlyQueryData> ReadOnlyQueryData for Lagged<D> {}
 
 impl Sealed for Entity {}
 impl QueryData for Entity {
@@ -471,6 +441,6 @@ impl QueryData for Entity {
         Some(entity)
     }
 
-    fn register_access(_: &mut QueryAccess) {}
+    fn register_access(_: &mut Access) {}
 }
 impl ReadOnlyQueryData for Entity {}

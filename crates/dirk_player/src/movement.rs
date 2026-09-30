@@ -79,7 +79,8 @@ mod tests {
         );
         let mut universe = Universe::builder()
             .with_system(PlayerMovementSystem::new(input.clone()))
-            .build();
+            .build()
+            .expect("movement should schedule");
         let mut cmd = universe.handle().command_buffer();
         let world = cmd.create_world(World::builder("movement"));
         let moving = [0, 1].map(|_| {
