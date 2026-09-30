@@ -12,6 +12,8 @@ use crate::{
 pub struct CommandBuffer {
     commands: Vec<Command>,
     handle: UniverseHandle,
+    #[cfg(feature = "journal")]
+    undoable: bool,
 }
 
 pub(crate) enum Command {
@@ -22,6 +24,10 @@ pub(crate) enum Command {
     Send(Entity, WorldId),
     SetComponent(Entity, Box<dyn AnyComponent>),
     RemoveComponent(Entity, TypeId),
+    #[cfg(feature = "journal")]
+    Undo,
+    #[cfg(feature = "journal")]
+    Redo,
 }
 
 impl CommandBuffer {
@@ -31,11 +37,28 @@ impl CommandBuffer {
         Self {
             commands: Vec::new(),
             handle,
+            #[cfg(feature = "journal")]
+            undoable: false,
         }
     }
 
     pub(crate) fn commands(self) -> Vec<Command> {
         self.commands
+    }
+
+    /// Records this buffer's changes as one entry in the universe's journal,
+    /// so they can be undone. Other changes, including those made by systems,
+    /// are not recorded.
+    #[cfg(feature = "journal")]
+    #[must_use]
+    pub fn undoable(mut self) -> Self {
+        self.undoable = true;
+        self
+    }
+
+    #[cfg(feature = "journal")]
+    pub(crate) fn is_undoable(&self) -> bool {
+        self.undoable
     }
 
     /// Will submit the [`CommandBuffer`] to the [`Universe`](crate::Universe)'s queue.
@@ -108,6 +131,18 @@ impl CommandBuffer {
         self.commands
             .push(Command::SetComponent(entity, Box::new(component)));
     }
+    /// Reverts the last undoable edit recorded by the universe's journal.
+    #[cfg(feature = "journal")]
+    pub fn undo(&mut self) {
+        self.commands.push(Command::Undo);
+    }
+
+    /// Reapplies the last change reverted by [`undo`](Self::undo).
+    #[cfg(feature = "journal")]
+    pub fn redo(&mut self) {
+        self.commands.push(Command::Redo);
+    }
+
     /// Removes a single component, dropping its value immediately; `Delta`
     /// reports the removal.
     ///

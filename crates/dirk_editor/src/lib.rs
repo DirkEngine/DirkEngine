@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use dirk_universe::Universe;
+
 use dirk_engine::{
     EngineHandle,
     editor::{
@@ -29,7 +31,11 @@ impl dirk_engine::EnginePlugin for EditorPlugin {
     }
 
     fn build(&self, builder: &mut dirk_engine::EngineBuilder) -> anyhow::Result<()> {
-        builder.add_editor_subsystem(|_ctx| Ok(BuiltinEditorSubsystem));
+        builder.add_editor_subsystem(|ctx| {
+            ctx.engine
+                .extend_universe(Universe::builder().with_journal(universe::HISTORY_CAPACITY));
+            Ok(BuiltinEditorSubsystem)
+        });
         Ok(())
     }
 }

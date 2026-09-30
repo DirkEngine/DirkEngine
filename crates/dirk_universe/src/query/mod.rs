@@ -196,8 +196,8 @@ impl<'q, D: QueryData, F: QueryFilter> IntoIterator for &'q mut Query<'_, D, F> 
 ///
 /// ```compile_fail
 /// # use dirk_universe::prelude::*;
-/// # #[derive(Debug, Component)] struct Health(u32);
-/// # #[derive(Debug, Component)] struct Armor(u32);
+/// # #[derive(Debug, Clone, Component)] struct Health(u32);
+/// # #[derive(Debug, Clone, Component)] struct Armor(u32);
 /// fn sync(query: Query<(Delta<Health>, &Armor)>) {}
 /// ```
 #[derive(Debug)]

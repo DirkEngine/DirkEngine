@@ -4,10 +4,10 @@ use std::{any::type_name, cell::RefCell, rc::Rc};
 
 use dirk_universe::{prelude::*, schedule::ScheduleError};
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Position(i32);
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Gravity(i32);
 
 /// Creates worlds from `builders`, returning the universe and their IDs.

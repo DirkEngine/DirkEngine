@@ -4,11 +4,11 @@
 //!
 //! ```
 //! # use dirk_universe::prelude::*;
-//! #[derive(Debug, Component)]
+//! #[derive(Debug, Clone, Component)]
 //! struct Velocity(f64);
-//! #[derive(Debug, Component)]
+//! #[derive(Debug, Clone, Component)]
 //! struct Mass(f64);
-//! #[derive(Debug, PartialEq, Component)]
+//! #[derive(Debug, Clone, PartialEq, Component)]
 //! #[component(read_only)]
 //! struct Momentum(f64);
 //!
@@ -31,8 +31,8 @@
 //!
 //! ```compile_fail
 //! # use dirk_universe::prelude::*;
-//! # #[derive(Debug, Component)] struct Velocity(f64);
-//! #[derive(Debug, PartialEq, Component)]
+//! # #[derive(Debug, Clone, Component)] struct Velocity(f64);
+//! #[derive(Debug, Clone, PartialEq, Component)]
 //! struct Speed(f64);
 //!
 //! let universe = Universe::builder().with_derived(|velocity: &Velocity| Speed(velocity.0));

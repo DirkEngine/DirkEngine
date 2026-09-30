@@ -8,11 +8,11 @@ use dirk_universe::{
     schedule::{Dependency, Reason, ScheduleError},
 };
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct A(i32);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct B;
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct C;
 
 thread_local! {

@@ -11,16 +11,16 @@ use dirk_universe::{
     systems::{Commands, DeltaTime, IntoSystem, PerWorld, System},
 };
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Component)]
 struct Position(i32, i32);
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Component)]
 struct Hidden;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Counter(i32);
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Step(i32);
 
 /// Returns the IDs of the universe's worlds, in creation order.
@@ -647,12 +647,12 @@ fn world_entities_carry_world_level_components() {
 }
 
 #[test]
-fn removed_non_clone_components_are_released_immediately() {
+fn removed_components_are_dropped_immediately() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    #[derive(Debug, Component)]
+    #[derive(Debug, Clone, Component)]
     struct Tracked(Arc<AtomicUsize>);
     impl Drop for Tracked {
         fn drop(&mut self) {
