@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use dirk_input::{
-    ButtonState, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition,
-    PointerButton, ScrollUnit,
+    ButtonState, ImeEvent, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta,
+    NormalizedPosition, PointerButton, ScrollUnit,
 };
 use tracing::{debug, error, trace};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey as WinitNamedKey},
     window::{WindowAttributes, WindowId},
@@ -24,7 +24,7 @@ pub struct PlatformHandler {
     main_window_created: bool,
     /// Error raised inside a winit callback, surfaced by the next pump.
     error: Option<anyhow::Error>,
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     shutdown_requested: bool,
     windows: PlatformWindows,
 
@@ -47,7 +47,7 @@ impl PlatformHandler {
         Self {
             main_window_created: false,
             error: None,
-            #[cfg(platform_macos)]
+            #[cfg(target_os = "macos")]
             shutdown_requested: false,
             windows,
             modifiers: ModifiersState::default(),
@@ -83,7 +83,7 @@ impl PlatformHandler {
         debug!("Closed {count} window(s) during platform shutdown");
     }
 
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     pub fn request_shutdown(&mut self) {
         self.shutdown_requested = true;
     }
@@ -164,7 +164,18 @@ impl PlatformHandler {
                 ..
             } => self.dispatch_pointer_button(id, button, *state, position),
             WindowEvent::MouseWheel { delta, .. } => self.dispatch_mouse_wheel(id, delta),
-            WindowEvent::Ime(_) => {}
+            WindowEvent::Ime(event) => {
+                let event = match event {
+                    Ime::Enabled => Some(ImeEvent::Enabled),
+                    Ime::Preedit(text, _) => Some(ImeEvent::Preedit(text.clone())),
+                    Ime::Commit(text) => Some(ImeEvent::Commit(text.clone())),
+                    Ime::Disabled => Some(ImeEvent::Disabled),
+                    Ime::DeleteSurrounding { .. } => None,
+                };
+                if let Some(event) = event {
+                    self.dispatch_input(id, InputEvent::Ime(event));
+                }
+            }
             _ => return false,
         }
 
@@ -271,9 +282,6 @@ impl PlatformHandler {
     }
 
     fn dispatch_keyboard_input(&self, id: WindowId, event: &winit::event::KeyEvent) {
-        let Some(key) = logical_key_from_winit(&event.logical_key) else {
-            return;
-        };
         let state = match event.state {
             ElementState::Pressed => ButtonState::Pressed,
             ElementState::Released => ButtonState::Released,
@@ -282,15 +290,25 @@ impl PlatformHandler {
             "Key {:?} {state:?} (repeat={})",
             event.logical_key, event.repeat
         );
-        self.dispatch_input(
-            id,
-            InputEvent::Key {
-                key,
-                state,
-                repeat: event.repeat,
-                modifiers: modifiers_from_winit(self.modifiers),
-            },
-        );
+        if let Some(key) = logical_key_from_winit(&event.logical_key) {
+            self.dispatch_input(
+                id,
+                InputEvent::Key {
+                    key,
+                    state,
+                    repeat: event.repeat,
+                    modifiers: modifiers_from_winit(self.modifiers),
+                },
+            );
+        }
+        if state == ButtonState::Pressed
+            && (!self.modifiers.control_key() || self.modifiers.alt_key())
+            && !self.modifiers.meta_key()
+            && let Some(text) = event.text.as_ref()
+            && !text.chars().any(char::is_control)
+        {
+            self.dispatch_input(id, InputEvent::Text(text.to_string()));
+        }
     }
 
     fn dispatch_input(&self, window: WindowId, event: InputEvent) {
@@ -359,7 +377,7 @@ impl ApplicationHandler for PlatformHandler {
         self.dispatch_input_event(id, &event);
     }
 
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.shutdown_requested {
             event_loop.exit();

@@ -3,7 +3,7 @@
 [package]
 name = "dirkengine"
 default-run = "dirkengine"
-description = "A pure Rust Vulkan game engine"
+description = "A pure Rust game engine"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -95,8 +95,6 @@ thiserror = "2"
 anyhow = "1"
 cargo_metadata = "0.21"
 
-bytemuck = { version = "1", features = ["derive"] }
-
 # Engine modules
 dirk_build        = { version = "0.1.0", path = "crates/dirk_build" }
 dirk_threads      = { version = "0.1.0", path = "crates/dirk_threads" }
@@ -130,18 +128,21 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 egui = "0.33"
 egui_dock = "0.18"
-egui-ash-renderer = { version = "0.11", features = ["dynamic-rendering"] }
 
 # Shaders
 cargo-gpu-install = "0.10.0-alpha.1"
 spirv-std         = "0.10.0-alpha.1"
 rspirv-reflect = "0.9"
+spirv-cross2 = { version = "0.7", default-features = false, features = ["msl"] }
 
 # Macro dependencies
 syn = { version = "2", features = ["full"] }
 quote = "1"
 pastey = "0.2"
 proc-macro2 = "1"
+
+# Utilities
+bytemuck = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
