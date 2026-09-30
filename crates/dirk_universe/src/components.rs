@@ -9,8 +9,10 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-/// Data attached to an entity. Derive it with `#[derive(Component)]`.
-pub trait Component: 'static + Sized + Debug + Send {
+/// Data attached to an entity. Derive it with `#[derive(Clone, Component)]`.
+///
+/// Components are `Clone` so the editor's journal can record their values.
+pub trait Component: 'static + Sized + Debug + Clone + Send {
     /// [`Mutable`] for ordinary components, or [`ReadOnly`] for components
     /// that only the engine writes, such as [`InWorld`](crate::InWorld).
     type Mutability: Mutability;
@@ -38,6 +40,11 @@ impl<C: Component<Mutability = Mutable>> MutableComponent for C {}
 pub(crate) trait AnyComponent: Send + Any + Debug {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    #[cfg_attr(
+        not(feature = "journal"),
+        expect(dead_code, reason = "only the journal clones")
+    )]
+    fn clone_box(&self) -> Box<dyn AnyComponent>;
     fn component_type_id(&self) -> TypeId;
     fn component_type_name(&self) -> &'static str;
 }
@@ -48,6 +55,9 @@ impl<C: Component> AnyComponent for C {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+    fn clone_box(&self) -> Box<dyn AnyComponent> {
+        Box::new(self.clone())
     }
     fn component_type_id(&self) -> TypeId {
         TypeId::of::<C>()
@@ -171,6 +181,23 @@ impl Components {
                     .filter(move |(_, slot)| slot.changed.get() > last_run)
                     .map(|(entity, _)| *entity)
             })
+    }
+
+    /// Every component that changed after `since`, of any type.
+    #[cfg(feature = "journal")]
+    pub fn changed_since_any(
+        &self,
+        since: u64,
+    ) -> impl Iterator<Item = (Entity, TypeId, Ref<'_, dyn AnyComponent>)> {
+        self.storages.iter().flat_map(move |(type_id, storage)| {
+            storage
+                .iter()
+                .filter(move |(_, slot)| slot.changed.get() > since)
+                .map(|(entity, slot)| {
+                    let value = Ref::map(slot.value.borrow(), |value| value.as_ref());
+                    (*entity, *type_id, value)
+                })
+        })
     }
 
     /// Iterates over every entity holding `C`, with its value.

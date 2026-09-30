@@ -320,7 +320,7 @@ impl SystemParam for DeltaTime {
 ///
 /// ```
 /// # use dirk_universe::prelude::*;
-/// # #[derive(Debug, Component)] struct Position(f64);
+/// # #[derive(Debug, Clone, Component)] struct Position(f64);
 /// struct Drift { speed: f64 }
 ///
 /// impl System for Drift {

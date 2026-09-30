@@ -16,7 +16,7 @@ parking_lot.workspace = true
 egui.workspace = true
 
 dirk_engine = { workspace = true, features = ["editor"] }
-dirk_universe.workspace = true
+dirk_universe = { workspace = true, features = ["journal"] }
 
 [lints]
 workspace = true

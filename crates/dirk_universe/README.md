@@ -6,7 +6,7 @@ including when their queries are empty, in an order derived from the data they
 access.
 
 `Query` provides iteration and entity lookups. `&C` reads a component and
-`&mut C` edits it in place; neither requires `Clone`. `Option<&C>` fetches a
+`&mut C` edits it in place. `Option<&C>` fetches a
 component when present without requiring it. Tuples fetch multiple
 components, and including `Entity` fetches the entity ID. `With<C>` and
 `Without<C>` filter by component presence; filter tuples combine with AND.
@@ -15,11 +15,11 @@ Multiple queries in a system are independent collections.
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Position(f64);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Velocity(f64);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Frozen;
 
 fn movement(
@@ -52,7 +52,7 @@ for the universe borrow of one run:
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Position(f64);
 struct Movement { speed: f64 }
 
@@ -109,7 +109,7 @@ run once after them.
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Health(u32);
 
 fn synchronize(health: Query<(Entity, Delta<Health>)>) {
@@ -140,11 +140,11 @@ Some components are just functions of others. `with_derived` computes them:
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Velocity(f64);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Mass(f64);
-#[derive(Debug, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Component)]
 #[component(read_only)]
 struct Momentum(f64);
 
@@ -172,9 +172,9 @@ queries, once per world instead, so only entities of the same world meet:
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Gravity(f64);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Velocity(f64);
 
 fn fall(gravity: Query<&Gravity>, mut worlds: PerWorld<Query<&mut Velocity>>) {
@@ -208,6 +208,19 @@ Structural changes use `Commands` or submitted command buffers and apply at the
 start of the next tick. Buffers execute in submission order and commands in
 insertion order. Destroying or despawning a world despawns its entities too.
 
+## Journal
+
+With the `journal` feature, `UniverseBuilder::with_journal(capacity)` records
+deliberate edits: each command buffer marked `.undoable()` becomes one entry,
+keeping every changed component's value before and after. Since structure is
+data, that covers spawns, moves, despawns and worlds too. Changes made by
+systems or other buffers are not recorded, so a running simulation neither
+floods the history nor discards what can be redone. `CommandBuffer::undo` and
+`CommandBuffer::redo` step through the history, and restored values reach
+systems as ordinary changes. The journal copies every
+component, which is why components are `Clone` and why the feature is meant
+for the editor, which enables it, rather than shipped games.
+
 ## Scheduling
 
 Nobody orders systems by hand. A system that reads a component, whether through
@@ -222,9 +235,9 @@ builders in; unrelated systems keep their registration order.
 ```rust
 use dirk_universe::prelude::*;
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Velocity(f64);
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Position(f64);
 
 fn render(positions: Query<&Position>) { /* runs second */ }

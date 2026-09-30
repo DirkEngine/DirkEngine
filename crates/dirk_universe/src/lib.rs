@@ -31,6 +31,11 @@ use schedule::{Schedule, ScheduleError, SystemConfig};
 pub mod derived;
 use derived::IntoDerived;
 
+#[cfg(feature = "journal")]
+pub mod journal;
+#[cfg(feature = "journal")]
+use journal::Journal;
+
 mod command_buffer;
 use command_buffer::Command;
 pub use command_buffer::CommandBuffer;
@@ -124,6 +129,8 @@ pub struct Universe {
     change_tick: Cell<u64>,
     /// The change tick at which the previous tick started.
     previous_tick: u64,
+    #[cfg(feature = "journal")]
+    journal: Option<Journal>,
 }
 
 impl Universe {
@@ -145,6 +152,8 @@ impl Universe {
             removals: Vec::new(),
             change_tick: Cell::new(0),
             previous_tick: 0,
+            #[cfg(feature = "journal")]
+            journal: builder.journal.map(Journal::new),
         };
 
         let mut cmd = universe.handle.command_buffer();
@@ -181,18 +190,15 @@ impl Universe {
     pub fn tick(&mut self, delta_time: f64) {
         let cmd = RefCell::new(self.handle.command_buffer());
 
-        let mut commands: Vec<Command> = Vec::new();
-        for sub in self.buffer_receiver.try_iter() {
-            commands.append(&mut sub.commands());
-        }
+        let buffers: Vec<CommandBuffer> = self.buffer_receiver.try_iter().collect();
 
         // Every system ran after the previous tick started, so removals
         // recorded before then have been observed by all of them.
         let tick = self.advance_change_tick();
         let previous_tick = std::mem::replace(&mut self.previous_tick, tick);
         self.removals.retain(|removal| removal.tick > previous_tick);
-        for command in commands {
-            self.apply_command(command);
+        for buffer in buffers {
+            self.apply_buffer(buffer);
         }
 
         let mut systems = std::mem::take(&mut self.systems);
@@ -200,8 +206,33 @@ impl Universe {
             system.run(self, delta_time, &cmd);
         }
         self.systems = systems;
+        #[cfg(feature = "journal")]
+        self.update_journal(Journal::sync);
 
         cmd.into_inner().submit();
+    }
+
+    /// Applies a buffer's commands. Undoable buffers become journal entries.
+    fn apply_buffer(&mut self, buffer: CommandBuffer) {
+        #[cfg(feature = "journal")]
+        let undoable = buffer.is_undoable();
+        #[cfg(feature = "journal")]
+        if undoable {
+            self.update_journal(Journal::sync);
+        }
+        for command in buffer.commands() {
+            match command {
+                #[cfg(feature = "journal")]
+                Command::Undo => self.step_journal(true, undoable),
+                #[cfg(feature = "journal")]
+                Command::Redo => self.step_journal(false, undoable),
+                command => self.apply_command(command),
+            }
+        }
+        #[cfg(feature = "journal")]
+        if undoable {
+            self.update_journal(Journal::record);
+        }
     }
 
     fn apply_command(&mut self, command: Command) {
@@ -269,6 +300,8 @@ impl Universe {
             Command::RemoveComponent(entity, type_id) => {
                 self.remove_component(entity, type_id, self.live_location(entity));
             }
+            #[cfg(feature = "journal")]
+            Command::Undo | Command::Redo => unreachable!("applied by apply_buffer"),
         }
     }
 
@@ -324,6 +357,78 @@ impl Universe {
                     && removal.added <= last_run
             })
             .map(|removal| removal.entity)
+    }
+
+    /// Returns the journal recording this universe's changes, if enabled with
+    /// [`UniverseBuilder::with_journal`].
+    #[cfg(feature = "journal")]
+    #[must_use]
+    pub fn journal(&self) -> Option<&Journal> {
+        self.journal.as_ref()
+    }
+
+    /// Runs `update` on the journal, if there is one. Later changes get a
+    /// newer tick, so the journal tells them apart from what it has seen.
+    #[cfg(feature = "journal")]
+    fn update_journal(&mut self, update: fn(&mut Journal, &Universe)) {
+        if let Some(mut journal) = self.journal.take() {
+            update(&mut journal, self);
+            self.journal = Some(journal);
+            self.advance_change_tick();
+        }
+    }
+
+    /// Undoes or redoes one journal entry, restoring component values.
+    /// Edits made earlier in an undoable buffer are recorded first.
+    #[cfg(feature = "journal")]
+    fn step_journal(&mut self, undo: bool, undoable: bool) {
+        let Some(mut journal) = self.journal.take() else {
+            warn!("cannot undo or redo without a journal");
+            return;
+        };
+        if undoable {
+            journal.record(self);
+        } else {
+            journal.sync(self);
+        }
+        let restores = journal.step(undo, self.change_tick.get());
+        self.journal = Some(journal);
+        // Removals remember where their entity lived before anything changed.
+        let locations: std::collections::HashMap<_, _> = restores
+            .iter()
+            .map(|restore| (restore.entity, self.live_location(restore.entity)))
+            .collect();
+        for restore in restores {
+            if let Some(value) = restore.value {
+                self.set_component(restore.entity, value);
+            } else {
+                self.remove_component(restore.entity, restore.type_id, locations[&restore.entity]);
+            }
+        }
+        // Entities exist while they live in a world or are one.
+        for &entity in locations.keys() {
+            if self.component::<InWorld>(entity).is_some()
+                || self.component::<World>(entity).is_some()
+            {
+                self.alive.insert(entity);
+            } else {
+                self.alive.remove(&entity);
+            }
+        }
+        // Restored values are not new changes; later commands are.
+        self.advance_change_tick();
+    }
+
+    /// Every component removed after `since`, of any type.
+    #[cfg(feature = "journal")]
+    pub(crate) fn removed_since_any(
+        &self,
+        since: u64,
+    ) -> impl Iterator<Item = (Entity, TypeId)> + '_ {
+        self.removals
+            .iter()
+            .filter(move |removal| removal.tick > since)
+            .map(|removal| (removal.entity, removal.type_id))
     }
 
     /// Worlds removed after `last_run`.
@@ -466,6 +571,8 @@ pub struct UniverseBuilder {
     buffer_receiver: Receiver<CommandBuffer>,
     worlds: Vec<WorldBuilder>,
     systems: Vec<SystemConfig>,
+    #[cfg(feature = "journal")]
+    journal: Option<usize>,
 }
 
 impl UniverseBuilder {
@@ -480,6 +587,8 @@ impl UniverseBuilder {
             buffer_receiver: receiver,
             worlds: Vec::new(),
             systems: Vec::new(),
+            #[cfg(feature = "journal")]
+            journal: None,
         }
     }
 
@@ -530,6 +639,15 @@ impl UniverseBuilder {
         self
     }
 
+    /// Records component changes in a [`Journal`] keeping the last
+    /// `capacity` entries, for undo and redo. Meant for the editor.
+    #[cfg(feature = "journal")]
+    #[must_use]
+    pub fn with_journal(mut self, capacity: usize) -> Self {
+        self.journal = self.journal.max(Some(capacity));
+        self
+    }
+
     /// Appends the worlds and systems configured on `other`. Systems that
     /// depend on each other are ordered the same whatever the merge order;
     /// unrelated systems keep their registration order.
@@ -553,6 +671,10 @@ impl UniverseBuilder {
         }
 
         self.systems.extend(other.systems);
+        #[cfg(feature = "journal")]
+        {
+            self.journal = self.journal.max(other.journal);
+        }
 
         self
     }

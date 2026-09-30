@@ -12,10 +12,10 @@ use crate::{
     systems::IntoSystem,
 };
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Component)]
 struct Health(u32);
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Component)]
 struct Mana(u32);
 
 /// Returns the IDs of the universe's worlds, in creation order.

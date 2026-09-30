@@ -97,7 +97,14 @@ fn builtin_editor_subsystem_registers_expected_default_capabilities() -> anyhow:
     assert_eq!(services.menu_titles(), vec!["Main", "Settings", "Windows"]);
     assert_eq!(
         services.window_titles(),
-        vec!["Settings", "Engine", "Worlds", "Entities", "Entity Details",]
+        vec![
+            "Settings",
+            "Engine",
+            "Worlds",
+            "Entities",
+            "Entity Details",
+            "History",
+        ]
     );
     let open_windows = services
         .windows()

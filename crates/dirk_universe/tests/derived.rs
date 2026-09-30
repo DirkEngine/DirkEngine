@@ -4,17 +4,17 @@ use std::{any::type_name, cell::Cell};
 
 use dirk_universe::{UniverseBuilder, prelude::*, schedule::ScheduleError};
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Velocity(i32);
 
-#[derive(Debug, Component)]
+#[derive(Debug, Clone, Component)]
 struct Mass(i32);
 
-#[derive(Debug, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Component)]
 #[component(read_only)]
 struct Momentum(i32);
 
-#[derive(Debug, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Component)]
 #[component(read_only)]
 struct Moving(bool);
 

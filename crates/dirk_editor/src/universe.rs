@@ -6,7 +6,10 @@ use parking_lot::Mutex;
 
 use crate::{EditorServices, EditorWindowDescriptor, UNIVERSE_CATEGORY};
 
-use dirk_universe::{Entity, Universe, WorldId};
+use dirk_universe::{CommandBuffer, Entity, Universe, WorldId};
+
+/// How many ticks of changes the History window can undo.
+pub const HISTORY_CAPACITY: usize = 256;
 
 pub fn register_capabilities(services: &EditorServices) {
     let universe_windows = Arc::new(Mutex::new(UniverseWindows::default()));
@@ -67,6 +70,65 @@ pub fn register_capabilities(services: &EditorServices) {
         },
     );
     *entity_details_window.lock() = Some(entity_details);
+
+    services.add_window_fn(
+        EditorWindowDescriptor {
+            title: "History".to_owned(),
+            category: UNIVERSE_CATEGORY.to_owned(),
+            default_open: false,
+            show_in_list: true,
+        },
+        |ui, context| {
+            history_ui(ui, context.universe());
+            Ok(())
+        },
+    );
+}
+
+/// Lists undoable edits, newest first, with undo and redo buttons. Editor
+/// tools record edits by submitting `CommandBuffer::undoable` buffers.
+fn history_ui(ui: &mut egui::Ui, universe: &Universe) {
+    let Some(journal) = universe.journal() else {
+        ui.label("History is not recorded");
+        return;
+    };
+    let submit = |step: fn(&mut CommandBuffer)| {
+        let mut commands = universe.handle().command_buffer();
+        step(&mut commands);
+        commands.submit();
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(journal.can_undo(), egui::Button::new("Undo"))
+            .clicked()
+        {
+            submit(CommandBuffer::undo);
+        }
+        if ui
+            .add_enabled(journal.can_redo(), egui::Button::new("Redo"))
+            .clicked()
+        {
+            submit(CommandBuffer::redo);
+        }
+    });
+    ui.separator();
+    if journal.entries().len() == 0 {
+        ui.label("No undoable edits yet");
+    }
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (index, entry) in journal.entries().enumerate().rev() {
+            ui.collapsing(format!("#{index}: {} changes", entry.len()), |ui| {
+                for change in entry.changes() {
+                    ui.label(format!(
+                        "{:?} {} on entity {}",
+                        change.kind(),
+                        change.component(),
+                        change.entity().raw()
+                    ));
+                }
+            });
+        }
+    });
 }
 
 /// Shared state for Universe editor windows.
@@ -200,7 +262,10 @@ mod tests {
         for _ in 0..5_000 {
             world = world.with_entity(Entity::builder());
         }
-        let mut universe = Universe::builder().with_world(world).build();
+        let mut universe = Universe::builder()
+            .with_world(world)
+            .build()
+            .expect("test universe should schedule");
         universe.tick(0.0);
 
         let ctx = egui::Context::default();
@@ -225,7 +290,10 @@ mod tests {
         for _ in 0..100 {
             world = world.with_entity(Entity::builder());
         }
-        let mut universe = Universe::builder().with_world(world).build();
+        let mut universe = Universe::builder()
+            .with_world(world)
+            .build()
+            .expect("test universe should schedule");
         universe.tick(0.0);
 
         let ctx = egui::Context::default();

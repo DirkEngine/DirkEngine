@@ -17,5 +17,9 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# Records component changes for undo and redo. The editor enables it.
+journal = []
+
 [lints]
 workspace = true
