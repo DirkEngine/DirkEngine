@@ -76,8 +76,8 @@ loop {
         let data = event.handle.take()?;
         // ... upload data to GPU
     }
-    for AssetUnloaded { handle } in unloaded_consumer.consume_all() {
-        // ... remove data from the GPU
+    for AssetUnloaded { handle, generation } in unloaded_consumer.consume_all() {
+        // ... remove data from the GPU only if this generation is still uploaded
     }
 }
 # Ok(()) }

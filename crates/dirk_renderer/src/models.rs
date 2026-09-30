@@ -110,6 +110,7 @@ struct Material {
 struct Model {
     // TODO: store transform with each mesh handle
     pub meshes: Vec<Handle<Mesh>>,
+    generation: dirk_assets::AssetGeneration,
 }
 
 pub struct ModelRegistry {
@@ -157,7 +158,13 @@ impl ModelRegistry {
 
         let events = self.asset_unload_consumer.consume_all().collect::<Vec<_>>();
         for event in events {
-            self.unload_model(&event.handle);
+            if self
+                .models
+                .get(&event.handle)
+                .is_some_and(|model| model.generation == event.generation)
+            {
+                self.unload_model(&event.handle);
+            }
         }
         Ok(())
     }
@@ -261,6 +268,7 @@ impl ModelRegistry {
                 asset_handle,
                 Model {
                     meshes: mesh_handles.clone(),
+                    generation: handle.generation(),
                 },
             );
             Ok(())

@@ -152,7 +152,7 @@ fn editor_visuals(palette: EditorPalette) -> egui::Visuals {
     visuals.override_text_color = Some(palette.text);
     visuals.window_fill = palette.surface;
     visuals.panel_fill = palette.background;
-    visuals.window_stroke = egui::Stroke::new(1.0, palette.stroke_subtle);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, palette.stroke_subtle);
     visuals.window_corner_radius = egui::CornerRadius::same(2);
     visuals.menu_corner_radius = egui::CornerRadius::same(2);
     visuals.window_shadow = egui::Shadow {
@@ -172,7 +172,7 @@ fn editor_visuals(palette: EditorPalette) -> egui::Visuals {
     visuals.text_edit_bg_color = Some(palette.panel);
     visuals.code_bg_color = palette.panel_alt;
     visuals.selection.bg_fill = palette.selection;
-    visuals.selection.stroke = egui::Stroke::new(1.0, palette.text_bright);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, palette.text_bright);
     visuals.hyperlink_color = palette.accent_hovered;
     visuals.warn_fg_color = palette.warn;
     visuals.error_fg_color = palette.error;
@@ -229,9 +229,9 @@ fn widget_visuals(
     egui::style::WidgetVisuals {
         bg_fill,
         weak_bg_fill,
-        bg_stroke: egui::Stroke::new(1.0, bg_stroke),
+        bg_stroke: egui::Stroke::new(1.0_f32, bg_stroke),
         corner_radius: egui::CornerRadius::same(2),
-        fg_stroke: egui::Stroke::new(1.0, fg_stroke),
+        fg_stroke: egui::Stroke::new(1.0_f32, fg_stroke),
         expansion: 0.0,
     }
 }

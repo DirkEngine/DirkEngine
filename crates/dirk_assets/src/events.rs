@@ -1,6 +1,6 @@
 //! Public and internal events emitted by the asset subsystem.
 
-use crate::{Asset, AssetHandle, Handle};
+use crate::{Asset, AssetGeneration, AssetHandle, Handle};
 use dirk_events::Event;
 
 /// **Internal** event fired by an [`AssetRef`] when its owning [`Handle`]
@@ -10,13 +10,16 @@ use dirk_events::Event;
 /// and re-emits the public [`AssetUnloaded`] event, giving the registry a
 /// chance to do any internal bookkeeping before notifying external systems.
 ///
-/// Wraps the [`AssetHandle`] of the asset that was unloaded.
+/// Carries both the path and the particular load being released.
 ///
 /// [`AssetRef`]: crate::handle::AssetRef
 /// [`AssetRegistry::tick`]: crate::AssetRegistry::tick
 #[derive(Event, Clone, Debug)]
-#[event("unload asset {0}")]
-pub(crate) struct InternalAssetUnloaded(pub AssetHandle);
+#[event("unload asset {handle}")]
+pub(crate) struct InternalAssetUnloaded {
+    pub handle: AssetHandle,
+    pub generation: AssetGeneration,
+}
 
 /// Fired by [`AssetRegistry`] when an asset of type `T` has been fully loaded
 /// and is ready to be consumed.
@@ -93,8 +96,9 @@ pub struct AssetLoaded<T: Asset> {
 /// let mut consumer: Consumer<AssetUnloaded> = events.subscribe();
 ///
 /// // Once per frame:
-/// for AssetUnloaded { handle } in consumer.consume_all() {
-///     // ... GPU destroyes the model with [handle]
+/// for AssetUnloaded { handle, generation } in consumer.consume_all() {
+///     // Check that generation is the one currently uploaded for handle.
+///     // ... destroy the GPU model only when its generation matches
 /// }
 /// ```
 ///
@@ -109,4 +113,7 @@ pub struct AssetUnloaded {
     /// Use this to correlate with the handle stored when the corresponding
     /// [`AssetLoaded`] event was received.
     pub handle: AssetHandle,
+    /// Identifies the particular loaded instance that was released. A newer
+    /// load of the same path must not be removed by this event.
+    pub generation: AssetGeneration,
 }

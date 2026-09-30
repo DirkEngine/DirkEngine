@@ -34,8 +34,10 @@ impl ShaderCode {
             "SPIR-V size must be a multiple of 4"
         );
         self.code
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4 byte chunks")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect()
     }
 }
