@@ -287,6 +287,44 @@ mod macro_debug_output {
         assert_eq!(e.debug(), "literal {0}, debug=12, rounded=1.23");
     }
 
+    #[test]
+    fn event_formats_preserve_fill_characters() {
+        #[derive(Clone, Event)]
+        #[event("{x:}>5}|{x:{<5}|{x:🦀^5}")]
+        struct Named {
+            x: u32,
+        }
+
+        #[derive(Clone, Event)]
+        #[event("{0:}>5}|{0:{<5}|{0:🦀^5}")]
+        struct Tuple(u32);
+
+        let expected = "}}}}7|7{{{{|🦀🦀7🦀🦀";
+        assert_eq!(Named { x: 7 }.debug(), expected);
+        assert_eq!(Tuple(7).debug(), expected);
+    }
+
+    #[test]
+    fn event_formats_accept_unicode_width_and_precision_captures() {
+        #[derive(Clone, Event)]
+        #[event("{x:>é2$.é3$}")]
+        struct Named {
+            x: f64,
+            é2: usize,
+            é3: usize,
+        }
+
+        assert_eq!(
+            Named {
+                x: 1.234,
+                é2: 6,
+                é3: 2,
+            }
+            .debug(),
+            "  1.23"
+        );
+    }
+
     // ── Unit enum ─────────────────────────────────────────────────────────
 
     #[test]

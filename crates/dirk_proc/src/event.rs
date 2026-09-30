@@ -158,7 +158,17 @@ fn rewrite_placeholders(format: &LitStr, tuple_fields: Option<usize>) -> syn::Re
             ));
         }
 
-        let Some(end) = tail.find('}') else {
+        // A brace immediately before alignment is a fill character, not a
+        // delimiter. Skip it before looking for the placeholder's end.
+        let end = tail.find([':', '}']).and_then(|index| {
+            if tail.as_bytes()[index] == b'}' {
+                Some(index)
+            } else {
+                let spec = skip_fill_and_alignment(&tail[index + 1..]);
+                spec.find('}').map(|end| tail.len() - spec.len() + end)
+            }
+        });
+        let Some(end) = end else {
             return Err(error(
                 "unclosed `{` in event format; use `{{` for a literal brace".to_owned(),
             ));
@@ -215,8 +225,22 @@ fn rewrite_placeholders(format: &LitStr, tuple_fields: Option<usize>) -> syn::Re
     Ok(LitStr::new(&output, format.span()))
 }
 
+/// Skips the optional fill character and alignment, preserving UTF-8 boundaries.
+fn skip_fill_and_alignment(spec: &str) -> &str {
+    let mut chars = spec.chars();
+    let first = chars.next();
+    if matches!(chars.next(), Some('<' | '>' | '^')) {
+        chars.as_str()
+    } else if matches!(first, Some('<' | '>' | '^')) {
+        &spec[1..]
+    } else {
+        spec
+    }
+}
+
 /// Rejects format specs that need positional arguments.
 fn validate_spec(spec: &str) -> Result<(), &'static str> {
+    let spec = skip_fill_and_alignment(spec);
     if spec.contains('{') {
         return Err("nested placeholders are not supported in event formats");
     }
@@ -226,10 +250,11 @@ fn validate_spec(spec: &str) -> Result<(), &'static str> {
              such as `.2` or a named capture such as `.prec$`",
         );
     }
-    // `name$` refers to a capture; `N$` refers to a positional argument.
+    // Split on format syntax, not identifier characters: capture names can
+    // contain Unicode. `name$` is a capture; `N$` is a positional argument.
     let positional_argument = spec.match_indices('$').any(|(dollar, _)| {
         let name = spec[..dollar]
-            .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .rsplit(['+', '-', '#', '.', '$'])
             .next()
             .unwrap_or_default();
         !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
@@ -333,8 +358,9 @@ mod tests {
     #[test]
     fn rewrite_rejects_positional_precision_and_width_arguments() {
         assert!(tuple_error("{0:.*}", 2).contains("`.*` precision"));
-        assert!(tuple_error("{0:1$}", 2).contains("`N$`"));
-        assert!(tuple_error("{0:.1$}", 2).contains("`N$`"));
+        for format in ["{0:1$}", "{0:.1$}", "{0:}>1$}", "{0:🦀^.1$}"] {
+            assert!(tuple_error(format, 2).contains("`N$`"), "{format}");
+        }
         assert!(tuple_error("{0:{}}", 2).contains("nested placeholders"));
     }
 
@@ -347,6 +373,7 @@ mod tests {
     #[test]
     fn rewrite_rejects_unbalanced_braces() {
         assert!(tuple_error("open {0", 1).contains("unclosed `{`"));
+        assert!(tuple_error("open {0:}>5", 1).contains("unclosed `{`"));
         assert!(tuple_error("close }", 1).contains("unmatched `}`"));
     }
 
