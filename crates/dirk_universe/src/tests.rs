@@ -562,11 +562,8 @@ fn function_system_iterates_filtered_query() {
     })
     .into_system();
 
-    system.run(
-        &universe,
-        0.016,
-        &std::cell::RefCell::new(universe.handle().command_buffer()),
-    );
+    let commands = std::cell::RefCell::new(universe.handle().command_buffer());
+    system.run(&mut universe, 0.016, &commands);
 
     assert_eq!(*seen.borrow(), vec![10]);
 }
@@ -602,11 +599,8 @@ fn function_system_sums_all_matching_entities() {
     })
     .into_system();
 
-    system.run(
-        &universe,
-        0.016,
-        &std::cell::RefCell::new(universe.handle().command_buffer()),
-    );
+    let commands = std::cell::RefCell::new(universe.handle().command_buffer());
+    system.run(&mut universe, 0.016, &commands);
 
     assert_eq!(total.get(), 6);
 }

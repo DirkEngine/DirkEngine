@@ -17,11 +17,12 @@ use crate::{
     schedule::{Access, SystemConfig, SystemId},
 };
 
-/// Everything a system parameter can be fetched from during one run.
+/// Everything one run of a system uses. Parameters are fetched from a shared
+/// borrow of it; derivations edit the universe through a mutable one.
 #[doc(hidden)]
 pub struct SystemContext<'u> {
-    universe: &'u Universe,
-    last_run: u64,
+    pub(crate) universe: &'u mut Universe,
+    pub(crate) last_run: u64,
     delta_time: f64,
     commands: &'u RefCell<CommandBuffer>,
 }
@@ -34,7 +35,7 @@ pub trait SystemParam: Sealed {
 
     /// Fetches this parameter for one run.
     #[doc(hidden)]
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u>;
+    fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u>;
 
     /// Registers this parameter's accesses before the system runs.
     #[doc(hidden)]
@@ -44,7 +45,7 @@ pub trait SystemParam: Sealed {
 impl SystemParam for () {
     type Item<'u> = ();
 
-    fn fetch<'u>(_: &SystemContext<'u>) -> Self::Item<'u> {}
+    fn fetch<'u>(_: &'u SystemContext<'_>) -> Self::Item<'u> {}
 
     fn register_access(_: &mut Access) {}
 }
@@ -54,7 +55,7 @@ macro_rules! impl_system_param_for_tuple {
         impl<$($ty: SystemParam),+> SystemParam for ($($ty,)+) {
             type Item<'u> = ($($ty::Item<'u>,)+);
 
-            fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+            fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
                 ($($ty::fetch(context),)+)
             }
 
@@ -73,7 +74,7 @@ where
 {
     type Item<'u> = Query<'u, D, F>;
 
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+    fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
         Query::new(context.universe, context.last_run)
     }
 
@@ -149,7 +150,7 @@ impl Sealed for Commands<'_> {}
 impl SystemParam for Commands<'_> {
     type Item<'u> = Commands<'u>;
 
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+    fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
         Commands {
             buffer: context.commands.borrow_mut(),
         }
@@ -168,7 +169,7 @@ impl Sealed for DeltaTime {}
 impl SystemParam for DeltaTime {
     type Item<'u> = Self;
 
-    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+    fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
         Self(context.delta_time)
     }
 
@@ -272,11 +273,12 @@ impl IntoSystem<()> for SystemConfig {
 }
 
 /// The object-safe interface of every kind of system, implemented by the
-/// adapters below.
+/// adapters below and by derivations.
 #[doc(hidden)]
 pub trait ErasedSystem: 'static {
-    /// Fetches the system's parameters from `context` and runs it once.
-    fn run(&mut self, context: &SystemContext<'_>);
+    /// Runs the system once with `context`. Derivations edit the universe
+    /// through it; systems only fetch their parameters from it.
+    fn run(&mut self, context: &mut SystemContext<'_>);
 
     /// Registers the accesses of the system's parameters.
     fn register_access(access: &mut Access)
@@ -303,9 +305,14 @@ impl BoxedSystem {
     }
 
     /// Runs the system once, with the changes made since its previous run.
-    pub fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
+    pub fn run(
+        &mut self,
+        universe: &mut Universe,
+        delta_time: f64,
+        commands: &RefCell<CommandBuffer>,
+    ) {
         let this_run = universe.advance_change_tick();
-        self.system.run(&SystemContext {
+        self.system.run(&mut SystemContext {
             universe,
             last_run: self.last_run,
             delta_time,
@@ -319,7 +326,7 @@ impl BoxedSystem {
 struct StructSystem<S>(S);
 
 impl<S: System> ErasedSystem for StructSystem<S> {
-    fn run(&mut self, context: &SystemContext<'_>) {
+    fn run(&mut self, context: &mut SystemContext<'_>) {
         self.0.run(S::Params::fetch(context));
     }
 
@@ -350,7 +357,7 @@ macro_rules! impl_function_system {
         where
             Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
         {
-            fn run(&mut self, context: &SystemContext<'_>) {
+            fn run(&mut self, context: &mut SystemContext<'_>) {
                 let ($($binding,)*) = <($($ty,)*) as SystemParam>::fetch(context);
                 (self.func)($($binding),*);
             }
