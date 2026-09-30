@@ -33,11 +33,10 @@ impl PlayerMovementSystem {
     }
 }
 
-impl System<(Query<'_, (&PlayerId, &mut Transform)>, DeltaTime)> for PlayerMovementSystem {
-    fn run(
-        &mut self,
-        (mut query, DeltaTime(delta_time)): (Query<'_, (&PlayerId, &mut Transform)>, DeltaTime),
-    ) {
+impl System for PlayerMovementSystem {
+    type Params<'u> = (Query<'u, (&'u PlayerId, &'u mut Transform)>, DeltaTime);
+
+    fn run(&mut self, (mut query, DeltaTime(delta_time)): Self::Params<'_>) {
         for (player, mut transform) in &mut query {
             let player = *player;
             let input = self.input_state.get(player);
