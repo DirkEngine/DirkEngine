@@ -1,9 +1,12 @@
 #![doc = include_str!("../README.md")]
 
+// Lets `#[derive(Component)]` name `::dirk_universe` inside this crate too.
+extern crate self as dirk_universe;
+
 use std::{
     any::TypeId,
     cell::{Cell, Ref, RefCell},
-    collections::HashMap,
+    collections::HashSet,
     fmt::Debug,
     sync::mpsc::{self, Receiver, Sender},
 };
@@ -16,11 +19,8 @@ mod macros;
 pub mod components;
 use components::{AnyComponent, Component, Components};
 
-pub mod lifecycle;
-use lifecycle::LifecycleEvent;
-
 pub mod query;
-use query::{Query, ReadOnlyQueryData, filter::QueryFilter};
+use query::{Join, Query, ReadOnlyQueryData, filter::QueryFilter};
 
 pub mod systems;
 use systems::{ErasedSystem, IntoSystem};
@@ -33,7 +33,7 @@ mod entity;
 pub use entity::{Entity, EntityBuilder};
 
 mod world;
-pub use world::{World, WorldBuilder, WorldId};
+pub use world::{InWorld, World, WorldBuilder, WorldId};
 
 mod allocator;
 use allocator::Allocator;
@@ -41,10 +41,10 @@ use allocator::Allocator;
 /// The types needed to define components and systems.
 pub mod prelude {
     pub use crate::{
-        CommandBuffer, Entity, Universe, UniverseHandle, World, WorldId,
+        CommandBuffer, Entity, InWorld, Universe, UniverseHandle, World, WorldId,
         components::Component,
         query::{
-            Query,
+            Delta, Query,
             filter::{Added, Changed, With, Without},
         },
         systems::{Commands, DeltaTime, IntoSystem, System},
@@ -80,10 +80,22 @@ impl UniverseHandle {
     }
 }
 
+/// A component removal, kept until every system has observed it.
+struct Removal {
+    type_id: TypeId,
+    entity: Entity,
+    /// When the removed component was added, so additions and removals that
+    /// cancel out between two runs are not reported.
+    added: u64,
+    tick: u64,
+}
+
 /// This struct is the manager for all the worlds.
+///
+/// Worlds are entities carrying a [`World`] component. Every other entity
+/// lives in a world, recorded by its [`InWorld`] component.
 pub struct Universe {
-    worlds: HashMap<WorldId, World>,
-    entities: HashMap<Entity, WorldId>,
+    alive: HashSet<Entity>,
 
     handle: UniverseHandle,
     buffer_receiver: Receiver<CommandBuffer>,
@@ -93,8 +105,10 @@ pub struct Universe {
     systems: RefCell<Vec<Box<dyn ErasedSystem>>>,
 
     components: Components,
-    lifecycle: Vec<LifecycleEvent>,
+    removals: Vec<Removal>,
     change_tick: Cell<u64>,
+    /// The change tick at which the previous tick started.
+    previous_tick: u64,
 }
 
 impl Universe {
@@ -107,14 +121,14 @@ impl Universe {
     #[must_use]
     fn build(builder: UniverseBuilder) -> Self {
         let universe = Self {
-            worlds: HashMap::new(),
-            entities: HashMap::new(),
+            alive: HashSet::new(),
             handle: builder.handle,
             buffer_receiver: builder.buffer_receiver,
             systems: RefCell::new(builder.systems),
             components: Components::default(),
-            lifecycle: Vec::new(),
+            removals: Vec::new(),
             change_tick: Cell::new(0),
+            previous_tick: 0,
         };
 
         let mut cmd = universe.handle.command_buffer();
@@ -140,8 +154,6 @@ impl Universe {
     ///
     /// # Panics
     ///
-    /// Will panic in certain internal conditions like if a [`World`] that
-    /// was just created is not found in the [`Universe`].
     /// Panics from system callbacks propagate to the caller.
     pub fn tick(&mut self, delta_time: f64) {
         let cmd = RefCell::new(self.handle.command_buffer());
@@ -151,9 +163,14 @@ impl Universe {
             commands.append(&mut sub.commands());
         }
 
-        self.lifecycle.clear();
-        self.advance_change_tick();
-        self.run_commands(commands);
+        // Every system ran after the previous tick started, so removals
+        // recorded before then have been observed by all of them.
+        let tick = self.advance_change_tick();
+        let previous_tick = std::mem::replace(&mut self.previous_tick, tick);
+        self.removals.retain(|removal| removal.tick > previous_tick);
+        for command in commands {
+            self.apply_command(command);
+        }
 
         for system in self.systems.borrow_mut().iter_mut() {
             system.run(self, delta_time, &cmd);
@@ -162,53 +179,39 @@ impl Universe {
         cmd.into_inner().submit();
     }
 
-    fn run_commands(&mut self, commands: Vec<Command>) {
-        for command in commands {
-            self.apply_command(command);
-        }
-    }
-
     fn apply_command(&mut self, command: Command) {
         match command {
             Command::CreateWorld(id, name) => {
-                if self.worlds.contains_key(&id) {
+                if self.is_alive(id.entity()) {
                     warn!("cannot create world {id} as it already exists");
                     return;
                 }
-                self.worlds.insert(id, World::new(id, name));
-                self.lifecycle
-                    .push(LifecycleEvent::WorldCreated { world: id });
+                self.alive.insert(id.entity());
+                self.set_component(id.entity(), Box::new(World::new(id, name)));
             }
-            Command::DestroyWorld(id) => {
-                let Some(world) = self.worlds.get(&id) else {
-                    return;
-                };
-                let entities: Vec<_> = world.alive.iter().copied().collect();
-                for entity in entities {
-                    self.despawn(entity);
-                }
-                self.worlds.remove(&id);
-                self.lifecycle
-                    .push(LifecycleEvent::WorldDestroyed { world: id });
-            }
+            Command::DestroyWorld(id) => self.destroy_world(id),
             Command::Spawn(entity, builder, world) => {
                 if self.is_alive(entity) {
                     warn!("cannot spawn {entity:?} as it already exists");
                     return;
                 }
-                let Some(world_ref) = self.worlds.get_mut(&world) else {
-                    warn!("cannot spawn {entity:?} in missing world {world:?}");
+                if self.world(world).is_none() {
+                    warn!("cannot spawn {entity:?} in missing world {world}");
                     return;
-                };
-                world_ref.alive.insert(entity);
-                self.entities.insert(entity, world);
-                self.lifecycle
-                    .push(LifecycleEvent::EntitySpawned { entity, world });
+                }
+                self.alive.insert(entity);
+                self.set_component(entity, Box::new(InWorld(world)));
                 for component in builder.components.into_values() {
                     self.set_component(entity, component);
                 }
             }
-            Command::Despawn(entity) => self.despawn(entity),
+            Command::Despawn(entity) => {
+                if self.component::<World>(entity).is_some() {
+                    self.destroy_world(WorldId::new(entity));
+                } else {
+                    self.despawn(entity);
+                }
+            }
             Command::Send(entity, to) => {
                 let Some(from) = self.get_world(entity) else {
                     warn!("cannot send {entity:?} as it does not exist");
@@ -217,23 +220,11 @@ impl Universe {
                 if from == to {
                     return;
                 }
-                if !self.worlds.contains_key(&to) {
+                if self.world(to).is_none() {
                     warn!("cannot send {entity:?} to missing world {to}");
                     return;
                 }
-                self.worlds
-                    .get_mut(&from)
-                    .expect("entity's world exists")
-                    .alive
-                    .remove(&entity);
-                self.worlds
-                    .get_mut(&to)
-                    .expect("destination exists")
-                    .alive
-                    .insert(entity);
-                self.entities.insert(entity, to);
-                self.lifecycle
-                    .push(LifecycleEvent::EntityMoved { entity, from, to });
+                self.set_component(entity, Box::new(InWorld(to)));
             }
             Command::SetComponent(entity, component) => {
                 if self.is_alive(entity) {
@@ -250,34 +241,50 @@ impl Universe {
     }
 
     fn remove_component(&mut self, entity: Entity, type_id: TypeId) {
-        if self.components.remove(entity, type_id) {
-            self.lifecycle
-                .push(LifecycleEvent::ComponentRemoved { entity, type_id });
+        if let Some(added) = self.components.remove(entity, type_id) {
+            self.removals.push(Removal {
+                type_id,
+                entity,
+                added,
+                tick: self.change_tick.get(),
+            });
         }
     }
 
     fn despawn(&mut self, entity: Entity) {
-        let Some(world) = self.get_world(entity) else {
+        if !self.alive.remove(&entity) {
             return;
-        };
+        }
         let types: Vec<_> = self.components.get_all(entity).map(|(id, _)| id).collect();
         for type_id in types {
             self.remove_component(entity, type_id);
         }
-        self.worlds
-            .get_mut(&world)
-            .expect("entity's world exists")
-            .alive
-            .remove(&entity);
-        self.entities.remove(&entity);
-        self.lifecycle
-            .push(LifecycleEvent::EntityDespawned { entity, world });
     }
 
-    /// Returns structural notifications in command order for the current tick.
-    /// All systems can read them; they expire at the start of the next tick.
-    pub fn lifecycle(&self) -> impl Iterator<Item = &LifecycleEvent> {
-        self.lifecycle.iter()
+    fn destroy_world(&mut self, world: WorldId) {
+        if self.world(world).is_none() {
+            return;
+        }
+        let entities: Vec<_> = self.entities_in_world(world).collect();
+        for entity in entities {
+            self.despawn(entity);
+        }
+        self.despawn(world.entity());
+    }
+
+    /// Entities whose `C` was removed after `last_run`, having existed then.
+    pub(crate) fn removed_since<C: Component>(
+        &self,
+        last_run: u64,
+    ) -> impl Iterator<Item = Entity> + '_ {
+        self.removals
+            .iter()
+            .filter(move |removal| {
+                removal.type_id == TypeId::of::<C>()
+                    && removal.tick > last_run
+                    && removal.added <= last_run
+            })
+            .map(|removal| removal.entity)
     }
 
     // A separate counter for each invocation makes same-frame ordering visible.
@@ -293,35 +300,29 @@ impl Universe {
 
     // UTILITIES & GETTERS
 
-    /// Returns an optional reference to the requested [`World`].
+    /// Returns the [`World`] component of a live world.
     #[must_use]
-    pub fn world(&self, world: WorldId) -> Option<&World> {
-        self.worlds.get(&world)
+    pub fn world(&self, world: WorldId) -> Option<Ref<'_, World>> {
+        self.component(world.entity())
     }
 
     /// Returns all live worlds.
-    pub fn worlds(&self) -> impl Iterator<Item = &World> {
-        self.worlds.values()
+    pub fn worlds(&self) -> impl Iterator<Item = Ref<'_, World>> {
+        self.components.iter::<World>().map(|(_, world)| world)
     }
 
-    /// Returns all live entities with their current world.
+    /// Returns every entity living in a world, with that world. World
+    /// entities themselves are not included.
     pub fn entities(&self) -> impl Iterator<Item = (Entity, WorldId)> + '_ {
-        self.entities
-            .iter()
-            .map(|(entity, world)| (*entity, *world))
+        self.components
+            .iter::<InWorld>()
+            .map(|(entity, in_world)| (entity, in_world.0))
     }
 
     /// Returns all live entities currently in `world`.
     pub fn entities_in_world(&self, world: WorldId) -> impl Iterator<Item = Entity> + '_ {
-        self.entities
-            .iter()
-            .filter_map(move |(entity, entity_world)| {
-                if *entity_world == world {
-                    Some(*entity)
-                } else {
-                    None
-                }
-            })
+        self.entities()
+            .filter_map(move |(entity, entity_world)| (entity_world == world).then_some(entity))
     }
 
     /// Returns read-only component information for `entity`.
@@ -338,30 +339,24 @@ impl Universe {
     /// Returns the [`WorldId`] of the [`Entity`]'s [`World`].
     #[must_use]
     pub fn get_world(&self, entity: Entity) -> Option<WorldId> {
-        self.entities.get(&entity).copied()
+        self.component::<InWorld>(entity).map(|in_world| in_world.0)
     }
 
     /// Returns if the given [`Entity`] is in the given [`World`].
     #[must_use]
     pub fn is_in_world(&self, world: WorldId, entity: Entity) -> bool {
-        self.entities.get(&entity) == Some(&world)
+        self.get_world(entity) == Some(world)
     }
 
-    /// Returns the total number of alive entities.
-    #[must_use]
-    pub fn alive_count(&self) -> usize {
-        self.entities.len()
-    }
-
-    /// Returns if the specified entity is alive
+    /// Returns if the specified entity, which may be a world, is alive.
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
-        self.entities.contains_key(&entity)
+        self.alive.contains(&entity)
     }
 
     /// Returns a read-only query over the current universe, for use outside
-    /// systems. `Added` and `Changed` filters match every present component,
-    /// since there is no previous run to compare against.
+    /// systems. `Added`, `Changed` and `Delta` treat every present component
+    /// as new, since there is no previous run to compare against.
     #[must_use]
     pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
         Query::new(self, 0)
@@ -369,7 +364,10 @@ impl Universe {
 
     /// Like [`Universe::query`], restricted by the filter `F`.
     #[must_use]
-    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> Query<'_, D, F> {
+    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> Query<'_, D, F>
+    where
+        D::Liveness: Join<F::Liveness>,
+    {
         Query::new(self, 0)
     }
 
@@ -425,8 +423,8 @@ impl UniverseBuilder {
 
     /// Adds a system to run on each tick, in registration order.
     ///
-    /// Functions declare queries, lifecycle notifications, and delta time
-    /// through their arguments. Stateful [`systems::System`] implementations use
+    /// Functions declare queries, commands, and delta time through their
+    /// arguments. Stateful [`systems::System`] implementations use
     /// the same parameters. Component edits are immediate; structural commands
     /// are applied on the following tick.
     #[must_use]
