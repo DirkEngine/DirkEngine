@@ -79,10 +79,8 @@ jobs:
       - name: Bundle debug build and runtime assets
         run: |
           mkdir -p dist/dirkengine
-          cp target/debug/dirkengine scripts/run-bundle.sh dist/dirkengine/
-          mv dist/dirkengine/run-bundle.sh dist/dirkengine/run.sh
+          cp target/debug/dirkengine dist/dirkengine/
           cp -R assets dist/dirkengine/assets
-          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/dist/dirkengine/run.sh" --help >/dev/null)
           tar -C dist -czf dist/dirkengine-debug.tar.gz dirkengine
 
       - name: Upload Debug Artifact
