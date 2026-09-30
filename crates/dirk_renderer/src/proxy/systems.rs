@@ -158,7 +158,8 @@ mod tests {
         let (sender, receiver) = render_commands::channel();
         let mut universe = Universe::builder()
             .with_system(RendererSystem::new(sender))
-            .build();
+            .build()
+            .expect("systems should schedule");
         let mut cmd = universe.handle().command_buffer();
         let world = cmd.create_world(World::builder("w"));
         cmd.set_component(world.entity(), Transform::default());

@@ -740,6 +740,7 @@ version = "0.1.0"
 dependencies = [
  "dirk_proc",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
