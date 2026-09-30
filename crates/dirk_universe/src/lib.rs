@@ -20,7 +20,7 @@ pub mod components;
 use components::{AnyComponent, Component, Components};
 
 pub mod query;
-use query::{Join, Query, ReadOnlyQueryData, filter::QueryFilter};
+use query::{Join, Query, ReadOnlyQueryData, Scope, filter::QueryFilter};
 
 pub mod systems;
 use systems::{ErasedSystem, IntoSystem};
@@ -36,7 +36,7 @@ mod entity;
 pub use entity::{Entity, EntityBuilder};
 
 mod world;
-pub use world::{InWorld, World, WorldBuilder, WorldId};
+pub use world::{InWorld, Isolated, World, WorldBuilder, WorldId};
 
 mod allocator;
 use allocator::Allocator;
@@ -44,13 +44,13 @@ use allocator::Allocator;
 /// The types needed to define components and systems.
 pub mod prelude {
     pub use crate::{
-        CommandBuffer, Entity, InWorld, Universe, UniverseHandle, World, WorldId,
+        CommandBuffer, Entity, InWorld, Isolated, Universe, UniverseHandle, World, WorldId,
         components::Component,
         query::{
             Delta, Lagged, Query,
             filter::{Added, Changed, With, Without},
         },
-        systems::{Commands, DeltaTime, IntoSystem, System},
+        systems::{Commands, DeltaTime, IntoSystem, PerWorld, System},
     };
 }
 
@@ -83,10 +83,19 @@ impl UniverseHandle {
     }
 }
 
+/// Where an entity lives, remembered for its removals.
+#[derive(Clone, Copy)]
+struct Location {
+    world: WorldId,
+    isolated: bool,
+}
+
 /// A component removal, kept until every system has observed it.
 struct Removal {
     type_id: TypeId,
     entity: Entity,
+    /// The entity's world when the component was removed.
+    location: Option<Location>,
     /// When the removed component was added, so additions and removals that
     /// cancel out between two runs are not reported.
     added: u64,
@@ -193,13 +202,19 @@ impl Universe {
 
     fn apply_command(&mut self, command: Command) {
         match command {
-            Command::CreateWorld(id, name) => {
+            Command::CreateWorld(id, builder) => {
                 if self.is_alive(id.entity()) {
                     warn!("cannot create world {id} as it already exists");
                     return;
                 }
                 self.alive.insert(id.entity());
-                self.set_component(id.entity(), Box::new(World::new(id, name)));
+                self.set_component(id.entity(), Box::new(World::new(id, builder.name)));
+                if builder.isolated {
+                    self.set_component(id.entity(), Box::new(Isolated));
+                }
+                for component in builder.world.components.into_values() {
+                    self.set_component(id.entity(), component);
+                }
             }
             Command::DestroyWorld(id) => self.destroy_world(id),
             Command::Spawn(entity, builder, world) => {
@@ -236,6 +251,10 @@ impl Universe {
                     warn!("cannot send {entity:?} to missing world {to}");
                     return;
                 }
+                if self.is_isolated(from) || self.is_isolated(to) {
+                    warn!("cannot send {entity:?} between {from} and {to}: a world is isolated");
+                    return;
+                }
                 self.set_component(entity, Box::new(InWorld(to)));
             }
             Command::SetComponent(entity, component) => {
@@ -243,7 +262,9 @@ impl Universe {
                     self.set_component(entity, component);
                 }
             }
-            Command::RemoveComponent(entity, type_id) => self.remove_component(entity, type_id),
+            Command::RemoveComponent(entity, type_id) => {
+                self.remove_component(entity, type_id, self.live_location(entity));
+            }
         }
     }
 
@@ -252,11 +273,12 @@ impl Universe {
             .insert(entity, component, self.change_tick.get());
     }
 
-    fn remove_component(&mut self, entity: Entity, type_id: TypeId) {
+    fn remove_component(&mut self, entity: Entity, type_id: TypeId, location: Option<Location>) {
         if let Some(added) = self.components.remove(entity, type_id) {
             self.removals.push(Removal {
                 type_id,
                 entity,
+                location,
                 added,
                 tick: self.change_tick.get(),
             });
@@ -264,12 +286,13 @@ impl Universe {
     }
 
     fn despawn(&mut self, entity: Entity) {
+        let location = self.live_location(entity);
         if !self.alive.remove(&entity) {
             return;
         }
         let types: Vec<_> = self.components.get_all(entity).map(|(id, _)| id).collect();
         for type_id in types {
-            self.remove_component(entity, type_id);
+            self.remove_component(entity, type_id, location);
         }
     }
 
@@ -297,6 +320,48 @@ impl Universe {
                     && removal.added <= last_run
             })
             .map(|removal| removal.entity)
+    }
+
+    /// Worlds removed after `last_run`.
+    pub(crate) fn worlds_removed_since(&self, last_run: u64) -> impl Iterator<Item = WorldId> + '_ {
+        self.removed_since::<World>(last_run).map(WorldId::new)
+    }
+
+    fn is_isolated(&self, world: WorldId) -> bool {
+        self.components
+            .contains(world.entity(), TypeId::of::<Isolated>())
+    }
+
+    fn live_location(&self, entity: Entity) -> Option<Location> {
+        self.get_world(entity).map(|world| Location {
+            world,
+            isolated: self.is_isolated(world),
+        })
+    }
+
+    /// Where `entity` lives, or lived before its last recorded removal.
+    fn location(&self, entity: Entity) -> Option<Location> {
+        if self.is_alive(entity) {
+            return self.live_location(entity);
+        }
+        self.removals
+            .iter()
+            .rev()
+            .find(|removal| removal.entity == entity)
+            .and_then(|removal| removal.location)
+    }
+
+    /// Whether a query with `scope` can see `entity`.
+    pub(crate) fn in_scope(&self, scope: Scope, entity: Entity) -> bool {
+        match scope {
+            Scope::Everything => true,
+            Scope::Shared => !self
+                .location(entity)
+                .is_some_and(|location| location.isolated),
+            Scope::World(world) => self
+                .location(entity)
+                .is_some_and(|location| location.world == world),
+        }
     }
 
     // A separate counter for each invocation makes same-frame ordering visible.
@@ -367,11 +432,11 @@ impl Universe {
     }
 
     /// Returns a read-only query over the current universe, for use outside
-    /// systems. `Added`, `Changed` and `Delta` treat every present component
+    /// systems. It sees every world, including isolated ones. `Added`, `Changed` and `Delta` treat every present component
     /// as new, since there is no previous run to compare against.
     #[must_use]
     pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
-        Query::new(self, 0)
+        Query::new(self, 0, Scope::Everything)
     }
 
     /// Like [`Universe::query`], restricted by the filter `F`.
@@ -380,7 +445,7 @@ impl Universe {
     where
         D::Liveness: Join<F::Liveness>,
     {
-        Query::new(self, 0)
+        Query::new(self, 0, Scope::Everything)
     }
 
     /// Returns a shared borrow of a component, or `None` if the entity

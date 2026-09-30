@@ -8,7 +8,7 @@ use dirk_universe::{
         Query,
         filter::{Added, Changed, Without},
     },
-    systems::{Commands, DeltaTime, IntoSystem, System},
+    systems::{Commands, DeltaTime, IntoSystem, PerWorld, System},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -776,10 +776,13 @@ fn change_detection_survives_an_observer_skipping_ticks() {
 fn mutable_iteration_and_lookups_edit_live_values_in_one_system() {
     let mut universe = Universe::builder()
         .with_system(
-            |mut query: Query<(Entity, &mut Counter, &Step), Without<Hidden>>| {
-                let world = WorldId::default();
+            |mut worlds: PerWorld<Query<(Entity, &mut Counter, &Step), Without<Hidden>>>| {
+                // Only the first world, created first, is edited.
+                let Some((_, mut query)) = worlds.iter_mut().next() else {
+                    return;
+                };
                 let entities: Vec<_> = query
-                    .iter_in_world_mut(world)
+                    .iter_mut()
                     .map(|(entity, mut counter, step)| {
                         counter.0 += step.0;
                         entity
@@ -812,5 +815,8 @@ fn mutable_iteration_and_lookups_edit_live_values_in_one_system() {
     assert_eq!(universe.component::<Counter>(other_world).unwrap().0, 0);
     let query = universe.query_filtered::<(Entity, &Counter), Without<Hidden>>();
     assert!(query.get(hidden).is_none());
-    assert_eq!(query.iter_in_world(first).count(), 1);
+    let in_first = query
+        .iter()
+        .filter(|(entity, _)| universe.is_in_world(first, *entity));
+    assert_eq!(in_first.count(), 1);
 }

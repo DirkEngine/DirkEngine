@@ -71,8 +71,8 @@ assert!(universe.is_ok());
 
 Use `iter()` and `get(entity)` for read-only queries, or `iter_mut()` and
 `get_mut(entity)` for mutable queries. `&query` and `&mut query` also support
-iteration. `iter_in_world` and `iter_in_world_mut` restrict iteration to a world.
-Entity order is unspecified. Outside a system, `universe.query::<D>()` and
+iteration, and consuming a query iterates it by value. Entity order is
+unspecified. Outside a system, `universe.query::<D>()` and
 `universe.query_filtered::<D, F>()` provide read-only access.
 
 Component reads return `Ref<C>` guards and writes return `ComponentMut<C>`
@@ -132,6 +132,47 @@ world creation and destruction and entity spawns, moves and despawns. `World`
 and `InWorld` are read-only: queries can read them, but only the engine writes
 them. Because worlds are entities, `Query<Entity>` includes them; add
 `With<InWorld>` to match only entities inside worlds.
+
+## Worlds
+
+Worlds are like dimensions: entities in different worlds can interact, and a
+query spans every world by default. `PerWorld<P>` runs a query, or a tuple of
+queries, once per world instead, so only entities of the same world meet:
+
+```rust
+use dirk_universe::prelude::*;
+
+#[derive(Debug, Component)]
+struct Gravity(f64);
+#[derive(Debug, Component)]
+struct Velocity(f64);
+
+fn fall(gravity: Query<&Gravity>, mut worlds: PerWorld<Query<&mut Velocity>>) {
+    for (world, velocities) in &mut worlds {
+        let Some(gravity) = gravity.get(world.entity()) else { continue };
+        for mut velocity in velocities {
+            velocity.0 += gravity.0;
+        }
+    }
+}
+
+let universe = Universe::builder()
+    .with_world(World::builder("earth").with_component(Gravity(-9.8)))
+    .with_world(World::builder("pocket dimension").isolated())
+    .with_system(fall)
+    .build();
+assert!(universe.is_ok());
+```
+
+World-level data lives on the world entity, set with
+`WorldBuilder::with_component` or `Commands`. A world built with `.isolated()`
+is totally isolated: queries spanning worlds skip its entities, and entities
+cannot be sent into or out of it. The world entity itself, with its world-level
+data, stays visible. Only `PerWorld` reaches it, so systems that
+must see every world, such as renderers, read entities through `PerWorld`.
+`PerWorld` also visits worlds destroyed since the system last ran, so `Delta`
+reports their removals. An entity moving between worlds appears as `Set` in its
+destination; its previous world does not see it leave. Queries made outside systems see every world.
 
 Structural changes use `Commands` or submitted command buffers and apply at the
 start of the next tick. Buffers execute in submission order and commands in

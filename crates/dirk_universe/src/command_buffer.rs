@@ -15,7 +15,7 @@ pub struct CommandBuffer {
 }
 
 pub(crate) enum Command {
-    CreateWorld(WorldId, String),
+    CreateWorld(WorldId, WorldBuilder),
     DestroyWorld(WorldId),
     Spawn(Entity, EntityBuilder, WorldId),
     Despawn(Entity),
@@ -56,11 +56,12 @@ impl CommandBuffer {
     // WORLD MANAGEMENT
 
     /// Will create a new empty world & return its ID.
-    pub fn create_world(&mut self, builder: WorldBuilder) -> WorldId {
+    pub fn create_world(&mut self, mut builder: WorldBuilder) -> WorldId {
         let id = self.handle.allocator.allocate_world();
-        self.commands.push(Command::CreateWorld(id, builder.name));
+        let entities = std::mem::take(&mut builder.entities);
+        self.commands.push(Command::CreateWorld(id, builder));
 
-        for entity in builder.entities {
+        for entity in entities {
             self.spawn(id, entity);
         }
         id
@@ -88,7 +89,8 @@ impl CommandBuffer {
     pub fn despawn(&mut self, entity: Entity) {
         self.commands.push(Command::Despawn(entity));
     }
-    /// Will send the [`Entity`] to the specified [`WorldId`].
+    /// Will send the [`Entity`] to the specified [`WorldId`]. Entities cannot
+    /// be sent into or out of [`Isolated`](crate::Isolated) worlds.
     pub fn send(&mut self, entity: Entity, to: WorldId) {
         self.commands.push(Command::Send(entity, to));
     }

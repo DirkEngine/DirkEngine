@@ -9,7 +9,7 @@ use dirk_universe::{
     Entity,
     components::Component,
     query::{Delta, Query},
-    systems::System,
+    systems::{PerWorld, System},
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::warn;
@@ -61,10 +61,11 @@ impl ModelUploadSystem {
 }
 
 impl System for ModelUploadSystem {
-    type Params<'u> = Query<'u, (Entity, Delta<'u, Renderable>)>;
+    // Every world renders, isolated ones included.
+    type Params<'u> = PerWorld<'u, Query<'u, (Entity, Delta<'u, Renderable>)>>;
 
-    fn run(&mut self, renderables: Self::Params<'_>) {
-        for (entity, delta) in &renderables {
+    fn run(&mut self, worlds: Self::Params<'_>) {
+        for (entity, delta) in worlds.iter().flat_map(|(_, renderables)| renderables) {
             match delta {
                 Delta::Set(component) => {
                     if self

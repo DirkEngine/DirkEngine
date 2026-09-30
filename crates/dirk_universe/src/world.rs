@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use crate::{
     Entity, EntityBuilder,
-    components::{Component, ReadOnly},
+    components::{Component, MutableComponent, ReadOnly},
 };
 
 /// Identifies a [`World`]. Worlds are entities: the ID wraps the entity that
@@ -97,10 +97,24 @@ impl Component for InWorld {
     type Mutability = ReadOnly;
 }
 
+/// Marks a world whose entities only `PerWorld` queries reach: queries
+/// spanning worlds skip them, and entities cannot be sent into or out of it.
+/// The world entity itself, with its world-level components, stays visible to
+/// every query. Set it with [`WorldBuilder::isolated`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Isolated;
+
+impl Component for Isolated {
+    type Mutability = ReadOnly;
+}
+
 /// Builder struct for [`World`].
 #[derive(Default)]
 pub struct WorldBuilder {
     pub(crate) name: String,
+    /// Components of the world entity itself.
+    pub(crate) world: EntityBuilder,
+    pub(crate) isolated: bool,
     pub(crate) entities: Vec<EntityBuilder>,
 }
 
@@ -118,6 +132,20 @@ impl WorldBuilder {
     #[must_use]
     pub fn with_entity(mut self, entity: EntityBuilder) -> Self {
         self.entities.push(entity);
+        self
+    }
+
+    /// Adds a world-level component, such as gravity, to the world entity.
+    #[must_use]
+    pub fn with_component<C: MutableComponent>(mut self, component: C) -> Self {
+        self.world = self.world.with_component(component);
+        self
+    }
+
+    /// Isolates the world: see [`Isolated`].
+    #[must_use]
+    pub fn isolated(mut self) -> Self {
+        self.isolated = true;
         self
     }
 }
