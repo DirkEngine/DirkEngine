@@ -763,12 +763,12 @@ fn change_detection_survives_an_observer_skipping_ticks() {
         .expect("systems should schedule");
     let commands = RefCell::new(universe.handle().command_buffer());
     universe.tick(0.0);
-    observer.run(&universe, 0.0, &commands);
+    observer.run(&mut universe, 0.0, &commands);
     for _ in 0..3 {
         universe.tick(0.0);
     }
-    observer.run(&universe, 0.0, &commands);
-    observer.run(&universe, 0.0, &commands);
+    observer.run(&mut universe, 0.0, &commands);
+    observer.run(&mut universe, 0.0, &commands);
     assert_eq!(*seen.borrow(), vec![vec![1], vec![4], vec![]]);
 }
 
