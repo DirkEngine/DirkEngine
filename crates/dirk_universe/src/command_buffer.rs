@@ -38,7 +38,7 @@ impl CommandBuffer {
         self.commands
     }
 
-    /// Will submit the [`CommandBuffer`] to the [`Universe`]'s queue.
+    /// Will submit the [`CommandBuffer`] to the [`Universe`](crate::Universe)'s queue.
     pub fn submit(self) {
         let sender = self.handle.buffer_sender.clone();
         if sender.send(self).is_err() {
@@ -100,17 +100,19 @@ impl CommandBuffer {
     /// Attaches a [`Component`] to [`Entity`], replacing any existing component of
     /// the same type.
     ///
-    /// Records an addition or an update containing both the old and new values.
+    /// The component counts as added, or as changed when it replaces one; the
+    /// previous value is dropped.
     ///
     /// [`Entity`]: crate::Entity
     pub fn set_component<C: Component>(&mut self, entity: Entity, component: C) {
         self.commands
             .push(Command::SetComponent(entity, Box::new(component)));
     }
-    /// Removes a single component and records its old value if present.
+    /// Removes a single component, dropping its value immediately and
+    /// recording a `ComponentRemoved` event.
     ///
     /// The entity itself is **not** despawned. If the component is not
-    /// present this is a no-op.
+    /// present this is a no-op and records nothing.
     pub fn remove_component<C: Component>(&mut self, entity: Entity) {
         self.commands
             .push(Command::RemoveComponent(entity, TypeId::of::<C>()));
