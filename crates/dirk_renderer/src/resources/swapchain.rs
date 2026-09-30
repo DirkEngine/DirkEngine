@@ -243,7 +243,13 @@ impl Swapchain {
                 .swapchain_loader
                 .create_swapchain(&create_info, None)?
         };
-        let images = unsafe { device.swapchain_loader.get_swapchain_images(swapchain)? };
+        let images = match unsafe { device.swapchain_loader.get_swapchain_images(swapchain) } {
+            Ok(images) => images,
+            Err(error) => {
+                Self::destroy_raw(device, swapchain);
+                return Err(error.into());
+            }
+        };
 
         let swapchain_images = match images
             .into_iter()
