@@ -8,7 +8,7 @@ use dirk_player::PlayerId;
 use dirk_universe::{
     Entity, InWorld, World, WorldId,
     query::{Delta, Query},
-    systems::System,
+    systems::{PerWorld, System},
 };
 use dirk_world::components::{Renderable, Transform};
 
@@ -81,15 +81,21 @@ impl RendererSystem {
 }
 
 impl System for RendererSystem {
+    // Every world renders, isolated ones included, so entities are read per world.
     type Params<'u> = (
         Query<'u, (Entity, Delta<'u, World>)>,
-        Query<'u, (Entity, Delta<'u, InWorld>)>,
-        Query<'u, (Entity, Delta<'u, Renderable>)>,
-        Query<'u, (Entity, Delta<'u, Transform>)>,
-        Query<'u, (Entity, Delta<'u, PlayerId>)>,
+        PerWorld<
+            'u,
+            (
+                Query<'u, (Entity, Delta<'u, InWorld>)>,
+                Query<'u, (Entity, Delta<'u, Renderable>)>,
+                Query<'u, (Entity, Delta<'u, Transform>)>,
+                Query<'u, (Entity, Delta<'u, PlayerId>)>,
+            ),
+        >,
     );
 
-    fn run(&mut self, (worlds, locations, meshes, transforms, players): Self::Params<'_>) {
+    fn run(&mut self, (worlds, entities): Self::Params<'_>) {
         // Scenes exist before their proxies, and proxies are destroyed before
         // their scenes. Component updates apply to proxies that remain.
         let mut destroyed_worlds = Vec::new();
@@ -107,23 +113,24 @@ impl System for RendererSystem {
         }
 
         let mut despawned = HashSet::new();
-        for (entity, delta) in &locations {
-            match delta {
-                Delta::Set(in_world) => self.place(entity, in_world.0),
-                Delta::Removed => {
-                    despawned.insert(entity);
+        for (_, (locations, meshes, transforms, players)) in &entities {
+            for (entity, delta) in locations {
+                match delta {
+                    Delta::Set(in_world) => self.place(entity, in_world.0),
+                    Delta::Removed => {
+                        despawned.insert(entity);
+                    }
                 }
             }
-        }
-
-        for (entity, delta) in meshes.iter().filter(|(e, _)| !despawned.contains(e)) {
-            self.mesh(entity, delta.value());
-        }
-        for (entity, delta) in transforms.iter().filter(|(e, _)| !despawned.contains(e)) {
-            self.transform(entity, delta.value());
-        }
-        for (entity, delta) in players.iter().filter(|(e, _)| !despawned.contains(e)) {
-            self.player(entity, delta.value().copied());
+            for (entity, delta) in meshes.iter().filter(|(e, _)| !despawned.contains(e)) {
+                self.mesh(entity, delta.value());
+            }
+            for (entity, delta) in transforms.iter().filter(|(e, _)| !despawned.contains(e)) {
+                self.transform(entity, delta.value());
+            }
+            for (entity, delta) in players.iter().filter(|(e, _)| !despawned.contains(e)) {
+                self.player(entity, delta.value().copied());
+            }
         }
 
         for entity in despawned {

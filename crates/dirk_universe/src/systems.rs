@@ -11,9 +11,9 @@ use std::{
 };
 
 use crate::{
-    CommandBuffer, Universe,
+    CommandBuffer, Universe, WorldId,
     macros::sealed::Sealed,
-    query::{Join, Query, QueryData, filter::QueryFilter},
+    query::{Join, Query, QueryData, ReadOnlyQueryData, Scope, filter::QueryFilter},
     schedule::{Access, SystemConfig, SystemId},
 };
 
@@ -74,12 +74,194 @@ where
     type Item<'u> = Query<'u, D, F>;
 
     fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
-        Query::new(context.universe, context.last_run)
+        Query::new(context.universe, context.last_run, Scope::Shared)
     }
 
     fn register_access(access: &mut Access) {
         D::register_access(access);
         F::register_access(access);
+    }
+}
+
+/// Parameters that can be restricted to one world: queries and tuples of them.
+pub trait WorldScoped: SystemParam {
+    /// Fetches this parameter, seeing only the entities of `world`.
+    #[doc(hidden)]
+    fn fetch_in(universe: &Universe, last_run: u64, world: WorldId) -> Self::Item<'_>;
+}
+
+impl<D: QueryData, F: QueryFilter> WorldScoped for Query<'_, D, F>
+where
+    D::Liveness: Join<F::Liveness>,
+{
+    fn fetch_in(universe: &Universe, last_run: u64, world: WorldId) -> Self::Item<'_> {
+        Query::new(universe, last_run, Scope::World(world))
+    }
+}
+
+macro_rules! impl_world_scoped_for_tuple {
+    ($($ty:ident $binding:ident),+) => {
+        impl<$($ty: WorldScoped),+> WorldScoped for ($($ty,)+) {
+            fn fetch_in(universe: &Universe, last_run: u64, world: WorldId) -> Self::Item<'_> {
+                ($($ty::fetch_in(universe, last_run, world),)+)
+            }
+        }
+    };
+}
+all_tuples!(impl_world_scoped_for_tuple);
+
+/// World-scoped parameters that only read, which may be fetched several
+/// times at once.
+pub trait ReadOnlyWorldScoped: WorldScoped {}
+
+impl<D: ReadOnlyQueryData, F: QueryFilter> ReadOnlyWorldScoped for Query<'_, D, F> where
+    D::Liveness: Join<F::Liveness>
+{
+}
+
+macro_rules! impl_read_only_world_scoped_for_tuple {
+    ($($ty:ident $binding:ident),+) => {
+        impl<$($ty: ReadOnlyWorldScoped),+> ReadOnlyWorldScoped for ($($ty,)+) {}
+    };
+}
+all_tuples!(impl_read_only_world_scoped_for_tuple);
+
+/// Runs `P`, a query or a tuple of queries, once per world. Each world's
+/// queries see only that world's entities, including in isolated worlds,
+/// which queries spanning worlds skip. Worlds destroyed since the system last
+/// ran are visited too, so `Delta` reports their removals.
+///
+/// An entity moving between worlds appears as `Set` in its destination; its
+/// previous world does not see it leave. World entities belong to no world,
+/// so read world-level data with a query spanning worlds and
+/// [`WorldId::entity`].
+///
+/// Mutable queries are iterated through `&mut`, so each world's data is
+/// handed out once; iterating them through `&` does not compile:
+///
+/// ```compile_fail
+/// # use dirk_universe::prelude::*;
+/// # #[derive(Debug, Clone, Component)] struct Position(f64);
+/// fn twice(worlds: PerWorld<Query<&mut Position>>) {
+///     let first = worlds.iter().next();
+///     let second = worlds.iter().next();
+/// }
+/// ```
+///
+/// ```
+/// # use dirk_universe::prelude::*;
+/// # #[derive(Debug, Clone, Component)] struct Position(f64);
+/// fn separate(mut worlds: PerWorld<Query<(Entity, &mut Position)>>) {
+///     for (world, mut positions) in &mut worlds {
+///         for (entity, mut position) in &mut positions {
+///             // Only entities of `world` interact here.
+///         }
+///     }
+/// }
+/// ```
+pub struct PerWorld<'u, P: WorldScoped> {
+    universe: &'u Universe,
+    last_run: u64,
+    worlds: Vec<WorldId>,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<P: WorldScoped> PerWorld<'_, P> {
+    /// Iterates over worlds, in creation order, with `P` scoped to each.
+    /// Items borrow this `PerWorld`, so each world's data is handed out once.
+    #[must_use]
+    pub fn iter_mut(&mut self) -> PerWorldIter<'_, P> {
+        PerWorldIter::new(self.universe, self.last_run, self.worlds.clone())
+    }
+}
+
+impl<P: ReadOnlyWorldScoped> PerWorld<'_, P> {
+    /// Iterates over worlds, in creation order, with read-only `P` scoped to
+    /// each.
+    #[must_use]
+    pub fn iter(&self) -> PerWorldIter<'_, P> {
+        PerWorldIter::new(self.universe, self.last_run, self.worlds.clone())
+    }
+}
+
+impl<'u, P: WorldScoped> IntoIterator for PerWorld<'u, P> {
+    type Item = (WorldId, P::Item<'u>);
+    type IntoIter = PerWorldIter<'u, P>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PerWorldIter::new(self.universe, self.last_run, self.worlds)
+    }
+}
+
+impl<'a, P: WorldScoped> IntoIterator for &'a mut PerWorld<'_, P> {
+    type Item = (WorldId, P::Item<'a>);
+    type IntoIter = PerWorldIter<'a, P>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<'a, P: ReadOnlyWorldScoped> IntoIterator for &'a PerWorld<'_, P> {
+    type Item = (WorldId, P::Item<'a>);
+    type IntoIter = PerWorldIter<'a, P>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// An iterator over the worlds of a [`PerWorld`].
+pub struct PerWorldIter<'a, P: WorldScoped> {
+    universe: &'a Universe,
+    last_run: u64,
+    worlds: std::vec::IntoIter<WorldId>,
+    _marker: PhantomData<fn() -> P>,
+}
+
+impl<'a, P: WorldScoped> PerWorldIter<'a, P> {
+    fn new(universe: &'a Universe, last_run: u64, worlds: Vec<WorldId>) -> Self {
+        Self {
+            universe,
+            last_run,
+            worlds: worlds.into_iter(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, P: WorldScoped> Iterator for PerWorldIter<'a, P> {
+    type Item = (WorldId, P::Item<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let world = self.worlds.next()?;
+        Some((world, P::fetch_in(self.universe, self.last_run, world)))
+    }
+}
+
+impl<P: WorldScoped> Sealed for PerWorld<'_, P> {}
+impl<P: WorldScoped> SystemParam for PerWorld<'_, P> {
+    type Item<'u> = PerWorld<'u, P>;
+
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        let universe = context.universe;
+        let mut worlds: Vec<_> = universe
+            .worlds()
+            .map(|world| world.id())
+            .chain(universe.worlds_removed_since(context.last_run))
+            .collect();
+        worlds.sort_by_key(|world| world.raw());
+        worlds.dedup();
+        PerWorld {
+            universe,
+            last_run: context.last_run,
+            worlds,
+            _marker: PhantomData,
+        }
+    }
+
+    fn register_access(access: &mut Access) {
+        P::register_access(access);
     }
 }
 

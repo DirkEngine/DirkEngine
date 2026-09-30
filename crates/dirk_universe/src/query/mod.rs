@@ -27,37 +27,40 @@ use std::{
 pub struct Query<'u, D: QueryData, F: QueryFilter = ()> {
     universe: &'u Universe,
     last_run: u64,
+    scope: Scope,
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
+/// The entities a query can see.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope {
+    /// Entities outside isolated worlds, as seen by systems.
+    Shared,
+    /// Entities in one world, including isolated ones, as seen through `PerWorld`.
+    World(WorldId),
+    /// Every entity, as seen from outside systems.
+    Everything,
+}
+
 impl<'u, D: QueryData, F: QueryFilter> Query<'u, D, F> {
-    pub(crate) fn new(universe: &'u Universe, last_run: u64) -> Self {
+    pub(crate) fn new(universe: &'u Universe, last_run: u64, scope: Scope) -> Self {
         Self {
             universe,
             last_run,
+            scope,
             _marker: PhantomData,
         }
     }
 
-    fn iterator(&self, world: Option<WorldId>) -> QueryIter<'_, D, F> {
-        let candidates = if D::Liveness::TRACKED {
-            let mut entities = HashSet::new();
-            D::candidates(self.universe, self.last_run, &mut entities);
-            Candidates::Listed(entities.into_iter())
-        } else {
-            Candidates::Alive(self.universe.alive.iter())
-        };
-        QueryIter {
-            candidates,
-            universe: self.universe,
-            last_run: self.last_run,
-            world,
-            _marker: PhantomData,
-        }
+    fn iterator(&self) -> QueryIter<'_, D, F> {
+        QueryIter::new(self.universe, self.last_run, self.scope)
     }
 
     fn fetch(&self, entity: Entity) -> Option<D::Item<'_>> {
         if !D::Liveness::TRACKED && !self.universe.is_alive(entity) {
+            return None;
+        }
+        if !self.universe.in_scope(self.scope, entity) {
             return None;
         }
         if !F::matches(entity, self.universe, self.last_run) {
@@ -68,12 +71,7 @@ impl<'u, D: QueryData, F: QueryFilter> Query<'u, D, F> {
 
     /// Iterates over matching entities, allowing component mutation.
     pub fn iter_mut(&mut self) -> QueryIter<'_, D, F> {
-        self.iterator(None)
-    }
-
-    /// Iterates over matching entities in one world, allowing mutation.
-    pub fn iter_in_world_mut(&mut self, world: WorldId) -> QueryIter<'_, D, F> {
-        self.iterator(Some(world))
+        self.iterator()
     }
 
     /// Borrows one matching entity's data for mutation.
@@ -86,13 +84,7 @@ impl<D: ReadOnlyQueryData, F: QueryFilter> Query<'_, D, F> {
     /// Iterates over matching entities.
     #[must_use]
     pub fn iter(&self) -> QueryIter<'_, D, F> {
-        self.iterator(None)
-    }
-
-    /// Iterates over matching entities in one world.
-    #[must_use]
-    pub fn iter_in_world(&self, world: WorldId) -> QueryIter<'_, D, F> {
-        self.iterator(Some(world))
+        self.iterator()
     }
 
     /// Borrows one entity if it matches this query.
@@ -125,8 +117,27 @@ pub struct QueryIter<'u, D: QueryData, F: QueryFilter> {
     candidates: Candidates<'u>,
     universe: &'u Universe,
     last_run: u64,
-    world: Option<WorldId>,
+    scope: Scope,
     _marker: PhantomData<fn() -> (D, F)>,
+}
+
+impl<'u, D: QueryData, F: QueryFilter> QueryIter<'u, D, F> {
+    fn new(universe: &'u Universe, last_run: u64, scope: Scope) -> Self {
+        let candidates = if D::Liveness::TRACKED {
+            let mut entities = HashSet::new();
+            D::candidates(universe, last_run, &mut entities);
+            Candidates::Listed(entities.into_iter())
+        } else {
+            Candidates::Alive(universe.alive.iter())
+        };
+        Self {
+            candidates,
+            universe,
+            last_run,
+            scope,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'u, D: QueryData, F: QueryFilter> Iterator for QueryIter<'u, D, F> {
@@ -134,9 +145,7 @@ impl<'u, D: QueryData, F: QueryFilter> Iterator for QueryIter<'u, D, F> {
 
     fn next(&mut self) -> Option<Self::Item> {
         for entity in self.candidates.by_ref() {
-            if self
-                .world
-                .is_some_and(|world| !self.universe.is_in_world(world, entity))
+            if !self.universe.in_scope(self.scope, entity)
                 || !F::matches(entity, self.universe, self.last_run)
             {
                 continue;
@@ -146,6 +155,17 @@ impl<'u, D: QueryData, F: QueryFilter> Iterator for QueryIter<'u, D, F> {
             }
         }
         None
+    }
+}
+
+/// Consuming a query iterates it for as long as the universe is borrowed,
+/// which lets per-world queries be flattened.
+impl<'u, D: QueryData, F: QueryFilter> IntoIterator for Query<'u, D, F> {
+    type Item = D::Item<'u>;
+    type IntoIter = QueryIter<'u, D, F>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        QueryIter::new(self.universe, self.last_run, self.scope)
     }
 }
 
