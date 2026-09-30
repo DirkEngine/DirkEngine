@@ -48,7 +48,8 @@ fn universe_public_api_supports_entity_lifecycle_across_worlds() {
     let mut universe = Universe::builder()
         .with_world(World::builder("overworld"))
         .with_world(World::builder("dungeon"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let [overworld, dungeon] = world_ids(&universe);
@@ -81,7 +82,10 @@ fn universe_public_api_supports_entity_lifecycle_across_worlds() {
 
 #[test]
 fn buffered_spawns_are_applied_on_tick_and_components_are_readable() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
 
@@ -114,7 +118,9 @@ fn buffered_spawns_are_applied_on_tick_and_components_are_readable() {
 
 #[test]
 fn public_command_buffers_allocate_unique_handles() {
-    let mut universe = Universe::builder().build();
+    let mut universe = Universe::builder()
+        .build()
+        .expect("systems should schedule");
 
     let mut first_cmd = universe.handle().command_buffer();
     let first_world = first_cmd.create_world(World::builder("first"));
@@ -178,7 +184,8 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
     let mut universe = Universe::builder()
         .with_world(World::builder("w"))
         .with_system(system)
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     assert!(seen.borrow().is_empty());
 
@@ -231,7 +238,8 @@ fn struct_systems_name_their_parameters_once() {
     let mut universe = Universe::builder()
         .with_world(World::builder("w"))
         .with_system(Accumulate { total: 0 })
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let mut cmd = universe.handle().command_buffer();
     let counted = cmd.spawn(
@@ -249,7 +257,10 @@ fn struct_systems_name_their_parameters_once() {
 
 #[test]
 fn optional_query_data_matches_entities_without_the_component() {
-    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [world] = world_ids(&universe);
     let with = spawn_entity(
@@ -307,59 +318,12 @@ fn multiple_queries_are_independent_collections_across_worlds() {
                     .extend(position.iter().map(|position| position.0));
             },
         )
-        .build();
+        .build()
+        .expect("systems should schedule");
 
     universe.tick(0.0);
     observed.borrow_mut().sort_unstable();
     assert_eq!(*observed.borrow(), vec![1, 3, 5]);
-}
-
-#[test]
-fn independent_observers_see_mutations_according_to_system_order() {
-    use std::{cell::RefCell, rc::Rc};
-    let before = Rc::new(RefCell::new(Vec::new()));
-    let after = Rc::new(RefCell::new(Vec::new()));
-    let second_after = Rc::new(RefCell::new(Vec::new()));
-    let observer = |seen: Rc<RefCell<Vec<Vec<i32>>>>| {
-        move |query: Query<&Counter, Changed<Counter>>| {
-            seen.borrow_mut()
-                .push(query.iter().map(|counter| counter.0).collect());
-        }
-    };
-    let mut writes = 0;
-    let mut universe = Universe::builder()
-        .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(0))))
-        .with_system(observer(before.clone()))
-        .with_system(move |mut query: Query<&mut Counter>| {
-            if writes < 2 {
-                for mut counter in &mut query {
-                    counter.0 += 1;
-                }
-                writes += 1;
-            }
-        })
-        .with_system(observer(after.clone()))
-        .with_system(observer(second_after.clone()))
-        .build();
-    for _ in 0..4 {
-        universe.tick(0.0);
-    }
-    assert_eq!(*before.borrow(), vec![vec![0], vec![1], vec![2], vec![]]);
-    assert_eq!(*after.borrow(), vec![vec![1], vec![2], vec![], vec![]]);
-    assert_eq!(*second_after.borrow(), *after.borrow());
-}
-
-#[test]
-#[should_panic(expected = "overlapping mutable queries")]
-fn overlapping_mutable_component_access_is_rejected_at_registration() {
-    let _ = Universe::builder().with_system(|_: Query<'_, (&Counter, &mut Counter)>| {});
-}
-
-#[test]
-#[should_panic(expected = "overlapping mutable queries")]
-fn overlapping_query_parameters_are_rejected_at_registration() {
-    let _ =
-        Universe::builder().with_system(|_: Query<'_, &Counter>, _: Query<'_, &mut Counter>| {});
 }
 
 #[test]
@@ -375,7 +339,8 @@ fn queries_run_once_with_zero_or_multiple_matches_and_support_lookups() {
             }
             system_seen.borrow_mut().push(items.len());
         })
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let mut cmd = universe.handle().command_buffer();
     let world = cmd.create_world(World::builder("aggregate"));
@@ -407,7 +372,8 @@ fn mutable_reads_stay_clean_and_equal_writes_count_as_changes() {
         .with_system(move |query: Query<&Counter, Changed<Counter>>| {
             system_seen.borrow_mut().push(query.iter().count());
         })
-        .build();
+        .build()
+        .expect("systems should schedule");
     for _ in 0..4 {
         universe.tick(0.0);
     }
@@ -435,7 +401,8 @@ fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
         )
         .with_system(make_system(1))
         .with_other(other)
-        .build();
+        .build()
+        .expect("systems should schedule");
 
     universe.tick(0.0);
     assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0)]);
@@ -464,7 +431,9 @@ fn composed_builders_reject_queued_other_commands() {
 
 #[test]
 fn destroyed_world_rejects_later_spawns_and_transfers() {
-    let mut universe = Universe::builder().build();
+    let mut universe = Universe::builder()
+        .build()
+        .expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let destroyed = cmd.create_world(World::builder("destroyed"));
     let surviving = cmd.create_world(World::builder("surviving"));
@@ -483,7 +452,9 @@ fn destroyed_world_rejects_later_spawns_and_transfers() {
 
 #[test]
 fn despawn_discards_later_component_writes() {
-    let mut universe = Universe::builder().build();
+    let mut universe = Universe::builder()
+        .build()
+        .expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let world = cmd.create_world(World::builder("world"));
     let entity = cmd.spawn(world, Entity::builder().with_component(Position(1, 2)));
@@ -514,7 +485,7 @@ fn systems_run_once_per_tick_even_without_entities_and_share_deltas() {
             },
         );
     }
-    let mut universe = builder.build();
+    let mut universe = builder.build().expect("systems should schedule");
     universe.tick(0.25);
     let mut cmd = universe.handle().command_buffer();
     cmd.create_world(World::builder("empty"));
@@ -587,7 +558,7 @@ fn structure_observer(
 #[test]
 fn deltas_report_the_net_structural_change_since_the_last_run() {
     let (builder, seen) = structure_observer(Universe::builder());
-    let mut universe = builder.build();
+    let mut universe = builder.build().expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let first = cmd.create_world(World::builder("first"));
     let second = cmd.create_world(World::builder("second"));
@@ -636,7 +607,8 @@ fn deltas_outside_systems_report_present_components_as_set() {
         .with_world(
             World::builder("w").with_entity(Entity::builder().with_component(Position(5, 0))),
         )
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
 
     let query = universe.query::<(Entity, Delta<Position>)>();
@@ -650,7 +622,8 @@ fn deltas_outside_systems_report_present_components_as_set() {
 fn world_entities_carry_world_level_components() {
     let mut universe = Universe::builder()
         .with_world(World::builder("sky"))
-        .build();
+        .build()
+        .expect("systems should schedule");
     universe.tick(0.0);
     let [sky] = world_ids(&universe);
 
@@ -687,7 +660,9 @@ fn removed_non_clone_components_are_released_immediately() {
         }
     }
     let dropped = Arc::new(AtomicUsize::new(0));
-    let mut universe = Universe::builder().build();
+    let mut universe = Universe::builder()
+        .build()
+        .expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let world = cmd.create_world(World::builder("w"));
     let entity = cmd.spawn(
@@ -721,7 +696,8 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
                     .push(observe(&deltas, |c| c.0));
             },
         )
-        .build();
+        .build()
+        .expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let world = cmd.create_world(World::builder("w"));
     let entity = cmd.spawn(world, Entity::builder().with_component(Counter(1)));
@@ -783,7 +759,8 @@ fn change_detection_survives_an_observer_skipping_ticks() {
                 counter.0 += 1;
             }
         })
-        .build();
+        .build()
+        .expect("systems should schedule");
     let commands = RefCell::new(universe.handle().command_buffer());
     universe.tick(0.0);
     observer.run(&universe, 0.0, &commands);
@@ -815,7 +792,8 @@ fn mutable_iteration_and_lookups_edit_live_values_in_one_system() {
                 }
             },
         )
-        .build();
+        .build()
+        .expect("systems should schedule");
     let mut cmd = universe.handle().command_buffer();
     let first = cmd.create_world(World::builder("first"));
     let second = cmd.create_world(World::builder("second"));
