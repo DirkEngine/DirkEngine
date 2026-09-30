@@ -25,6 +25,9 @@ use query::{Join, Query, ReadOnlyQueryData, filter::QueryFilter};
 pub mod systems;
 use systems::{BoxedSystem, IntoSystem};
 
+pub mod schedule;
+use schedule::{Schedule, ScheduleError, SystemConfig};
+
 mod command_buffer;
 use command_buffer::Command;
 pub use command_buffer::CommandBuffer;
@@ -103,6 +106,7 @@ pub struct Universe {
     // Systems mutate their own state while borrowing the universe's component
     // data. Only tick borrows this private list, so callbacks cannot reborrow it.
     systems: RefCell<Vec<BoxedSystem>>,
+    schedule: Schedule,
 
     components: Components,
     removals: Vec<Removal>,
@@ -118,13 +122,14 @@ impl Universe {
         UniverseBuilder::new()
     }
 
-    #[must_use]
-    fn build(builder: UniverseBuilder) -> Self {
+    fn build(builder: UniverseBuilder) -> Result<Self, ScheduleError> {
+        let (systems, schedule) = schedule::build(builder.systems)?;
         let universe = Self {
             alive: HashSet::new(),
             handle: builder.handle,
             buffer_receiver: builder.buffer_receiver,
-            systems: RefCell::new(builder.systems),
+            systems: RefCell::new(systems),
+            schedule,
             components: Components::default(),
             removals: Vec::new(),
             change_tick: Cell::new(0),
@@ -136,7 +141,7 @@ impl Universe {
             cmd.create_world(builder);
         }
         cmd.submit();
-        universe
+        Ok(universe)
     }
 
     /// Returns a cheap handle to the [`Universe`].
@@ -145,9 +150,16 @@ impl Universe {
         self.handle.clone()
     }
 
+    /// Returns the order in which systems run, with the reasons for it.
+    #[must_use]
+    pub fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+
     /// Applies queued commands, then runs systems against the resulting universe.
     ///
-    /// Systems run once each, in registration order, even with no entities.
+    /// Systems run once each, in [`schedule`](Self::schedule) order, even
+    /// with no entities.
     /// Commands produced by any system become visible on the next tick.
     /// Mutable query edits are visible to later systems in the same tick.
     /// `delta_time` is measured in seconds.
@@ -388,7 +400,7 @@ pub struct UniverseBuilder {
     handle: UniverseHandle,
     buffer_receiver: Receiver<CommandBuffer>,
     worlds: Vec<WorldBuilder>,
-    systems: Vec<BoxedSystem>,
+    systems: Vec<SystemConfig>,
 }
 
 impl UniverseBuilder {
@@ -412,9 +424,16 @@ impl UniverseBuilder {
         self.handle.clone()
     }
 
-    /// Will build a new [`Universe`] from the current builder.
-    #[must_use]
-    pub fn build(self) -> Universe {
+    /// Will build a new [`Universe`] from the current builder, ordering its
+    /// systems from the data they access.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ScheduleError`] when systems conflict: one system borrows
+    /// a component incompatibly, two systems write a component in no defined
+    /// order, systems depend on each other in a cycle, or a system is ordered
+    /// against one that was never registered.
+    pub fn build(self) -> Result<Universe, ScheduleError> {
         Universe::build(self)
     }
 
@@ -425,7 +444,8 @@ impl UniverseBuilder {
         self
     }
 
-    /// Adds a system to run on each tick, in registration order.
+    /// Adds a system to run on each tick. Systems reading a component run
+    /// after the systems writing it; see [`schedule`] for the full rules.
     ///
     /// Functions declare queries, commands, and delta time through their
     /// arguments. Stateful [`systems::System`] implementations use
@@ -433,11 +453,13 @@ impl UniverseBuilder {
     /// are applied on the following tick.
     #[must_use]
     pub fn with_system<Marker>(mut self, system: impl IntoSystem<Marker>) -> Self {
-        self.systems.push(system.into_system());
+        self.systems.push(system.into_config());
         self
     }
 
-    /// Appends the worlds and systems configured on `other`.
+    /// Appends the worlds and systems configured on `other`. Systems that
+    /// depend on each other are ordered the same whatever the merge order;
+    /// unrelated systems keep their registration order.
     ///
     /// Only configuration can be merged. Handles from independent builders
     /// allocate overlapping IDs and submit to different queues, so `other`
