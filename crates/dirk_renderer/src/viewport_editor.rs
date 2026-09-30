@@ -350,11 +350,14 @@ fn draw_viewport_window(
                 state: ButtonState::Released,
                 ..
             }
-            | InputEvent::PointerLeft => captured = false,
+            | InputEvent::PointerLeft
+            | InputEvent::FocusChanged(false) => captured = false,
             InputEvent::Key { .. }
             | InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::FocusChanged(true)
+            | InputEvent::ModifiersChanged(_) => {}
         }
     }
     let latest_pointer = ui.input(|input| input.pointer.latest_pos());

@@ -74,14 +74,17 @@ impl Platform {
             window_consumer: events.subscribe(),
         };
 
-        // Pump until `can_create_surfaces` fires and the main window exists.
+        // Pump until `can_create_surfaces` creates the main window or fails.
         // Each call returns quickly; the OS dispatches the startup events
         // within the first few iterations.
         while !platform.handler.is_initialized() {
-            match platform
+            let status = platform
                 .event_loop
-                .pump_app_events(Some(Duration::ZERO), &mut platform.handler)
-            {
+                .pump_app_events(Some(Duration::ZERO), &mut platform.handler);
+            if let Some(err) = platform.handler.take_error() {
+                return Err(Error::WindowCreation(err));
+            }
+            match status {
                 PumpStatus::Exit(code) => return Err(Error::AppExited(code)),
                 PumpStatus::Continue => {}
             }
@@ -109,10 +112,13 @@ impl dirk_engine::Subsystem for Platform {
         handle: &dirk_engine::EngineHandle,
         _universe: &Universe,
     ) -> anyhow::Result<()> {
-        match self
+        let status = self
             .event_loop
-            .pump_app_events(Some(Duration::ZERO), &mut self.handler)
-        {
+            .pump_app_events(Some(Duration::ZERO), &mut self.handler);
+        if let Some(err) = self.handler.take_error() {
+            return Err(Error::WindowCreation(err).into());
+        }
+        match status {
             PumpStatus::Exit(code) => {
                 // Treat a forced OS exit like a window close.
                 info!("event loop exited with code {code}");

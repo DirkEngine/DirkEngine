@@ -190,6 +190,12 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+    /// The active keyboard modifiers changed, including being released
+    /// implicitly when the input region loses focus.
+    ModifiersChanged(Modifiers),
+    /// The input region gained or lost keyboard focus. Losing focus releases
+    /// held input even when the OS does not send matching release events.
+    FocusChanged(bool),
 }
 
 /// A raw input that can activate an [`InputAction`].
@@ -336,9 +342,11 @@ impl InputState {
             }
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerEntered
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::FocusChanged(true)
+            | InputEvent::ModifiersChanged(_) => {}
             // release held keys
-            InputEvent::PointerLeft => {
+            InputEvent::PointerLeft | InputEvent::FocusChanged(false) => {
                 self.held.clear();
             }
         }
@@ -453,30 +461,32 @@ mod tests {
             modifiers: Modifiers::default(),
         });
 
-        assert_eq!(map.movement(&input).x, 0.0);
+        assert!(map.movement(&input).x.abs() < f32::EPSILON);
     }
 
     #[test]
-    fn pointer_left_clears_all_held_bindings() {
-        let mut input = InputState::default();
-        let pointer_binding = InputBinding::PointerButton(PointerButton::Secondary);
-        let key_binding = InputBinding::Key(LogicalKey::character("w"));
-        input.handle_event(&InputEvent::PointerButton {
-            button: PointerButton::Secondary,
-            state: ButtonState::Pressed,
-            position: NormalizedPosition::new(glam::Vec2::ZERO),
-            modifiers: Modifiers::default(),
-        });
-        input.handle_event(&InputEvent::Key {
-            key: LogicalKey::character("w"),
-            state: ButtonState::Pressed,
-            repeat: false,
-            modifiers: Modifiers::default(),
-        });
+    fn focus_loss_and_pointer_exit_clear_all_held_bindings() {
+        for release in [InputEvent::PointerLeft, InputEvent::FocusChanged(false)] {
+            let mut input = InputState::default();
+            let pointer_binding = InputBinding::PointerButton(PointerButton::Secondary);
+            let key_binding = InputBinding::Key(LogicalKey::character("w"));
+            input.handle_event(&InputEvent::PointerButton {
+                button: PointerButton::Secondary,
+                state: ButtonState::Pressed,
+                position: NormalizedPosition::new(glam::Vec2::ZERO),
+                modifiers: Modifiers::default(),
+            });
+            input.handle_event(&InputEvent::Key {
+                key: LogicalKey::character("w"),
+                state: ButtonState::Pressed,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            });
 
-        input.handle_event(&InputEvent::PointerLeft);
+            input.handle_event(&release);
 
-        assert!(!input.is_held(&pointer_binding));
-        assert!(!input.is_held(&key_binding));
+            assert!(!input.is_held(&pointer_binding));
+            assert!(!input.is_held(&key_binding));
+        }
     }
 }

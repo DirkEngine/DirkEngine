@@ -4,7 +4,7 @@ use dirk_input::{
     ButtonState, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition,
     PointerButton, ScrollUnit,
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseScrollDelta, WindowEvent},
@@ -19,7 +19,11 @@ use crate::{
 };
 
 pub struct PlatformHandler {
-    can_create_surfaces: bool,
+    /// Whether `can_create_surfaces` has already created the main window.
+    /// Later calls (e.g. on resume) must not open additional main windows.
+    main_window_created: bool,
+    /// Error raised inside a winit callback, surfaced by the next pump.
+    error: Option<anyhow::Error>,
     #[cfg(platform_macos)]
     shutdown_requested: bool,
     windows: PlatformWindows,
@@ -41,7 +45,8 @@ pub struct PlatformHandler {
 impl PlatformHandler {
     pub fn new(events: &dirk_events::EventManager, windows: PlatformWindows) -> Self {
         Self {
-            can_create_surfaces: false,
+            main_window_created: false,
+            error: None,
             #[cfg(platform_macos)]
             shutdown_requested: false,
             windows,
@@ -67,7 +72,11 @@ impl PlatformHandler {
         Ok(window_id)
     }
     pub fn is_initialized(&self) -> bool {
-        self.can_create_surfaces
+        self.main_window_created
+    }
+    /// Takes the error raised by the last winit callback, if any.
+    pub fn take_error(&mut self) -> Option<anyhow::Error> {
+        self.error.take()
     }
     pub fn shutdown(&mut self) {
         let count = self.windows.clear();
@@ -107,6 +116,13 @@ impl PlatformHandler {
                     .dispatch(PlatformWindowEvent::ThemeChanged { id, theme: *theme });
             }
             WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.pointer_positions.remove(&id);
+                    // Focus loss can consume the matching key/button and
+                    // modifier releases.
+                    self.set_modifiers(id, ModifiersState::default());
+                }
+                self.dispatch_input(id, InputEvent::FocusChanged(*focused));
                 self.window_dispatcher
                     .dispatch(PlatformWindowEvent::FocusChanged {
                         id,
@@ -129,8 +145,7 @@ impl PlatformHandler {
     fn dispatch_input_event(&mut self, id: WindowId, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::ModifiersChanged(new_modifiers) => {
-                self.modifiers = new_modifiers.state();
-                trace!("Modifiers changed to {:?}", self.modifiers);
+                self.set_modifiers(id, new_modifiers.state());
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -154,6 +169,18 @@ impl PlatformHandler {
         }
 
         true
+    }
+
+    fn set_modifiers(&mut self, id: WindowId, modifiers: ModifiersState) {
+        if self.modifiers == modifiers {
+            return;
+        }
+        self.modifiers = modifiers;
+        trace!("Modifiers changed to {modifiers:?}");
+        self.dispatch_input(
+            id,
+            InputEvent::ModifiersChanged(modifiers_from_winit(modifiers)),
+        );
     }
 
     fn dispatch_pointer_moved(
@@ -226,10 +253,17 @@ impl PlatformHandler {
             }
             MouseScrollDelta::PixelDelta(px) => (glam::dvec2(px.x, px.y), ScrollUnit::Point),
         };
+        // Line deltas are dimensionless. Normalize them by the logical
+        // extent so the egui conversion does not shrink them again by DPI.
         self.dispatch_input(
             id,
             InputEvent::Scroll {
-                delta: self.normalized_delta(id, delta),
+                delta: normalized_scroll_delta(
+                    delta,
+                    unit,
+                    self.window_extent(id),
+                    self.window_scale_factor(id),
+                ),
                 unit,
                 modifiers: modifiers_from_winit(self.modifiers),
             },
@@ -289,15 +323,33 @@ impl PlatformHandler {
                 glam::dvec2(f64::from(size.width.max(1)), f64::from(size.height.max(1)))
             })
     }
+
+    fn window_scale_factor(&self, window: WindowId) -> f64 {
+        self.windows
+            .windows()
+            .get(&window)
+            .map_or(1.0, Window::scale_factor)
+            .max(f64::EPSILON)
+    }
 }
 
 impl ApplicationHandler for PlatformHandler {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        let id = self
-            .create_window(event_loop)
-            .expect("failed to create main window");
-        self.windows.set_main_window(id);
-        self.can_create_surfaces = true;
+        if self.main_window_created {
+            debug!("Surfaces can be created again; keeping the existing main window");
+            return;
+        }
+        match self.create_window(event_loop) {
+            Ok(id) => {
+                self.windows.set_main_window(id);
+                self.main_window_created = true;
+            }
+            Err(err) => {
+                error!("Failed to create main window: {err:#}");
+                self.error = Some(err);
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(&mut self, _loop: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -318,6 +370,23 @@ impl ApplicationHandler for PlatformHandler {
 #[allow(clippy::cast_possible_truncation)]
 fn normalized_component(value: f64, extent: f64) -> f32 {
     (value / extent.max(f64::EPSILON)) as f32
+}
+
+fn normalized_scroll_delta(
+    delta: glam::DVec2,
+    unit: ScrollUnit,
+    extent: glam::DVec2,
+    scale_factor: f64,
+) -> NormalizedDelta {
+    let delta = if unit == ScrollUnit::Point {
+        delta
+    } else {
+        delta * scale_factor
+    };
+    NormalizedDelta(glam::vec2(
+        normalized_component(delta.x, extent.x),
+        normalized_component(delta.y, extent.y),
+    ))
 }
 
 fn modifiers_from_winit(modifiers: ModifiersState) -> Modifiers {
@@ -424,5 +493,19 @@ mod tests {
             NormalizedDelta(glam::vec2(2.0, -3.0)).0,
             glam::vec2(2.0, -3.0)
         );
+    }
+
+    #[test]
+    fn scroll_round_trip_preserves_lines_and_scales_pixels() {
+        let extent = glam::dvec2(200.0, 200.0);
+        for scale in [1.0, 2.0] {
+            let lines =
+                normalized_scroll_delta(glam::dvec2(0.0, 3.0), ScrollUnit::Line, extent, scale);
+            let points =
+                normalized_scroll_delta(glam::dvec2(0.0, 12.0), ScrollUnit::Point, extent, scale);
+            let restore_logical = |delta: NormalizedDelta| f64::from(delta.0.y) * extent.y / scale;
+            assert!((restore_logical(lines) - 3.0).abs() < 1e-5);
+            assert!((restore_logical(points) - 12.0 / scale).abs() < 1e-5);
+        }
     }
 }

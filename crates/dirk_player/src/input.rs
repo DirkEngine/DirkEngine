@@ -27,13 +27,15 @@ impl InputContext {
                     self.pointer_delta += delta.0;
                 }
             }
-            InputEvent::PointerLeft => {
+            InputEvent::PointerLeft | InputEvent::FocusChanged(false) => {
                 self.pointer_delta = glam::Vec2::ZERO;
             }
             InputEvent::Key { .. }
             | InputEvent::PointerEntered
             | InputEvent::PointerButton { .. }
-            | InputEvent::Scroll { .. } => {}
+            | InputEvent::Scroll { .. }
+            | InputEvent::FocusChanged(true)
+            | InputEvent::ModifiersChanged(_) => {}
         }
     }
 
@@ -77,7 +79,7 @@ mod tests {
         let mut input = InputContext::new();
         press(
             &mut input,
-            InputEvent::PointerButton {
+            &InputEvent::PointerButton {
                 button: PointerButton::Secondary,
                 state: ButtonState::Pressed,
                 position: NormalizedPosition::new(glam::Vec2::ZERO),
@@ -101,7 +103,7 @@ mod tests {
         let mut input = InputContext::new();
         press(
             &mut input,
-            InputEvent::PointerButton {
+            &InputEvent::PointerButton {
                 button: PointerButton::Secondary,
                 state: ButtonState::Pressed,
                 position: NormalizedPosition::new(glam::Vec2::ZERO),
@@ -117,28 +119,36 @@ mod tests {
     }
 
     #[test]
-    fn pointer_left_releases_movement_gate() {
-        let mut input = InputContext::new();
-        press(
-            &mut input,
-            InputEvent::PointerButton {
-                button: PointerButton::Secondary,
-                state: ButtonState::Pressed,
-                position: NormalizedPosition::new(glam::Vec2::ZERO),
-                modifiers: Modifiers::default(),
-            },
-        );
-        press_key(&mut input, "w");
+    fn focus_loss_and_pointer_exit_clear_movement_and_look() {
+        for release in [InputEvent::PointerLeft, InputEvent::FocusChanged(false)] {
+            let mut input = InputContext::new();
+            press(
+                &mut input,
+                &InputEvent::PointerButton {
+                    button: PointerButton::Secondary,
+                    state: ButtonState::Pressed,
+                    position: NormalizedPosition::new(glam::Vec2::ZERO),
+                    modifiers: Modifiers::default(),
+                },
+            );
+            press_key(&mut input, "w");
 
-        input.handle_event(&InputEvent::PointerLeft);
+            input.handle_event(&InputEvent::PointerMoved {
+                position: NormalizedPosition::new(glam::Vec2::ONE),
+                delta: NormalizedDelta(glam::vec2(2.0, -1.0)),
+            });
+            assert_ne!(input.look_input(), glam::DVec2::ZERO);
+            input.handle_event(&release);
 
-        assert_eq!(input.movement_input(), glam::Vec3::ZERO);
+            assert_eq!(input.movement_input(), glam::Vec3::ZERO);
+            assert_eq!(input.look_input(), glam::DVec2::ZERO);
+        }
     }
 
     fn press_key(input: &mut InputContext, key: &str) {
         press(
             input,
-            InputEvent::Key {
+            &InputEvent::Key {
                 key: LogicalKey::character(key),
                 state: ButtonState::Pressed,
                 repeat: false,
@@ -147,7 +157,7 @@ mod tests {
         );
     }
 
-    fn press(input: &mut InputContext, event: InputEvent) {
-        input.handle_event(&event);
+    fn press(input: &mut InputContext, event: &InputEvent) {
+        input.handle_event(event);
     }
 }
