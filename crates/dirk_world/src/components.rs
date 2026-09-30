@@ -60,19 +60,13 @@ impl ModelUploadSystem {
     }
 }
 
-impl
-    System<(
-        Query<'_, (Entity, &Renderable), Changed<Renderable>>,
-        RemovedComponents<'_, Renderable>,
-    )> for ModelUploadSystem
-{
-    fn run(
-        &mut self,
-        (renderables, removed): (
-            Query<'_, (Entity, &Renderable), Changed<Renderable>>,
-            RemovedComponents<'_, Renderable>,
-        ),
-    ) {
+impl System for ModelUploadSystem {
+    type Params<'u> = (
+        Query<'u, (Entity, &'u Renderable), Changed<Renderable>>,
+        RemovedComponents<'u, Renderable>,
+    );
+
+    fn run(&mut self, (renderables, removed): Self::Params<'_>) {
         // Remove first, then reconcile current values so remove/reinsert in one
         // tick leases the final model rather than losing it.
         for entity in removed.iter() {

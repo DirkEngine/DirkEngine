@@ -5,18 +5,14 @@ worlds, entities, components, and systems. Systems run once per tick in
 registration order, including when their queries are empty.
 
 `Query` provides iteration and entity lookups. `&C` reads a component and
-`&mut C` edits it in place; neither requires `Clone`. Tuples fetch multiple
+`&mut C` edits it in place; neither requires `Clone`. `Option<&C>` fetches a
+component when present without requiring it. Tuples fetch multiple
 components, and including `Entity` fetches the entity ID. `With<C>` and
 `Without<C>` filter by component presence; filter tuples combine with AND.
 Multiple queries in a system are independent collections.
 
 ```rust
-use dirk_universe::{
-    Entity, Universe, World,
-    components::Component,
-    query::{Query, filter::Without},
-    systems::DeltaTime,
-};
+use dirk_universe::prelude::*;
 
 #[derive(Debug, Component)]
 struct Position(f64);
@@ -41,24 +37,27 @@ let mut universe = Universe::builder()
     .with_system(movement)
     .build();
 universe.tick(0.5);
-let entity = Query::<(Entity, &Position)>::new(&universe).iter().next().unwrap().0;
+let entity = universe.query::<(Entity, &Position)>().iter().next().unwrap().0;
 assert_eq!(universe.component::<Position>(entity).unwrap().0, 1.0);
 universe.tick(0.5);
 assert_eq!(universe.component::<Position>(entity).unwrap().0, 2.0);
 ```
 
 `UniverseBuilder::with_system` accepts functions and `FnMut` closures directly.
-Stateful types can also implement `System<Params>`:
+Stateful types implement `System`, naming their parameters once. `'u` stands
+for the universe borrow of one run:
 
 ```rust
-use dirk_universe::{Universe, components::Component, query::Query, systems::{DeltaTime, System}};
+use dirk_universe::prelude::*;
 
 #[derive(Debug, Component)]
 struct Position(f64);
 struct Movement { speed: f64 }
 
-impl System<(Query<'_, &mut Position>, DeltaTime)> for Movement {
-    fn run(&mut self, (mut query, DeltaTime(dt)): (Query<'_, &mut Position>, DeltaTime)) {
+impl System for Movement {
+    type Params<'u> = (Query<'u, &'u mut Position>, DeltaTime);
+
+    fn run(&mut self, (mut query, DeltaTime(dt)): Self::Params<'_>) {
         for mut position in &mut query {
             position.0 += self.speed * dt;
         }
@@ -70,8 +69,8 @@ let universe = Universe::builder().with_system(Movement { speed: 2.0 }).build();
 Use `iter()` and `get(entity)` for read-only queries, or `iter_mut()` and
 `get_mut(entity)` for mutable queries. `&query` and `&mut query` also support
 iteration. `iter_in_world` and `iter_in_world_mut` restrict iteration to a world.
-Entity order is unspecified. Outside a system, `Query::new(&universe)` provides
-read-only access.
+Entity order is unspecified. Outside a system, `universe.query::<D>()` and
+`universe.query_filtered::<D, F>()` provide read-only access.
 
 Component reads return `Ref<C>` guards and writes return `ComponentMut<C>`
 guards, which dereference to the component. This keeps storage safe without
