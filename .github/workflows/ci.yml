@@ -76,11 +76,18 @@ jobs:
       - name: Build debug
         run: cargo build --workspace --locked
 
+      - name: Bundle debug build and runtime assets
+        run: |
+          mkdir -p dist/dirkengine
+          cp target/debug/dirkengine dist/dirkengine/
+          cp -R assets dist/dirkengine/assets
+          tar -C dist -czf dist/dirkengine-debug.tar.gz dirkengine
+
       - name: Upload Debug Artifact
         uses: actions/upload-artifact@v6
         with:
           name: dirkengine-debug-${{ matrix.os }}
-          path: target/debug/dirkengine
+          path: dist/dirkengine-debug.tar.gz
 
           # This isn't cached properly, runs take 7min.
           # When we fix caching, uncomment
@@ -114,5 +121,8 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
-      - name: Test
+      - name: Test (default features)
         run: cargo nextest run --workspace --locked
+
+      - name: Test (no default features)
+        run: cargo nextest run --workspace --locked --no-default-features
