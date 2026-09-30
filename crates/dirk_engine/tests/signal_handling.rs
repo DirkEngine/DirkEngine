@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! Subprocess coverage for Unix signal shutdown behavior.
 
 use std::{

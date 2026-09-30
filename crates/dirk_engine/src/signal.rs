@@ -1,47 +1,33 @@
 //! Operating system signal integration.
 //!
 //! The signal handler installed by this module does not touch engine state from
-//! inside the OS signal context. On Unix, `signal-hook` writes notifications
-//! into a pipe and a background thread forwards them to the engine. On Windows,
-//! signal-safe atomic flags are polled during the normal tick flow.
+//! inside the OS signal context. `signal-hook` writes notifications into a pipe
+//! and a background thread forwards them to the engine.
 //!
 //! The first handled signal requests a graceful engine shutdown. A second
-//! handled signal terminates the process immediately, so a stuck shutdown can
-//! still be interrupted: Unix re-raises it with the default disposition, and
-//! Windows exits with status `128 + signal`.
+//! handled signal re-raises it with the default disposition, so a stuck shutdown
+//! can still be interrupted.
 //!
-//! This is intentionally scoped to terminal and service-manager workflows. On
-//! Unix-like systems this covers common termination signals such as `SIGINT`,
-//! `SIGTERM`, `SIGHUP`, and `SIGQUIT`. On Windows, `signal-hook` is limited to
-//! CRT signal emulation, so this covers `SIGINT` and `SIGBREAK` only. Console
-//! close, logoff, shutdown events, and normal game-window close events are
-//! handled elsewhere by platform/window integration. Signal handling is opt-in
+//! This is scoped to Unix terminal and service-manager workflows, covering
+//! `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`. Game-window close events are
+//! handled separately by platform/window integration. Signal handling is opt-in
 //! because `signal-hook` cannot restore the host process's previous disposition
 //! after an engine is dropped.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver},
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread::{self, JoinHandle},
 };
 
-#[cfg(not(windows))]
-use std::thread::{self, JoinHandle};
-
-#[cfg(not(windows))]
-use signal_hook::iterator::{Handle as SignalIteratorHandle, Signals};
-#[cfg(not(windows))]
-use signal_hook::low_level::emulate_default_handler;
-use signal_hook::low_level::signal_name;
-#[cfg(windows)]
-use signal_hook::{SigId, flag, low_level::unregister};
-#[cfg(not(windows))]
-use tracing::error;
-use tracing::{debug, info, warn};
-
-#[cfg(windows)]
-use signal_hook::consts::signal::{SIGBREAK, SIGINT};
-#[cfg(not(windows))]
-use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM},
+    iterator::{Handle as SignalIteratorHandle, Signals},
+    low_level::{emulate_default_handler, signal_name},
+};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OperatingSystemSignal {
@@ -58,13 +44,11 @@ impl OperatingSystemSignal {
     }
 }
 
-#[cfg(not(windows))]
 struct SignalListener {
     handle: SignalIteratorHandle,
     thread: Option<JoinHandle<()>>,
 }
 
-#[cfg(not(windows))]
 impl SignalListener {
     fn install(sender: mpsc::Sender<OperatingSystemSignal>) -> anyhow::Result<Self> {
         let mut signals = Signals::new(handled_signals())?;
@@ -112,71 +96,6 @@ impl SignalListener {
     }
 }
 
-#[cfg(not(windows))]
-impl Drop for SignalListener {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-#[cfg(windows)]
-struct SignalListener {
-    /// Per-signal flags polled (and cleared) by the engine tick.
-    requested: Vec<(i32, std::sync::Arc<AtomicBool>)>,
-    registrations: Vec<SigId>,
-}
-
-#[cfg(windows)]
-impl SignalListener {
-    fn install(_sender: mpsc::Sender<OperatingSystemSignal>) -> anyhow::Result<Self> {
-        let mut listener = Self {
-            requested: Vec::new(),
-            registrations: Vec::new(),
-        };
-        // Set by the first handled signal and never cleared. Mirrors the Unix
-        // listener: a second signal terminates the process immediately, even
-        // if graceful shutdown is stuck.
-        let shutdown_requested = std::sync::Arc::new(AtomicBool::new(false));
-        for &signal in handled_signals() {
-            // Actions run in registration order, so the conditional shutdown
-            // must be registered before the flag that arms it.
-            listener
-                .registrations
-                .push(flag::register_conditional_shutdown(
-                    signal,
-                    128 + signal,
-                    std::sync::Arc::clone(&shutdown_requested),
-                )?);
-            listener.registrations.push(flag::register(
-                signal,
-                std::sync::Arc::clone(&shutdown_requested),
-            )?);
-
-            let requested = std::sync::Arc::new(AtomicBool::new(false));
-            listener
-                .registrations
-                .push(flag::register(signal, std::sync::Arc::clone(&requested))?);
-            listener.requested.push((signal, requested));
-        }
-        Ok(listener)
-    }
-
-    fn received_signal(&self) -> Option<OperatingSystemSignal> {
-        self.requested
-            .iter()
-            .find(|(_, requested)| requested.swap(false, Ordering::SeqCst))
-            .map(|(signal, _)| OperatingSystemSignal::new(*signal))
-    }
-
-    fn shutdown(&mut self) {
-        for id in self.registrations.drain(..) {
-            unregister(id);
-        }
-        self.requested.clear();
-    }
-}
-
-#[cfg(windows)]
 impl Drop for SignalListener {
     fn drop(&mut self) {
         self.shutdown();
@@ -232,11 +151,7 @@ impl OperatingSystemSignals {
     }
 
     pub(crate) fn exit_requested(&mut self) -> bool {
-        let received = self.receiver.try_recv().ok();
-        #[cfg(windows)]
-        let received = received.or_else(|| self.listener.as_ref()?.received_signal());
-
-        if let Some(signal) = received {
+        if let Ok(signal) = self.receiver.try_recv() {
             warn!(
                 signal = signal.number,
                 name = signal.name(),
@@ -256,35 +171,16 @@ impl OperatingSystemSignals {
     }
 }
 
-#[cfg(not(windows))]
 fn handled_signals() -> &'static [i32] {
     &[SIGINT, SIGTERM, SIGHUP, SIGQUIT]
-}
-
-#[cfg(windows)]
-fn handled_signals() -> &'static [i32] {
-    &[SIGINT, SIGBREAK]
 }
 
 fn handled_signal_names() -> Vec<&'static str> {
     handled_signals()
         .iter()
         .copied()
-        .map(signal_display_name)
+        .map(|signal| OperatingSystemSignal::new(signal).name())
         .collect()
-}
-
-fn signal_display_name(signal: i32) -> &'static str {
-    if let Some(name) = signal_name(signal) {
-        return name;
-    }
-
-    #[cfg(windows)]
-    if signal == SIGBREAK {
-        return "SIGBREAK";
-    }
-
-    "unknown signal"
 }
 
 #[cfg(test)]
