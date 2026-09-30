@@ -317,7 +317,9 @@ fn engine_with_subsystems_and_signals(
 
     Engine {
         logger: piquel_log::Logger::new(),
-        universe: Universe::builder().build(),
+        universe: Universe::builder()
+            .build()
+            .expect("empty universe should schedule"),
         subsystems,
         #[cfg(feature = "editor")]
         editor: editor::EditorRuntime::empty_for_tests(),

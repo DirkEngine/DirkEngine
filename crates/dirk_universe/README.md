@@ -1,8 +1,9 @@
 # universe
 
 `dirk_universe` is `DirkEngine`'s entity-component system. A `Universe` contains
-worlds, entities, components, and systems. Systems run once per tick in
-registration order, including when their queries are empty.
+worlds, entities, components, and systems. Systems run once per tick,
+including when their queries are empty, in an order derived from the data they
+access.
 
 `Query` provides iteration and entity lookups. `&C` reads a component and
 `&mut C` edits it in place; neither requires `Clone`. `Option<&C>` fetches a
@@ -35,7 +36,8 @@ let mut universe = Universe::builder()
         Entity::builder().with_component(Position(0.0)).with_component(Velocity(2.0)),
     ))
     .with_system(movement)
-    .build();
+    .build()
+    .expect("systems should schedule");
 universe.tick(0.5);
 let entity = universe.query::<(Entity, &Position)>().iter().next().unwrap().0;
 assert_eq!(universe.component::<Position>(entity).unwrap().0, 1.0);
@@ -64,6 +66,7 @@ impl System for Movement {
     }
 }
 let universe = Universe::builder().with_system(Movement { speed: 2.0 }).build();
+assert!(universe.is_ok());
 ```
 
 Use `iter()` and `get(entity)` for read-only queries, or `iter_mut()` and
@@ -77,8 +80,9 @@ guards, which dereference to the component. This keeps storage safe without
 unsafe code. Guards must be dropped before borrowing the same component
 incompatibly. Mutable query borrows are tied to the query borrow, preventing
 simultaneous iteration and another mutable lookup through that query.
-Overlapping read/write or write/write declarations are rejected at system
-registration, conservatively even when filters would make them disjoint.
+Overlapping read/write or write/write borrows within one system are rejected
+by `UniverseBuilder::build`, conservatively even when filters would make them
+disjoint.
 
 `Added<C>` matches components attached since the observing system last ran.
 `Changed<C>` matches additions, replacements, and mutable dereferences since
@@ -87,8 +91,7 @@ mark it changed. Assigning the same value does; there is no value comparison.
 Interior mutation through types such as `Cell` is not automatically tracked.
 
 Each system has its own execution counter. Reading changes never consumes them
-for another system. A system after a writer sees the edit in the same tick; a
-system before it sees it on its next run. Multiple edits between observations
+for another system. Multiple edits between observations
 produce one match containing the current value. No historical values are kept.
 Replacing an existing component is changed but not added; removing and
 reinserting it is both. On a system's first run, all present matching components
@@ -118,6 +121,7 @@ fn synchronize(health: Query<(Entity, Delta<Health>)>) {
     }
 }
 let universe = Universe::builder().with_system(synchronize).build();
+assert!(universe.is_ok());
 ```
 
 Structure is data too. A world is an entity carrying a `World` component, and
@@ -133,6 +137,49 @@ Structural changes use `Commands` or submitted command buffers and apply at the
 start of the next tick. Buffers execute in submission order and commands in
 insertion order. Destroying or despawning a world despawns its entities too.
 
+## Scheduling
+
+Nobody orders systems by hand. A system that reads a component, whether through
+`&C`, `Delta<C>` or a filter such as `Changed<C>`, runs after every system that
+writes `C`, so it sees this tick's values. `Lagged<D>` reads `D` before this
+tick's systems write it instead: its system runs before the writers, which also
+breaks dependency cycles. Commands applied at the start of the tick are already
+visible, and an explicit order placing a writer first takes precedence.
+Dependent systems are ordered the same whatever order plugins merge their
+builders in; unrelated systems keep their registration order.
+
+```rust
+use dirk_universe::prelude::*;
+
+#[derive(Debug, Component)]
+struct Velocity(f64);
+#[derive(Debug, Component)]
+struct Position(f64);
+
+fn render(positions: Query<&Position>) { /* runs second */ }
+fn movement(mut query: Query<(&Velocity, &mut Position)>) { /* runs first */ }
+
+let universe = Universe::builder()
+    .with_system(render)
+    .with_system(movement)
+    .build()?;
+assert_eq!(universe.schedule().systems()[1].name, std::any::type_name_of_val(&render));
+# Ok::<(), dirk_universe::schedule::ScheduleError>(())
+```
+
+Two systems writing the same component must be ordered explicitly, unless
+other dependencies already order them. `.before(other)` and `.after(other)`
+name functions and closures directly, and `System` types through
+`MySystem::label()`. Closures made by one factory share a type, so they share a
+label. Explicit orders replace derived ones between the same pair.
+
+`UniverseBuilder::build` reports every problem as a `ScheduleError`: borrows
+that conflict within one system, writers in no defined order, dependency
+cycles (naming each system and component involved), and orders against
+systems that were never registered. `universe.schedule()` returns the final
+order with the reason for each dependency, and displays as a readable list.
+
+Commands do not order systems, since their changes apply on the next tick.
 Systems run sequentially. `UniverseBuilder::with_other` appends another
 builder's systems; builders with outstanding handles or queued commands cannot
-be merged. Parallel execution is outside this API.
+be merged.
