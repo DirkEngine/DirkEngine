@@ -1,22 +1,23 @@
 //! This module has a bunch of frequently used and central [`Component`]s
 //!
-//! [`Component`]: universe::components::Component
+//! [`Component`]: dirk_universe::components::Component
 
-use std::sync::Arc;
+use std::collections::HashMap;
 
-use dirk_assets::{AssetLoad, AssetRegistry, Model};
+use dirk_assets::{AssetHandle, AssetLease, AssetRegistry, Model};
 use dirk_universe::{
-    CommandBuffer, Entity,
+    Entity,
     components::Component,
-    systems::{ComponentSystem, System},
+    query::{Query, filter::Changed},
+    systems::{RemovedComponents, System},
 };
 use glam::{Mat4, Quat, Vec3};
 use tracing::warn;
 
 /// Marks an entity as having a renderable mesh.
 ///
-/// The `model` field is resolved at render time against the engine's asset
-/// registry. If no matching asset is found the entity is silently skipped.
+/// The `model` field is resolved by [`ModelUploadSystem`] against the engine's
+/// asset registry. Changing it requests the new model when the upload system next runs.
 ///
 /// # Examples
 /// ```
@@ -28,72 +29,66 @@ use tracing::warn;
 #[derive(Debug, Clone, Component)]
 pub struct Renderable {
     /// Asset-registry key for the mesh to render (e.g. `"meshes/cube.glb"`).
-    pub model: dirk_assets::AssetHandle,
-    /// This is a tokio `JoinHandle` under the hood. This keeps the `Handle<T>`
-    /// alive while the `JoinHandle` is alive. This means that this field
-    /// is stopping the asset form being unloaded by the renderer.
-    ///
-    /// Please do not try to await/poll this future, this would drop the handle
-    /// and lead the asset to disapear on the renderer
-    handle: Option<Arc<AssetLoad<Model>>>,
+    pub model: AssetHandle,
 }
 
 impl Renderable {
     /// Creates a new [`Renderable`] component from an [`AssetHandle`].
     ///
-    /// [`AssetHandle`]: assets::AssetHandle
+    /// [`AssetHandle`]: dirk_assets::AssetHandle
     #[must_use]
-    pub fn new(model: dirk_assets::AssetHandle) -> Self {
-        Self {
-            model,
-            handle: None,
-        }
+    pub fn new(model: AssetHandle) -> Self {
+        Self { model }
     }
 }
 
-/// A [`universe`] system that will automatically load a model
-/// when a [`Renderable`] is added to an [`universe::Entity`].
-#[derive(System)]
+/// Keeps the models referenced by [`Renderable`] components loaded. The
+/// asset registry loads them in the background and reports failures.
 pub struct ModelUploadSystem {
     assets: AssetRegistry,
+    leases: HashMap<Entity, AssetLease<Model>>,
 }
 
 impl ModelUploadSystem {
     /// Creates a new [`ModelUploadSystem`] using the provided [`AssetRegistry`].
     #[must_use]
     pub fn new(assets: AssetRegistry) -> Self {
-        Self { assets }
+        Self {
+            assets,
+            leases: HashMap::new(),
+        }
     }
 }
 
-impl ComponentSystem for ModelUploadSystem {
-    type Component = Renderable;
-    fn added(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Self::Component) {
-        if component.handle.is_some() {
-            return;
-        }
-
-        let handle = self.assets.load_asset::<Model>(&component.model);
-        cmd.set_component(
-            entity,
-            Renderable {
-                handle: Some(Arc::new(handle)),
-                ..component.clone()
-            },
-        );
-    }
-    fn updated(
-        &self,
-        cmd: &mut CommandBuffer,
-        entity: Entity,
-        _: &Self::Component,
-        new: &Self::Component,
+impl
+    System<(
+        Query<'_, (Entity, &Renderable), Changed<Renderable>>,
+        RemovedComponents<'_, Renderable>,
+    )> for ModelUploadSystem
+{
+    fn run(
+        &mut self,
+        (renderables, removed): (
+            Query<'_, (Entity, &Renderable), Changed<Renderable>>,
+            RemovedComponents<'_, Renderable>,
+        ),
     ) {
-        self.added(cmd, entity, new);
+        // Remove first, then reconcile current values so remove/reinsert in one
+        // tick leases the final model rather than losing it.
+        for entity in removed.iter() {
+            self.leases.remove(&entity);
+        }
+        for (entity, component) in &renderables {
+            if self
+                .leases
+                .get(&entity)
+                .is_none_or(|lease| lease.asset() != &component.model)
+            {
+                self.leases
+                    .insert(entity, self.assets.lease(&component.model));
+            }
+        }
     }
-    /// Nothing happens when this component is removed. The asset will be unloaded
-    /// automatically when it is no longer used.
-    fn removed(&self, _: &mut CommandBuffer, _: Entity, _: &Self::Component) {}
 }
 
 /// Spatial transform for an entity: position, orientation, and scale.
