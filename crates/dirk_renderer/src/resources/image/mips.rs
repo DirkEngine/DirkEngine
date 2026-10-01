@@ -8,7 +8,7 @@ use crate::{
 impl Image {
     pub fn mip_levels(width: u32, height: u32) -> u32 {
         // How many times can we halve the larger dimension before hitting 1px?
-        u32::BITS - width.max(height).leading_zeros()
+        width.max(height).bit_width()
     }
     pub fn generate_mipmaps(
         &self,

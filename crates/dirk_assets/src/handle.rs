@@ -63,7 +63,7 @@ impl<T: Asset> AssetRef<T> {
             asset_handle,
             generation: AssetGeneration(
                 NEXT_GENERATION
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                         value.checked_add(1)
                     })
                     .expect("asset generation counter exhausted"),

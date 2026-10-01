@@ -246,11 +246,13 @@ impl dirk_engine::Subsystem for Renderer {
         self.tick(delta_time)?;
         #[cfg(feature = "editor")]
         {
-            let ctx = self.begin_frame();
+            let input = self.egui_frame_input();
+            self.egui_window = Some(input.window_id);
             let frame = dirk_engine::editor::EditorRenderContext::new(delta_time, handle);
 
             self.viewport_editor.sync_ready_state(&self.viewports);
-            self.editor.render_ui(&ctx, &frame, universe)?;
+            self.egui
+                .run_frame(&input, &self.editor, &frame, universe)?;
         }
 
         #[cfg(not(feature = "editor"))]
@@ -393,16 +395,6 @@ impl Renderer {
             player_despawn_consumer: event_manager.subscribe(),
             receivers: Vec::new(),
         })
-    }
-
-    /// Begins a frame.
-    ///
-    /// Returns an [`egui::Context`] for rendering.
-    #[cfg(feature = "editor")]
-    pub fn begin_frame(&mut self) -> egui::Context {
-        let input = self.egui_frame_input();
-        self.egui_window = Some(input.window_id);
-        self.egui.begin_frame(&input)
     }
 
     // TODO: shouldn't be necessary
@@ -587,9 +579,6 @@ impl Renderer {
     ///
     /// Vulkan errors can occur during rendering
     fn end_frame(&mut self) -> Result<()> {
-        #[cfg(feature = "editor")]
-        self.egui.end_frame();
-
         let frame_index = self.current_frame();
         self.render_device.flush_deletions();
         #[cfg(feature = "editor")]

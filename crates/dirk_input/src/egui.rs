@@ -420,19 +420,22 @@ mod tests {
             ],
             ..Default::default()
         };
-        let _ = context.run(raw, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
-                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                deltas = input_events_from_egui_response(ui, &response, Some(egui::Pos2::ZERO))
-                    .into_iter()
-                    .filter_map(|event| match event {
-                        InputEvent::PointerMoved { delta, .. } => Some(delta.0),
-                        _ => None,
-                    })
-                    .collect();
-            });
-        });
+        context
+            .run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
+                    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                    deltas = input_events_from_egui_response(ui, &response, Some(egui::Pos2::ZERO))
+                        .into_iter()
+                        .filter_map(|event| match event {
+                            InputEvent::PointerMoved { delta, .. } => Some(delta.0),
+                            _ => None,
+                        })
+                        .collect();
+                });
+            })
+            .drop_without_applying_deltas();
         assert_eq!(deltas.len(), 2);
         assert!((deltas[0].x - 0.1).abs() < f32::EPSILON);
         assert!((deltas[1].x - 0.1).abs() < f32::EPSILON);
@@ -441,27 +444,31 @@ mod tests {
     #[test]
     fn native_focus_loss_releases_viewport_without_pointer_capture() {
         let context = egui::Context::default();
-        let _ = context.run(
-            egui::RawInput {
-                focused: false,
-                events: vec![egui::Event::WindowFocused(false)],
-                ..Default::default()
-            },
-            |context| {
-                egui::CentralPanel::default().show(context, |ui| {
-                    let response = ui
-                        .allocate_response(egui::vec2(100.0, 100.0), egui::Sense::click_and_drag());
-                    assert!(!response.has_focus());
-                    let events = input_events_from_egui_response(ui, &response, None);
-                    assert_eq!(
-                        events,
-                        vec![
-                            InputEvent::FocusChanged(false),
-                            InputEvent::ModifiersChanged(Modifiers::default())
-                        ]
-                    );
-                });
-            },
-        );
+        context
+            .run_ui(
+                egui::RawInput {
+                    focused: false,
+                    events: vec![egui::Event::WindowFocused(false)],
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let response = ui.allocate_response(
+                            egui::vec2(100.0, 100.0),
+                            egui::Sense::click_and_drag(),
+                        );
+                        assert!(!response.has_focus());
+                        let events = input_events_from_egui_response(ui, &response, None);
+                        assert_eq!(
+                            events,
+                            vec![
+                                InputEvent::FocusChanged(false),
+                                InputEvent::ModifiersChanged(Modifiers::default())
+                            ]
+                        );
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
     }
 }

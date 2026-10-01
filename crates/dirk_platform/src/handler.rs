@@ -252,6 +252,7 @@ impl PlatformHandler {
                 (glam::dvec2(f64::from(*x), f64::from(*y)), ScrollUnit::Line)
             }
             MouseScrollDelta::PixelDelta(px) => (glam::dvec2(px.x, px.y), ScrollUnit::Point),
+            _ => return,
         };
         // Line deltas are dimensionless. Normalize them by the logical
         // extent so the egui conversion does not shrink them again by DPI.

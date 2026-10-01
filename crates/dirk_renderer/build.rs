@@ -7,7 +7,7 @@ use cargo_gpu_install::{
 };
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
-use rspirv_reflect::rspirv::{
+use rspirv::{
     binary::Parser,
     dr::{Instruction, Loader, Module as SpirvModule, Operand},
     spirv::{Decoration, ExecutionModel, Op, StorageClass},
