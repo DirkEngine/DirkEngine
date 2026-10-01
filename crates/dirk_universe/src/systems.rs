@@ -14,75 +14,69 @@ use crate::{
     CommandBuffer, Entity, Universe,
     components::Component,
     lifecycle::LifecycleEvent,
-    query::{Query, QueryAccess, QueryParameter, filter::Filter},
+    macros::sealed::Sealed,
+    query::{Query, QueryAccess, QueryData, filter::QueryFilter},
 };
 
-/// Data supplied to one system invocation.
-pub trait SystemParam {
+/// Everything a system parameter can be fetched from during one run.
+#[doc(hidden)]
+pub struct SystemContext<'u> {
+    universe: &'u Universe,
+    last_run: u64,
+    delta_time: f64,
+    commands: &'u RefCell<CommandBuffer>,
+}
+
+/// Data supplied to one system invocation: queries, [`Commands`],
+/// [`DeltaTime`], lifecycle records, or tuples of these.
+pub trait SystemParam: Sealed {
     /// The value supplied while the universe is borrowed for this invocation.
     type Item<'u>;
 
-    /// Fetches a parameter using this system's previous execution counter.
-    fn fetch<'u>(
-        universe: &'u Universe,
-        last_run: u64,
-        delta_time: f64,
-        commands: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u>;
+    /// Fetches this parameter for one run.
+    #[doc(hidden)]
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u>;
 
     /// Registers this parameter's accesses before the system runs.
+    #[doc(hidden)]
     fn register_access(access: &mut QueryAccess);
 }
 
 impl SystemParam for () {
     type Item<'u> = ();
 
-    fn fetch<'u>(_: &'u Universe, _: u64, _: f64, _: &'u RefCell<CommandBuffer>) -> Self::Item<'u> {
-    }
+    fn fetch<'u>(_: &SystemContext<'u>) -> Self::Item<'u> {}
 
     fn register_access(_: &mut QueryAccess) {}
 }
 
-macro_rules! impl_system_param_tuple {
-    ($($param:ident),+) => {
-        impl<$($param: SystemParam),+> SystemParam for ($($param,)+) {
-            type Item<'u> = ($($param::Item<'u>,)+);
+macro_rules! impl_system_param_for_tuple {
+    ($($ty:ident $binding:ident),+) => {
+        impl<$($ty: SystemParam),+> SystemParam for ($($ty,)+) {
+            type Item<'u> = ($($ty::Item<'u>,)+);
 
-            fn fetch<'u>(
-                universe: &'u Universe,
-                last_run: u64,
-                delta_time: f64,
-                commands: &'u RefCell<CommandBuffer>,
-            ) -> Self::Item<'u> {
-                ($($param::fetch(universe, last_run, delta_time, commands),)+)
+            fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+                ($($ty::fetch(context),)+)
             }
 
             fn register_access(access: &mut QueryAccess) {
-                $($param::register_access(access);)+
+                $($ty::register_access(access);)+
             }
         }
     };
 }
+all_tuples!(impl_system_param_for_tuple);
 
-impl_system_param_tuple!(A);
-impl_system_param_tuple!(A, B);
-impl_system_param_tuple!(A, B, C);
-impl_system_param_tuple!(A, B, C, D);
+impl<D: QueryData, F: QueryFilter> Sealed for Query<'_, D, F> {}
+impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
+    type Item<'u> = Query<'u, D, F>;
 
-impl<P: QueryParameter, F: Filter> SystemParam for Query<'_, P, F> {
-    type Item<'u> = Query<'u, P, F>;
-
-    fn fetch<'u>(
-        universe: &'u Universe,
-        last_run: u64,
-        _: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u> {
-        Query::for_system(universe, last_run)
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Query::new(context.universe, context.last_run)
     }
 
     fn register_access(access: &mut QueryAccess) {
-        P::register_access(access);
+        D::register_access(access);
     }
 }
 
@@ -106,17 +100,13 @@ impl DerefMut for Commands<'_> {
     }
 }
 
+impl Sealed for Commands<'_> {}
 impl SystemParam for Commands<'_> {
     type Item<'u> = Commands<'u>;
 
-    fn fetch<'u>(
-        _: &'u Universe,
-        _: u64,
-        _: f64,
-        commands: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u> {
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
         Commands {
-            buffer: commands.borrow_mut(),
+            buffer: context.commands.borrow_mut(),
         }
     }
 
@@ -138,16 +128,14 @@ impl<'u> Lifecycle<'u> {
     }
 }
 
+impl Sealed for Lifecycle<'_> {}
 impl SystemParam for Lifecycle<'_> {
     type Item<'u> = Lifecycle<'u>;
 
-    fn fetch<'u>(
-        universe: &'u Universe,
-        _: u64,
-        _: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u> {
-        Lifecycle { universe }
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Lifecycle {
+            universe: context.universe,
+        }
     }
 
     fn register_access(_: &mut QueryAccess) {}
@@ -175,17 +163,13 @@ impl<C: Component> RemovedComponents<'_, C> {
     }
 }
 
+impl<C: Component> Sealed for RemovedComponents<'_, C> {}
 impl<C: Component> SystemParam for RemovedComponents<'_, C> {
     type Item<'u> = RemovedComponents<'u, C>;
 
-    fn fetch<'u>(
-        universe: &'u Universe,
-        _: u64,
-        _: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u> {
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
         RemovedComponents {
-            universe,
+            universe: context.universe,
             _marker: PhantomData,
         }
     }
@@ -197,44 +181,61 @@ impl<C: Component> SystemParam for RemovedComponents<'_, C> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeltaTime(pub f64);
 
+impl Sealed for DeltaTime {}
 impl SystemParam for DeltaTime {
     type Item<'u> = Self;
 
-    fn fetch<'u>(
-        _: &'u Universe,
-        _: u64,
-        delta_time: f64,
-        _: &'u RefCell<CommandBuffer>,
-    ) -> Self::Item<'u> {
-        Self(delta_time)
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Self(context.delta_time)
     }
 
     fn register_access(_: &mut QueryAccess) {}
 }
 
-/// A stateful system declaring its inputs in the trait's type parameter.
+/// A stateful system. `Params` names its inputs once, with `'u` standing for
+/// the universe borrow of one run:
 ///
-/// Systems run once per tick, even when their queries are empty. Queries are
-/// independent collections; their contents are iterated explicitly. Mutable
+/// ```
+/// # use dirk_universe::prelude::*;
+/// # #[derive(Debug, Component)] struct Position(f64);
+/// struct Drift { speed: f64 }
+///
+/// impl System for Drift {
+///     type Params<'u> = (Query<'u, &'u mut Position>, DeltaTime);
+///
+///     fn run(&mut self, (mut positions, DeltaTime(dt)): Self::Params<'_>) {
+///         for mut position in &mut positions {
+///             position.0 += self.speed * dt;
+///         }
+///     }
+/// }
+/// ```
+///
+/// Systems run once per tick, even when their queries are empty. Mutable
 /// edits are visible to later systems in the same tick; structural commands
 /// apply on the next tick.
-pub trait System<Params: SystemParam>: 'static {
+pub trait System: 'static {
+    /// The parameters fetched for each run.
+    type Params<'u>: SystemParam<Item<'u> = Self::Params<'u>>;
+
     /// Returns the type name for diagnostics.
     fn name(&self) -> &'static str {
         type_name::<Self>()
     }
 
     /// Runs once with the fetched parameters.
-    fn run(&mut self, params: Params::Item<'_>);
+    fn run(&mut self, params: Self::Params<'_>);
 }
 
-/// Converts a system or function into a registered system.
+/// Converts a [`System`] or a function into a registered system.
 ///
-/// The marker distinguishes function signatures from [`System`] implementations
-/// and is inferred by `UniverseBuilder::with_system`.
-pub trait ToSystem<Marker>: 'static {
+/// Functions and `FnMut` closures qualify when every argument is a
+/// [`SystemParam`]. The marker distinguishes these cases and is inferred by
+/// `UniverseBuilder::with_system`.
+pub trait IntoSystem<Marker>: 'static {
     /// Converts this value into the internal system representation.
-    fn to_system(self) -> Box<dyn ErasedSystem>;
+    #[doc(hidden)]
+    fn into_system(self) -> Box<dyn ErasedSystem>;
 }
 
 /// Internal execution interface used by the universe's system list.
@@ -244,62 +245,96 @@ pub trait ErasedSystem: 'static {
     fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
 }
 
-/// Marker distinguishing stateful systems from function signatures.
-#[doc(hidden)]
-pub struct SystemMarker<Params>(PhantomData<fn() -> Params>);
+/// Fetches parameters from a context and invokes a system's body.
+trait Run: 'static {
+    fn run(&mut self, context: &SystemContext<'_>);
 
-struct SystemRunner<S, Params> {
-    system: S,
-    last_run: u64,
-    _marker: PhantomData<fn() -> Params>,
+    fn register_access(access: &mut QueryAccess);
 }
 
-impl<S: System<Params>, Params: SystemParam + 'static> ErasedSystem for SystemRunner<S, Params> {
+/// Tracks the change-detection counter shared by every kind of system.
+struct Runner<R> {
+    inner: R,
+    last_run: u64,
+}
+
+impl<R: Run> Runner<R> {
+    fn boxed(inner: R) -> Box<dyn ErasedSystem> {
+        R::register_access(&mut QueryAccess::default());
+        Box::new(Self { inner, last_run: 0 })
+    }
+}
+
+impl<R: Run> ErasedSystem for Runner<R> {
     fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
         let this_run = universe.advance_change_tick();
-        self.system
-            .run(Params::fetch(universe, self.last_run, delta_time, commands));
+        self.inner.run(&SystemContext {
+            universe,
+            last_run: self.last_run,
+            delta_time,
+            commands,
+        });
         self.last_run = this_run;
     }
 }
 
-impl<S: System<Params>, Params: SystemParam + 'static> ToSystem<SystemMarker<Params>> for S {
-    fn to_system(self) -> Box<dyn ErasedSystem> {
-        Params::register_access(&mut QueryAccess::default());
-        Box::new(SystemRunner::<_, Params> {
-            system: self,
-            last_run: 0,
-            _marker: PhantomData,
-        })
+/// Adapts a [`System`]. Its `'static` parameters describe access for every borrow.
+struct StructSystem<S>(S);
+
+impl<S: System> Run for StructSystem<S> {
+    fn run(&mut self, context: &SystemContext<'_>) {
+        self.0.run(S::Params::fetch(context));
+    }
+
+    fn register_access(access: &mut QueryAccess) {
+        S::Params::<'static>::register_access(access);
     }
 }
 
-struct FunctionSystem<Func>(Func);
+/// Marker distinguishing [`System`] implementations from functions.
+#[doc(hidden)]
+pub struct SystemMarker;
+
+impl<S: System> IntoSystem<SystemMarker> for S {
+    fn into_system(self) -> Box<dyn ErasedSystem> {
+        Runner::boxed(StructSystem(self))
+    }
+}
+
+/// Adapts a function whose arguments are the system parameters `Params`.
+struct FunctionSystem<Func, Params> {
+    func: Func,
+    _marker: PhantomData<fn() -> Params>,
+}
 
 macro_rules! impl_function_system {
-    ($($param:ident: $arg:ident),*) => {
-        impl<Func, $($param: SystemParam + 'static),*> ToSystem<fn($($param),*)> for Func
+    ($($ty:ident $binding:ident),*) => {
+        impl<Func, $($ty: SystemParam + 'static),*> Run for FunctionSystem<Func, ($($ty,)*)>
         where
-            Func: FnMut($($param),*) + for<'u> FnMut($($param::Item<'u>),*) + 'static,
+            Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
         {
-            fn to_system(self) -> Box<dyn ErasedSystem> {
-                <FunctionSystem<_> as ToSystem<SystemMarker<($($param,)*)>>>::to_system(FunctionSystem(self))
+            fn run(&mut self, context: &SystemContext<'_>) {
+                let ($($binding,)*) = <($($ty,)*) as SystemParam>::fetch(context);
+                (self.func)($($binding),*);
+            }
+
+            fn register_access(access: &mut QueryAccess) {
+                <($($ty,)*) as SystemParam>::register_access(access);
             }
         }
 
-        impl<Func, $($param: SystemParam),*> System<($($param,)*)> for FunctionSystem<Func>
+        impl<Func, $($ty: SystemParam + 'static),*> IntoSystem<fn($($ty),*)> for Func
         where
-            Func: FnMut($($param),*) + for<'u> FnMut($($param::Item<'u>),*) + 'static,
+            Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
         {
-            fn run(&mut self, ($($arg,)*): <($($param,)*) as SystemParam>::Item<'_>) {
-                (self.0)($($arg),*);
+            fn into_system(self) -> Box<dyn ErasedSystem> {
+                Runner::boxed(FunctionSystem::<_, ($($ty,)*)> {
+                    func: self,
+                    _marker: PhantomData,
+                })
             }
         }
     };
 }
-
 impl_function_system!();
-impl_function_system!(A: a);
-impl_function_system!(A: a, B: b);
-impl_function_system!(A: a, B: b, C: c);
-impl_function_system!(A: a, B: b, C: c, D: d);
+all_tuples!(impl_function_system);
