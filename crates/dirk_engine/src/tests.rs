@@ -727,7 +727,11 @@ fn universe_handle_is_available_as_engine_resource() -> Result<()> {
 
     let world = world.lock().expect("subsystem should record created world");
     assert_eq!(
-        engine.universe.world(world).map(dirk_universe::World::name),
+        engine
+            .universe
+            .world(world)
+            .map(|world| world.name().to_owned())
+            .as_deref(),
         Some("resource-world")
     );
 
