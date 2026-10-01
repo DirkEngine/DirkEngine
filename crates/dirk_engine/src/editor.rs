@@ -483,7 +483,7 @@ impl EditorServices {
             .collect()
     }
 
-    /// Renders editor menus and windows.
+    /// Runs an egui frame and renders editor menus and windows.
     ///
     /// # Errors
     ///
@@ -491,22 +491,37 @@ impl EditorServices {
     pub fn render_ui(
         &self,
         ctx: &egui::Context,
+        input: egui::RawInput,
         context: &EditorRenderContext<'_>,
         universe: &Universe,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<egui::FullOutput> {
         let styles = self.state.lock().styles.clone();
         for style in styles {
             style.apply(ctx);
         }
 
-        let mut ui = egui::Ui::new(
-            ctx.clone(),
-            egui::Id::new("dirk_editor"),
-            egui::UiBuilder::new()
-                .layer_id(egui::LayerId::background())
-                .max_rect(ctx.viewport_rect()),
-        );
+        // Editor callbacks dispatch engine commands and input, so run them
+        // only once per frame even if a widget requests another layout pass.
+        ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
+        let mut result = Ok(());
+        let output = ctx.run_ui(input, |ui| {
+            result = self.render_pass(ui, context, universe);
+        });
+        match result {
+            Ok(()) => Ok(output),
+            Err(error) => {
+                output.drop_without_applying_deltas();
+                Err(error)
+            }
+        }
+    }
 
+    fn render_pass(
+        &self,
+        ui: &mut egui::Ui,
+        context: &EditorRenderContext<'_>,
+        universe: &Universe,
+    ) -> anyhow::Result<()> {
         let (editor_commands, command_receiver) = mpsc::channel();
         let editor_commands = EditorCommandSender::new(editor_commands);
 
@@ -517,7 +532,7 @@ impl EditorServices {
         let menu_result = Self::render_menus(
             &menus,
             &window_infos,
-            &mut ui,
+            ui,
             context,
             &editor_commands,
             universe,
@@ -541,7 +556,7 @@ impl EditorServices {
             &windows,
             &mut dock_state,
             &mut closed_windows,
-            &mut ui,
+            ui,
             context,
             &editor_commands,
             universe,

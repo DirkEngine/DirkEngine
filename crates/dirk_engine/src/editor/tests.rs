@@ -249,22 +249,21 @@ impl EditorSubsystem for StartFailingEditorSubsystem {
 
 fn render_services_with_input(
     services: &EditorServices,
+    ctx: &egui::Context,
     universe: &Universe,
     raw_input: egui::RawInput,
 ) -> anyhow::Result<()> {
-    let ctx = egui::Context::default();
-    ctx.begin_pass(raw_input);
-
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
-    let result = services.render_ui(&ctx, &frame, universe);
-    ctx.end_pass().drop_without_applying_deltas();
-    result
+    services
+        .render_ui(ctx, raw_input, &frame, universe)
+        .map(egui::FullOutput::drop_without_applying_deltas)
 }
 
 fn render_services(services: &EditorServices, universe: &Universe) -> anyhow::Result<()> {
     render_services_with_input(
         services,
+        &egui::Context::default(),
         universe,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -757,16 +756,107 @@ fn all_windows_are_closeable() {
 }
 
 #[test]
-fn window_render_errors_include_window_title() {
+fn window_render_errors_include_window_title_and_finish_frame() {
     let services = EditorServices::new();
-    services.add_window_fn(descriptor("error", true), |_ui, _context| {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let ctx = egui::Context::default();
+    for (begin, label) in [(true, "begin"), (false, "end")] {
+        let calls = Arc::clone(&calls);
+        let callback: egui::plugin::ContextCallback = Arc::new(move |_| calls.lock().push(label));
+        if begin {
+            ctx.on_begin_pass(label, callback);
+        } else {
+            ctx.on_end_pass(label, callback);
+        }
+    }
+    let window_calls = Arc::clone(&calls);
+    services.add_window_fn(descriptor("error", true), move |ui, _context| {
+        window_calls.lock().push("window");
+        ui.ctx()
+            .request_discard("exercise single-pass error handling");
         Err(anyhow::anyhow!("window failed"))
     });
 
     let universe = Universe::builder().build();
-    let err = render_services(&services, &universe).expect_err("render should fail");
+    let err = render_services_with_input(&services, &ctx, &universe, egui::RawInput::default())
+        .expect_err("render should fail");
 
     assert!(err.to_string().contains("window `error`"));
+    assert!(format!("{err:#}").contains("window failed"));
+    assert_eq!(*calls.lock(), ["begin", "window", "end"]);
+}
+
+#[test]
+fn editor_frame_cancels_text_selection_and_drag_payload_on_escape() -> anyhow::Result<()> {
+    let services = EditorServices::new();
+    let label_rect = Arc::new(Mutex::new(egui::Rect::NOTHING));
+    let window_label_rect = Arc::clone(&label_rect);
+    services.add_window_fn(descriptor("selection", true), move |ui, _context| {
+        *window_label_rect.lock() = ui.label("Selectable editor text").rect;
+        Ok(())
+    });
+
+    let ctx = egui::Context::default();
+    let universe = Universe::builder().build();
+    let input = |events, time| egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        )),
+        events,
+        time: Some(time),
+        ..Default::default()
+    };
+    render_services_with_input(&services, &ctx, &universe, input(Vec::new(), 0.0))?;
+    let pos = label_rect.lock().center();
+    // Double-click a real editor label to create a text selection.
+    for (time, pressed) in [(0.05, true), (0.1, false), (0.15, true), (0.2, false)] {
+        render_services_with_input(
+            &services,
+            &ctx,
+            &universe,
+            input(
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                time,
+            ),
+        )?;
+    }
+    let selection = ctx.plugin::<egui::text_selection::LabelSelectionState>();
+    assert!(selection.lock().has_selection());
+
+    // Drag cancellation consumes Escape at the beginning of the pass, so
+    // exercise it independently from text selection's end-of-pass cleanup.
+    for dragging in [false, true] {
+        if dragging {
+            egui::DragAndDrop::set_payload(&ctx, "editor payload");
+        }
+        render_services_with_input(
+            &services,
+            &ctx,
+            &universe,
+            input(
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                if dragging { 0.3 } else { 0.25 },
+            ),
+        )?;
+        assert!(!selection.lock().has_selection());
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+    }
+    Ok(())
 }
 
 #[test]
@@ -954,13 +1044,18 @@ fn failing_menu_still_applies_queued_commands() {
 
     let mut result = Ok(());
     for events in passes {
-        ctx.begin_pass(egui::RawInput {
-            screen_rect,
-            events,
-            ..egui::RawInput::default()
-        });
-        result = services.render_ui(&ctx, &frame, &universe);
-        ctx.end_pass().drop_without_applying_deltas();
+        result = services
+            .render_ui(
+                &ctx,
+                egui::RawInput {
+                    screen_rect,
+                    events,
+                    ..egui::RawInput::default()
+                },
+                &frame,
+                &universe,
+            )
+            .map(egui::FullOutput::drop_without_applying_deltas);
         if result.is_err() {
             break;
         }

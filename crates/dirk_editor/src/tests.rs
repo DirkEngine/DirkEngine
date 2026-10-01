@@ -4,14 +4,14 @@ use dirk_engine::editor::{EDITOR_CATEGORY, EditorStyle, EditorSubsystem as _, UN
 
 use crate::style::{EditorPalette, default_editor_style};
 
-fn begin_egui_pass(ctx: &egui::Context) {
-    ctx.begin_pass(egui::RawInput {
+fn egui_input() -> egui::RawInput {
+    egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(800.0, 600.0),
         )),
         ..egui::RawInput::default()
-    });
+    }
 }
 
 fn test_handle() -> dirk_engine::EngineHandle {
@@ -46,7 +46,7 @@ fn test_handle() -> dirk_engine::EngineHandle {
 #[test]
 fn default_editor_style_applies_dark_editor_visuals() {
     let ctx = egui::Context::default();
-    begin_egui_pass(&ctx);
+    ctx.begin_pass(egui_input());
 
     default_editor_style().apply(&ctx);
 
@@ -69,7 +69,7 @@ fn default_editor_style_applies_dark_editor_visuals() {
 #[test]
 fn editor_palette_converts_to_editor_style() {
     let ctx = egui::Context::default();
-    begin_egui_pass(&ctx);
+    ctx.begin_pass(egui_input());
 
     let palette = EditorPalette {
         surface: egui::Color32::from_rgb(0x32, 0x10, 0x44),
@@ -106,10 +106,10 @@ fn builtin_editor_subsystem_registers_expected_default_capabilities() -> anyhow:
     assert_eq!(open_windows, vec!["Engine", "Entities", "Entity Details"]);
 
     let ctx = egui::Context::default();
-    begin_egui_pass(&ctx);
-
     let frame = dirk_engine::editor::EditorRenderContext::new(0.016, &handle);
-    services.render_ui(&ctx, &frame, &universe)?;
+    services
+        .render_ui(&ctx, egui_input(), &frame, &universe)?
+        .drop_without_applying_deltas();
 
     let palette = EditorPalette::default();
     let style = ctx.global_style();
@@ -118,8 +118,6 @@ fn builtin_editor_subsystem_registers_expected_default_capabilities() -> anyhow:
     assert_eq!(style.visuals.selection.bg_fill, palette.selection);
     assert_eq!(style.visuals.widgets.active.bg_fill, palette.control_active);
     assert_eq!(style.spacing.window_margin, egui::Margin::symmetric(6, 5));
-
-    ctx.end_pass().drop_without_applying_deltas();
 
     Ok(())
 }

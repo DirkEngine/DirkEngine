@@ -1,8 +1,10 @@
 use std::time::Instant;
 
 use ash::vk;
+use dirk_engine::editor::{EditorRenderContext, EditorServices};
 use dirk_input::{ButtonState, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
+use dirk_universe::Universe;
 use egui::{ClippedPrimitive, Context, TextureId, TexturesDelta, ViewportId, ViewportInfo};
 use egui_ash_renderer::{DynamicRendering, Options, RenderMode, allocator::DefaultAllocator};
 
@@ -59,7 +61,13 @@ impl EguiState {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    pub fn begin_frame(&mut self, input: &EguiFrameInput) -> Context {
+    pub fn run_frame(
+        &mut self,
+        input: &EguiFrameInput,
+        editor: &EditorServices,
+        context: &EditorRenderContext<'_>,
+        universe: &Universe,
+    ) -> anyhow::Result<()> {
         let native_pixels_per_point = input.native_pixels_per_point.max(f32::EPSILON);
         let screen_rect = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -99,18 +107,14 @@ impl EguiState {
             },
         );
 
-        self.ctx.begin_pass(raw_input);
-        self.ctx.clone()
-    }
-
-    pub fn end_frame(&mut self) {
-        let output = self.ctx.end_pass();
+        let output = editor.render_ui(&self.ctx, raw_input, context, universe)?;
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         self.pending = Some(EguiPaintData {
             textures_delta: output.textures_delta,
             primitives,
             pixels_per_point: output.pixels_per_point,
         });
+        Ok(())
     }
 
     pub fn free_textures_for_frame(&mut self, frame: usize) -> Result<()> {
