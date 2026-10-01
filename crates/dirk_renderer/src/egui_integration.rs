@@ -4,7 +4,7 @@ use ash::vk;
 use dirk_input::{ButtonState, InputEvent};
 use dirk_platform::{Theme, WindowId, WindowInputEvent};
 use egui::{ClippedPrimitive, Context, TextureId, TexturesDelta, ViewportId, ViewportInfo};
-use egui_ash_renderer::{DynamicRendering, Options};
+use egui_ash_renderer::{DynamicRendering, Options, RenderMode, allocator::DefaultAllocator};
 
 use crate::{
     MAX_FRAMES_IN_FLIGHT, Result,
@@ -13,7 +13,7 @@ use crate::{
 
 pub struct EguiState {
     ctx: Context,
-    renderer: egui_ash_renderer::Renderer,
+    renderer: egui_ash_renderer::Renderer<DefaultAllocator>,
     start_time: Instant,
     pending: Option<EguiPaintData>,
     textures_to_free: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
@@ -36,10 +36,11 @@ impl EguiState {
             &device.instance,
             device.physical_device,
             device.device.clone(),
-            DynamicRendering {
+            RenderMode::DynamicRendering(DynamicRendering {
                 color_attachment_format: surface_format,
                 depth_attachment_format: None,
-            },
+                stencil_attachment_format: None,
+            }),
             Options {
                 in_flight_frames: MAX_FRAMES_IN_FLIGHT,
                 srgb_framebuffer: is_srgb_format(surface_format),
@@ -86,7 +87,6 @@ impl EguiState {
             focused: input.focused,
             system_theme,
             events,
-            modifiers: self.input.modifiers,
             ..egui::RawInput::default()
         };
         raw_input.viewports.insert(
@@ -115,7 +115,9 @@ impl EguiState {
 
     pub fn free_textures_for_frame(&mut self, frame: usize) -> Result<()> {
         let textures = std::mem::take(&mut self.textures_to_free[frame]);
-        self.renderer.free_textures(&textures)?;
+        for texture in textures {
+            self.renderer.free_texture(texture)?;
+        }
         Ok(())
     }
 
@@ -134,15 +136,22 @@ impl EguiState {
         extent: vk::Extent2D,
         frame: usize,
     ) -> Result<()> {
-        let Some(pending) = self.pending.take() else {
+        let Some(mut pending) = self.pending.take() else {
             return Ok(());
         };
 
-        self.renderer.set_textures(
-            device.queues.raw(QueueType::Graphics),
-            device.graphics_pool.raw(),
-            pending.textures_delta.set.as_slice(),
-        )?;
+        for (id, deltas) in pending.textures_delta.set.drain() {
+            for delta in deltas {
+                self.renderer.set_texture(
+                    device.queues.raw(QueueType::Graphics),
+                    device.graphics_pool.raw(),
+                    id,
+                    &delta,
+                )?;
+            }
+        }
+
+        self.textures_to_free[frame].extend(pending.textures_delta.free.drain());
 
         self.renderer.cmd_draw(
             **cmd,
@@ -151,7 +160,6 @@ impl EguiState {
             pending.primitives.as_slice(),
         )?;
 
-        self.textures_to_free[frame].extend(pending.textures_delta.free);
         Ok(())
     }
 }
@@ -160,6 +168,13 @@ struct EguiPaintData {
     textures_delta: TexturesDelta,
     primitives: Vec<ClippedPrimitive>,
     pixels_per_point: f32,
+}
+
+impl Drop for EguiPaintData {
+    fn drop(&mut self) {
+        // A skipped frame or rendering error can leave deltas unapplied.
+        self.textures_delta.clear();
+    }
 }
 
 fn is_srgb_format(format: vk::Format) -> bool {
@@ -201,6 +216,7 @@ impl EguiInputState {
 
     fn release_focus(&mut self, out: &mut Vec<egui::Event>) {
         self.modifiers = egui::Modifiers::default();
+        out.push(egui::Event::ModifiersChanged(self.modifiers));
         if !self.pressed_buttons.is_empty() {
             // Move outside the UI before releasing, so cancellation
             // cannot turn a pending press into a click or drop.
@@ -257,7 +273,10 @@ impl EguiInputState {
                 ));
             }
             InputEvent::PointerEntered => {}
-            InputEvent::ModifiersChanged(modifiers) => self.modifiers = (*modifiers).into(),
+            InputEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = (*modifiers).into();
+                out.push(egui::Event::ModifiersChanged(self.modifiers));
+            }
             InputEvent::FocusChanged(focused) => {
                 if !focused {
                     self.release_focus(out);
@@ -293,6 +312,7 @@ impl EguiInputState {
                 out.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::from(*unit),
                     delta: delta.to_egui(extent, native_pixels_per_point),
+                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::from(*modifiers),
                 });
             }
@@ -502,6 +522,7 @@ mod tests {
             events,
             vec![egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
+                phase: egui::TouchPhase::Move,
                 delta: Vec2::new(1.0, 1.0),
                 modifiers: modifiers.into(),
             }]
@@ -519,7 +540,7 @@ mod tests {
             window: window_id(raw),
             event: InputEvent::ModifiersChanged(modifiers),
         };
-        input.translate_events(
+        let events = input.translate_events(
             window_id(1),
             glam::UVec2::ONE,
             1.0,
@@ -534,8 +555,19 @@ mod tests {
             ],
         );
         assert_eq!(input.modifiers, ctrl.into());
-        input.translate_events(window_id(1), glam::UVec2::ONE, 1.0, &[]);
+        let ctx = egui::Context::default();
+        ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(ctx.input(|input| input.modifiers), ctrl.into());
+        input.run_frame(&ctx, Vec::new(), true);
         assert_eq!(input.modifiers, ctrl.into());
+        assert_eq!(ctx.input(|input| input.modifiers), ctrl.into());
     }
 
     impl EguiInputState {
@@ -548,15 +580,15 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let events = self.translate_events(window_id(1), glam::uvec2(100, 100), 1.0, &events);
-            let _ = ctx.run(
+            ctx.run_ui(
                 egui::RawInput {
                     events,
                     focused,
-                    modifiers: self.modifiers,
                     ..Default::default()
                 },
                 |_| {},
-            );
+            )
+            .drop_without_applying_deltas();
         }
     }
 

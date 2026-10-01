@@ -19,9 +19,7 @@ feature-depth = 1
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
-    # egui_dock 0.18.0 depends on paste. 0.18.0 is pinned because it matches
-    # the workspace's egui 0.33 version; newer egui_dock releases still depend
-    # on paste and require egui 0.34.
+    # egui_dock 0.21.1 still depends on the unmaintained paste crate.
     "RUSTSEC-2024-0436",
 
     # wayland-scanner 0.31.10 pins quick-xml to ^0.39, below the fixed 0.41
@@ -30,8 +28,7 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 
-    # egui 0.33 pulls ttf-parser through epaint -> ab_glyph. There is no safe
-    # compatible upgrade until egui's font stack moves away from ttf-parser.
+    # winit's sctk-adwaita -> ab_glyph font stack still pulls ttf-parser.
     "RUSTSEC-2026-0192",
 ]
 

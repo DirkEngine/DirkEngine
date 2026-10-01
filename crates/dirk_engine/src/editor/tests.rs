@@ -117,11 +117,11 @@ impl EditorServicesState {
         let first = self
             .dock_state
             .find_tab(&first)
-            .map(|(surface, node, _tab)| (surface, node));
+            .map(egui_dock::TabPath::node_path);
         let second = self
             .dock_state
             .find_tab(&second)
-            .map(|(surface, node, _tab)| (surface, node));
+            .map(egui_dock::TabPath::node_path);
 
         first.is_some() && first == second
     }
@@ -258,7 +258,7 @@ fn render_services_with_input(
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
     let result = services.render_ui(&ctx, &frame, universe);
-    let _ = ctx.end_pass();
+    ctx.end_pass().drop_without_applying_deltas();
     result
 }
 
@@ -511,14 +511,17 @@ fn menu_callback_can_query_services() -> anyhow::Result<()> {
     );
 
     let ctx = egui::Context::default();
-    ctx.begin_pass(egui::RawInput::default());
+    let raw_input = egui::RawInput::default();
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
     let mut result = Ok(());
-    egui::CentralPanel::default().show(&ctx, |ui| {
-        result = services.render_menu_for_tests("query", ui, &frame, &Universe::builder().build());
-    });
-    let _ = ctx.end_pass();
+    ctx.run_ui(raw_input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            result =
+                services.render_menu_for_tests("query", ui, &frame, &Universe::builder().build());
+        });
+    })
+    .drop_without_applying_deltas();
     result?;
     assert_eq!(*observed.lock(), Some(1));
     Ok(())
@@ -639,7 +642,7 @@ fn editor_style_is_applied_before_registered_capabilities_render() -> anyhow::Re
         let calls = Arc::clone(&calls);
         services.set_style(EditorStyle::new(move |ctx| {
             calls.fetch_add(1, Ordering::Relaxed);
-            ctx.style_mut(|style| {
+            ctx.global_style_mut(|style| {
                 style.visuals.window_fill = styled_window_fill;
             });
         }));
@@ -672,7 +675,7 @@ fn editor_styles_stack_in_registration_order() -> anyhow::Result<()> {
         let calls = Arc::clone(&calls);
         services.add_style(EditorStyle::new(move |ctx| {
             calls.lock().push("first");
-            ctx.style_mut(|style| {
+            ctx.global_style_mut(|style| {
                 style.visuals.window_fill = first_window_fill;
             });
         }));
@@ -681,7 +684,7 @@ fn editor_styles_stack_in_registration_order() -> anyhow::Result<()> {
         let calls = Arc::clone(&calls);
         services.add_style(EditorStyle::new(move |ctx| {
             calls.lock().push("second");
-            ctx.style_mut(|style| {
+            ctx.global_style_mut(|style| {
                 style.visuals.window_fill = second_window_fill;
             });
         }));
@@ -882,20 +885,22 @@ fn menu_commands_still_open_windows() -> anyhow::Result<()> {
 
     let universe = Universe::builder().build();
     let ctx = egui::Context::default();
-    ctx.begin_pass(egui::RawInput {
+    let raw_input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(800.0, 600.0),
         )),
         ..egui::RawInput::default()
-    });
+    };
     let handle = build_context().handle().clone();
     let frame = EditorRenderContext::new(0.016, &handle);
     let mut result = Ok(());
-    egui::CentralPanel::default().show(&ctx, |ui| {
-        result = services.render_menu_for_tests("Open", ui, &frame, &universe);
-    });
-    let _ = ctx.end_pass();
+    ctx.run_ui(raw_input, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            result = services.render_menu_for_tests("Open", ui, &frame, &universe);
+        });
+    })
+    .drop_without_applying_deltas();
     result?;
 
     assert_eq!(services.is_open(target), Some(true));
@@ -955,7 +960,7 @@ fn failing_menu_still_applies_queued_commands() {
             ..egui::RawInput::default()
         });
         result = services.render_ui(&ctx, &frame, &universe);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
         if result.is_err() {
             break;
         }

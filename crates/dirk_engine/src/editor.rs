@@ -12,7 +12,8 @@ use std::{
 use anyhow::Context as _;
 use dirk_universe::Universe;
 use egui_dock::{
-    DockArea, DockState, NodeIndex, Split, SurfaceIndex, TabViewer, tab_viewer::OnCloseResponse,
+    DockArea, DockState, NodeIndex, NodePath, Split, TabPath, TabViewer,
+    tab_viewer::OnCloseResponse,
 };
 use parking_lot::Mutex;
 
@@ -498,6 +499,14 @@ impl EditorServices {
             style.apply(ctx);
         }
 
+        let mut ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("dirk_editor"),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(ctx.viewport_rect()),
+        );
+
         let (editor_commands, command_receiver) = mpsc::channel();
         let editor_commands = EditorCommandSender::new(editor_commands);
 
@@ -508,7 +517,7 @@ impl EditorServices {
         let menu_result = Self::render_menus(
             &menus,
             &window_infos,
-            ctx,
+            &mut ui,
             context,
             &editor_commands,
             universe,
@@ -532,7 +541,7 @@ impl EditorServices {
             &windows,
             &mut dock_state,
             &mut closed_windows,
-            ctx,
+            &mut ui,
             context,
             &editor_commands,
             universe,
@@ -566,7 +575,7 @@ impl EditorServices {
     fn render_menus(
         menus: &[RegisteredMenu],
         windows: &[EditorWindowInfo],
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         context: &EditorRenderContext<'_>,
         editor_commands: &EditorCommandSender,
         universe: &Universe,
@@ -584,7 +593,7 @@ impl EditorServices {
         };
 
         let mut result = Ok(());
-        egui::TopBottomPanel::top("dirk_editor_menu_bar").show(ctx, |ui| {
+        egui::Panel::top("dirk_editor_menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 for menu in menus {
                     ui.push_id(menu.id.raw(), |ui| {
@@ -611,7 +620,7 @@ impl EditorServices {
         windows: &[RegisteredWindow],
         dock_state: &mut DockState<EditorWindowId>,
         closed_windows: &mut Vec<EditorWindowId>,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         context: &EditorRenderContext<'_>,
         editor_commands: &EditorCommandSender,
         universe: &Universe,
@@ -630,7 +639,7 @@ impl EditorServices {
             result: &mut result,
         };
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             DockArea::new(dock_state)
                 .style(egui_dock::Style::from_egui(ui.style()))
                 .show_leaf_collapse_buttons(false)
@@ -827,9 +836,9 @@ impl EditorServicesState {
     }
 
     fn insert_near_category(&mut self, id: EditorWindowId, category: &str) {
-        if let Some((surface, node, _tab)) = self.find_dock_tab_by_category(category) {
+        if let Some(path) = self.find_dock_tab_by_category(category) {
             self.dock_state
-                .set_focused_node_and_surface((surface, node));
+                .set_focused_node_and_surface(path.node_path());
             self.dock_state.push_to_focused_leaf(id);
             return;
         }
@@ -839,19 +848,17 @@ impl EditorServicesState {
         } else {
             Split::Right
         };
-        self.dock_state.split(
-            (SurfaceIndex::main(), NodeIndex::root()),
-            split,
-            0.75,
-            egui_dock::Node::leaf(id),
-        );
+        self.dock_state
+            .split(NodePath::MAIN_ROOT, split, 0.75, egui_dock::Node::leaf(id));
     }
 
     fn focus_window_tab(&mut self, id: EditorWindowId) {
-        if let Some((surface, node, tab)) = self.dock_state.find_tab(&id) {
+        if let Some(path) = self.dock_state.find_tab(&id) {
             self.dock_state
-                .set_focused_node_and_surface((surface, node));
-            self.dock_state.set_active_tab((surface, node, tab));
+                .set_focused_node_and_surface(path.node_path());
+            self.dock_state
+                .set_active_tab(path)
+                .expect("the tab path was just found in the dock state");
         }
     }
 
@@ -867,10 +874,7 @@ impl EditorServicesState {
             .count()
     }
 
-    fn find_dock_tab_by_category(
-        &self,
-        category: &str,
-    ) -> Option<(SurfaceIndex, NodeIndex, egui_dock::TabIndex)> {
+    fn find_dock_tab_by_category(&self, category: &str) -> Option<TabPath> {
         self.dock_state.find_tab_from(|tab| {
             self.window_descriptor(*tab)
                 .is_some_and(|descriptor| descriptor.category == category)

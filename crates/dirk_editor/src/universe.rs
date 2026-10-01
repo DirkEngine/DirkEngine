@@ -204,17 +204,21 @@ mod tests {
         universe.tick(0.0);
 
         let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..egui::RawInput::default()
-        });
-        egui::CentralPanel::default().show(&ctx, |ui| {
-            UniverseWindows::default().entity_list_ui(ui, &universe);
-        });
-        let output = ctx.end_pass();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    UniverseWindows::default().entity_list_ui(ui, &universe);
+                });
+            },
+        );
+        output.textures_delta.clear();
 
         assert!(output.shapes.len() < 500, "too many entity rows rendered");
     }
@@ -229,17 +233,21 @@ mod tests {
         universe.tick(0.0);
 
         let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(80.0, 600.0),
-            )),
-            ..egui::RawInput::default()
-        });
-        egui::CentralPanel::default().show(&ctx, |ui| {
-            UniverseWindows::default().entity_list_ui(ui, &universe);
-        });
-        let output = ctx.end_pass();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(80.0, 600.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    UniverseWindows::default().entity_list_ui(ui, &universe);
+                });
+            },
+        );
+        output.textures_delta.clear();
         let mut entity_rows = 0;
         for shape in output.shapes {
             if let egui::epaint::Shape::Text(text) = shape.shape

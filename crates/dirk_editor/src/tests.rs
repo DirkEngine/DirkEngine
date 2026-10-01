@@ -51,7 +51,7 @@ fn default_editor_style_applies_dark_editor_visuals() {
     default_editor_style().apply(&ctx);
 
     let palette = EditorPalette::default();
-    let style = ctx.style();
+    let style = ctx.global_style();
     assert_eq!(ctx.theme(), egui::Theme::Dark);
     assert_eq!(style.visuals.window_fill, palette.surface);
     assert_eq!(style.visuals.panel_fill, palette.background);
@@ -63,7 +63,7 @@ fn default_editor_style_applies_dark_editor_visuals() {
         egui::CornerRadius::same(2)
     );
 
-    let _ = ctx.end_pass();
+    ctx.end_pass().drop_without_applying_deltas();
 }
 
 #[test]
@@ -78,9 +78,9 @@ fn editor_palette_converts_to_editor_style() {
     let style: EditorStyle = palette.into();
     style.apply(&ctx);
 
-    assert_eq!(ctx.style().visuals.window_fill, palette.surface);
+    assert_eq!(ctx.global_style().visuals.window_fill, palette.surface);
 
-    let _ = ctx.end_pass();
+    ctx.end_pass().drop_without_applying_deltas();
 }
 
 #[test]
@@ -112,14 +112,14 @@ fn builtin_editor_subsystem_registers_expected_default_capabilities() -> anyhow:
     services.render_ui(&ctx, &frame, &universe)?;
 
     let palette = EditorPalette::default();
-    let style = ctx.style();
+    let style = ctx.global_style();
     assert_eq!(style.visuals.window_fill, palette.surface);
     assert_eq!(style.visuals.panel_fill, palette.background);
     assert_eq!(style.visuals.selection.bg_fill, palette.selection);
     assert_eq!(style.visuals.widgets.active.bg_fill, palette.control_active);
     assert_eq!(style.spacing.window_margin, egui::Margin::symmetric(6, 5));
 
-    let _ = ctx.end_pass();
+    ctx.end_pass().drop_without_applying_deltas();
 
     Ok(())
 }

@@ -114,7 +114,7 @@ dirk_editor   = { version = "0.1.0", path = "crates/dirk_editor" }
 dirk_shaders  = { version = "0.1.0", path = "crates/dirk_shaders" }
 
 # Main Engine Dependencies
-winit = "0.31.0-beta.2"
+winit = "0.31.0-beta.3"
 ash = { version = "0.38", features = ["loaded"] }
 ash-window = "0.13"
 raw-window-handle = "0.6"
@@ -124,14 +124,14 @@ gpu-allocator = { version = "0.28", default-features = false, features = ["std",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-egui = "0.33"
-egui_dock = "0.18"
-egui-ash-renderer = { version = "0.11", features = ["dynamic-rendering"] }
+egui = "0.36"
+egui_dock = "0.21"
+egui-ash-renderer = "0.13"
 
 # Shaders
-cargo-gpu-install = "0.10.0-alpha.1"
-spirv-std         = "0.10.0-alpha.1"
-rspirv-reflect = "0.9"
+cargo-gpu-install = "0.10.0"
+spirv-std         = { version = "0.10.0", default-features = false, features = ["glam_0_33"] }
+rspirv = "0.13"
 
 # Macro dependencies
 syn = { version = "2", features = ["full"] }

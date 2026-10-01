@@ -41,7 +41,7 @@ egui-ash-renderer = { workspace = true, optional = true }
 [build-dependencies]
 cargo-gpu-install.workspace = true
 anyhow.workspace = true
-rspirv-reflect.workspace = true
+rspirv.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 
