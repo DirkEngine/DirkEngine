@@ -20,3 +20,8 @@ is unavailable, report the exact command that failed and the reason.
 
 If working on specific cargo features, run with `--no-default-features`
 & `--all-features`.
+
+## Pull requests
+
+Open pull requests as drafts while iterating: CI then skips macOS, its slowest
+runner. Mark them ready for review to run the full matrix.

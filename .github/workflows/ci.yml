@@ -1,128 +1,144 @@
+# Continuous integration for DirkEngine.
+#
+#   checks -> formatting and the dependency audit, which compile nothing
+#   rust   -> clippy, tests, and the debug build, with every feature and with
+#             no default features, on Linux and macOS (the platform layer
+#             differs); Linux also runs the doc tests and builds the docs
+#
+# Each job compiles once and reuses it for every step. Pull requests run only
+# when their changes can affect the result (see `changes`), and draft pull
+# requests skip macOS, the slowest runner, until they are marked ready. Pushes
+# to main and manual runs run everything. `ci` is the single status to
+# require: it fails if any job failed and passes when the rest succeeded or
+# were skipped. deny.yml audits new advisories weekly.
+#
+# Caches are saved from main only. Pull requests restore main's caches, so a
+# branch never evicts them with copies no other branch can read.
+
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - 'nix/**'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'README.md'
   pull_request:
-    paths-ignore:
-      - 'nix/**'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'README.md'
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-# Cancel any in-progress run on the same branch when a new commit is pushed
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts only bloat CI caches; restored dependency builds
+  # make up for the lost reuse.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  # Decides which jobs a pull request needs from the paths it changes, and
+  # holds macOS back while it is a draft. A file matches a filter only when it
+  # matches every pattern, so anything outside the listed docs runs `rust`;
+  # `deny` therefore uses one pattern.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
+      deny: ${{ github.event_name != 'pull_request' || steps.filter.outputs.deny == 'true' }}
+      platforms: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]' }}
+    steps:
+      - if: github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: every
+          filters: |
+            rust:
+              - '**'
+              - '!docs/**'
+              - '!AGENTS.md'
+              - '!LICENSE'
+              - '!t3.json'
+              - '!.gitignore'
+            deny:
+              - '{Cargo.toml,**/Cargo.toml,Cargo.lock,deny.toml,.github/workflows/**}'
+
+  checks:
+    name: checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-deny
+      - run: cargo fmt --all --check
+      - run: cargo deny check -D warnings
+
+  # Clippy runs first so lint failures report early; the tests then reuse the
+  # dependencies it compiled for build scripts and proc macros.
+  rust:
+    name: rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-${{ matrix.os }}"
-          cache-all-crates: "true"
-
-      - name: cargo check (default features)
-        run: cargo check --workspace --locked
-
-      - name: cargo check (no default features)
-        run: cargo check --workspace --locked --no-default-features
-
-      - name: cargo check (all features)
-        run: cargo check --workspace --locked --all-features
-
-  build:
-    name: Build (${{ matrix.os }})
+        os: ${{ fromJSON(needs.changes.outputs.platforms) }}
     runs-on: ${{ matrix.os }}
-    needs: check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          shared-key: "ci-${{ matrix.os }}"
-          cache-all-crates: "true"
-
-      - name: Build debug
-        run: cargo build --workspace --locked
-
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # dirk_renderer's build script compiles rust-gpu's codegen backend
+          # into this directory once per rust-gpu version, which takes
+          # minutes; every job would otherwise repeat it.
+          cache-directories: ${{ runner.os == 'macOS' && '~/Library/Caches/rust-gpu' || '~/.cache/rust-gpu' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --locked --all-features -- -D warnings
+      - run: cargo clippy --workspace --locked --no-default-features -- -D warnings
+      - run: cargo nextest run --workspace --locked --all-features
+      - run: cargo nextest run --workspace --locked --no-default-features
+      - if: runner.os == 'Linux'
+        run: cargo test --workspace --locked --doc --all-features
+      - if: runner.os == 'Linux'
+        run: cargo doc --workspace --locked --no-deps --all-features
       - name: Bundle debug build and runtime assets
         run: |
+          cargo build --workspace --locked
           mkdir -p dist/dirkengine
           cp target/debug/dirkengine dist/dirkengine/
           cp -R assets dist/dirkengine/assets
           tar -C dist -czf dist/dirkengine-debug.tar.gz dirkengine
-
-      - name: Upload Debug Artifact
-        uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dirkengine-debug-${{ matrix.os }}
           path: dist/dirkengine-debug.tar.gz
 
-          # This isn't cached properly, runs take 7min.
-          # When we fix caching, uncomment
-      # - name: Build release
-      #   run: cargo build --workspace --locked --release
-
-      # - name: Upload Release Artifact
-      #   uses: actions/upload-artifact@v6
-      #   with:
-      #     name: dirkengine-release-${{ matrix.os }}
-      #     path: target/release/dirkengine
-
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    needs: check
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  ci:
+    name: ci
+    if: always()
+    needs:
+      - changes
+      - checks
+      - rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          shared-key: "ci-${{ matrix.os }}"
-          cache-all-crates: "true"
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
-
-      - name: Test (default features)
-        run: cargo nextest run --workspace --locked
-
-      - name: Test (no default features)
-        run: cargo nextest run --workspace --locked --no-default-features
+          allowed-skips: checks, rust
+          jobs: ${{ toJSON(needs) }}
