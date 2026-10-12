@@ -1,28 +1,12 @@
+# Audits dependencies weekly, so newly published advisories surface without a
+# code change. CI audits every change to the dependencies.
+
 name: Dependency Audit
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/Cargo.toml'
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/Cargo.toml'
-  # Also run on a schedule to catch newly published advisories even when there's no code change
   schedule:
     - cron: "0 8 * * 1" # Every Monday at 08:00 UTC
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,11 +15,10 @@ jobs:
   audit:
     name: Cargo Deny
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
-
-      - name: Run cargo-deny
-        run: cargo deny check -D warnings
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check -D warnings
