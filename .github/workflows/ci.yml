@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -78,11 +78,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+      - run: cargo fmt --all --check
+      - if: needs.changes.outputs.deny == 'true'
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-deny
-      - run: cargo fmt --all --check
-      - run: cargo deny check -D warnings
+      - if: needs.changes.outputs.deny == 'true'
+        run: cargo deny check -D warnings
 
   # Clippy runs first so lint failures report early; the tests then reuse the
   # dependencies it compiled for build scripts and proc macros.
@@ -108,10 +110,12 @@ jobs:
           # minutes; every job would otherwise repeat it.
           cache-directories: ${{ runner.os == 'macOS' && '~/Library/Caches/rust-gpu' || '~/.cache/rust-gpu' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # dirk_editor always enables the engine's editor support, so the
+      # no-default-features passes leave it out.
       - run: cargo clippy --workspace --locked --all-features -- -D warnings
-      - run: cargo clippy --workspace --locked --no-default-features -- -D warnings
+      - run: cargo clippy --workspace --exclude dirk_editor --locked --no-default-features -- -D warnings
       - run: cargo nextest run --workspace --locked --all-features
-      - run: cargo nextest run --workspace --locked --no-default-features
+      - run: cargo nextest run --workspace --exclude dirk_editor --locked --no-default-features
       - if: runner.os == 'Linux'
         run: cargo test --workspace --locked --doc --all-features
       - if: runner.os == 'Linux'
