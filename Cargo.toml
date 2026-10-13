@@ -146,3 +146,9 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 pedantic = "warn"
 unwrap_used = "warn"
+
+# Line tables keep file and line numbers in backtraces but drop the variable
+# and type info that makes up most of a debug build's output. Also applies to
+# tests, which inherit this profile.
+[profile.dev]
+debug = "line-tables-only"
