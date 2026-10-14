@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Ident, parse_macro_input};
+use quote::quote;
+use syn::{Data, DeriveInput, parse_macro_input};
 
 mod event;
 
@@ -94,29 +94,33 @@ pub fn derive_event(input: proc_macro::TokenStream) -> TokenStream {
     result.unwrap_or_else(|e| e.to_compile_error()).into()
 }
 
-/// Derive the `Component` marker trait for any type.
+/// Derive `dirk_universe`'s `Component` trait for any type.
 ///
-/// This is a zero-boilerplate derive that simply emits an empty `impl Component
-/// for …` block, respecting any generics on the type:
+/// The component is mutable: systems may edit it through `&mut C` queries and
+/// commands may insert or remove it. Generics on the type are respected:
 ///
 /// ```rust
-/// # trait Component {}
+/// # extern crate self as dirk_universe;
+/// # pub mod components {
+/// #     pub trait Component { type Mutability; }
+/// #     pub enum Mutable {}
+/// # }
+/// # use components::Component;
 /// # use dirk_proc::Component;
 /// #[derive(Component, Clone)]
 /// struct Transform { position: (i32, i32) }
+/// # fn main() {}
 /// ```
 #[proc_macro_derive(Component)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
-    empty_derive(input, &format_ident!("Component"))
-}
-
-pub(crate) fn empty_derive(input: TokenStream, trait_ident: &Ident) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     quote! {
-        impl #impl_generics #trait_ident for #name #ty_generics #where_clause {}
+        impl #impl_generics ::dirk_universe::components::Component for #name #ty_generics #where_clause {
+            type Mutability = ::dirk_universe::components::Mutable;
+        }
     }
     .into()
 }

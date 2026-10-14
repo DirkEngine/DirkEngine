@@ -87,7 +87,7 @@ impl UniverseWindows {
                 "{}: {} ({} entities)",
                 world.id().raw(),
                 world.name(),
-                world.entity_count()
+                universe.entities_in_world(world.id()).count()
             );
             if ui
                 .selectable_label(self.selected_world == Some(world.id()), label)
