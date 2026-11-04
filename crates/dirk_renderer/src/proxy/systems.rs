@@ -60,15 +60,15 @@ impl RendererSystem {
     }
 }
 
-type RendererParams<'u> = (
-    Lifecycle<'u>,
-    Query<'u, (Entity, &'u Renderable), Changed<Renderable>>,
-    Query<'u, (Entity, &'u Transform), Changed<Transform>>,
-    Query<'u, (Entity, &'u PlayerId), Changed<PlayerId>>,
-);
+impl System for RendererSystem {
+    type Params<'u> = (
+        Lifecycle<'u>,
+        Query<'u, (Entity, &'u Renderable), Changed<Renderable>>,
+        Query<'u, (Entity, &'u Transform), Changed<Transform>>,
+        Query<'u, (Entity, &'u PlayerId), Changed<PlayerId>>,
+    );
 
-impl System<RendererParams<'_>> for RendererSystem {
-    fn run(&mut self, (lifecycle, meshes, transforms, players): RendererParams<'_>) {
+    fn run(&mut self, (lifecycle, meshes, transforms, players): Self::Params<'_>) {
         // Replay structure before uploading current values. This handles
         // transient entities and component removal/reinsertion in one tick.
         for event in lifecycle.iter() {

@@ -9,6 +9,10 @@ use std::{
 };
 use tracing::warn;
 
+// Declared first so its tuple macros are in scope for the modules below.
+#[macro_use]
+mod macros;
+
 pub mod components;
 use components::{AnyComponent, Component, Components};
 
@@ -16,9 +20,10 @@ pub mod lifecycle;
 use lifecycle::LifecycleEvent;
 
 pub mod query;
+use query::{Query, ReadOnlyQueryData, filter::QueryFilter};
 
 pub mod systems;
-use systems::{ErasedSystem, ToSystem};
+use systems::{ErasedSystem, IntoSystem};
 
 mod command_buffer;
 use command_buffer::Command;
@@ -32,6 +37,19 @@ pub use world::{World, WorldBuilder, WorldId};
 
 mod allocator;
 use allocator::Allocator;
+
+/// The types needed to define components and systems.
+pub mod prelude {
+    pub use crate::{
+        CommandBuffer, Entity, Universe, UniverseHandle, World, WorldId,
+        components::Component,
+        query::{
+            Query,
+            filter::{Added, Changed, With, Without},
+        },
+        systems::{Commands, DeltaTime, IntoSystem, System},
+    };
+}
 
 /// Read-only information about one component attached to an entity.
 pub struct ComponentInfo<'a> {
@@ -341,6 +359,20 @@ impl Universe {
         self.entities.contains_key(&entity)
     }
 
+    /// Returns a read-only query over the current universe, for use outside
+    /// systems. `Added` and `Changed` filters match every present component,
+    /// since there is no previous run to compare against.
+    #[must_use]
+    pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
+        Query::new(self, 0)
+    }
+
+    /// Like [`Universe::query`], restricted by the filter `F`.
+    #[must_use]
+    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> Query<'_, D, F> {
+        Query::new(self, 0)
+    }
+
     /// Returns a shared borrow of a component, or `None` if the entity
     /// does not have one.
     #[must_use]
@@ -398,8 +430,8 @@ impl UniverseBuilder {
     /// the same parameters. Component edits are immediate; structural commands
     /// are applied on the following tick.
     #[must_use]
-    pub fn with_system<Marker>(mut self, system: impl ToSystem<Marker>) -> Self {
-        self.systems.push(system.to_system());
+    pub fn with_system<Marker>(mut self, system: impl IntoSystem<Marker>) -> Self {
+        self.systems.push(system.into_system());
         self
     }
 

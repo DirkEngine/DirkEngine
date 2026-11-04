@@ -7,7 +7,7 @@ use dirk_universe::{
         Query,
         filter::{Added, Changed, Without},
     },
-    systems::{Commands, DeltaTime, Lifecycle, RemovedComponents, ToSystem},
+    systems::{Commands, DeltaTime, IntoSystem, Lifecycle, RemovedComponents, System},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -192,6 +192,73 @@ fn registered_function_systems_keep_state_and_defer_commands_until_next_tick() {
     universe.tick(1.0);
     assert!(!universe.is_alive(entity));
     assert_eq!(seen.borrow().len(), 2);
+}
+
+#[test]
+fn struct_systems_name_their_parameters_once() {
+    struct Accumulate {
+        total: i32,
+    }
+
+    impl System for Accumulate {
+        type Params<'u> = (
+            Query<'u, (&'u Position, Option<&'u mut Counter>)>,
+            DeltaTime,
+        );
+
+        fn run(&mut self, (mut query, _): Self::Params<'_>) {
+            for (position, counter) in &mut query {
+                self.total += position.0;
+                if let Some(mut counter) = counter {
+                    counter.0 = self.total;
+                }
+            }
+        }
+    }
+
+    let mut universe = Universe::builder()
+        .with_world(World::builder("w"))
+        .with_system(Accumulate { total: 0 })
+        .build();
+    universe.tick(0.0);
+    let mut cmd = universe.handle().command_buffer();
+    let counted = cmd.spawn(
+        WorldId::default(),
+        Entity::builder()
+            .with_component(Position(2, 0))
+            .with_component(Counter(0)),
+    );
+    cmd.submit();
+    universe.tick(0.0);
+    universe.tick(0.0);
+
+    assert_eq!(universe.component::<Counter>(counted).map(|c| c.0), Some(4));
+}
+
+#[test]
+fn optional_query_data_matches_entities_without_the_component() {
+    let mut universe = Universe::builder().with_world(World::builder("w")).build();
+    let with = spawn_entity(
+        &mut universe,
+        WorldId::default(),
+        Entity::builder()
+            .with_component(Position(1, 0))
+            .with_component(Counter(7)),
+    );
+    let without = spawn_entity(
+        &mut universe,
+        WorldId::default(),
+        Entity::builder().with_component(Position(2, 0)),
+    );
+
+    let query = universe.query::<(Entity, &Position, Option<&Counter>)>();
+    let mut matched: Vec<_> = query
+        .iter()
+        .map(|(entity, _, counter)| (entity, counter.map(|c| c.0)))
+        .collect();
+    matched.sort_by_key(|(entity, _)| entity.raw());
+
+    assert_eq!(matched, vec![(with, Some(7)), (without, None)]);
 }
 
 #[test]
@@ -599,7 +666,7 @@ fn change_detection_survives_an_observer_skipping_ticks() {
             .borrow_mut()
             .push(query.iter().map(|counter| counter.0).collect::<Vec<_>>());
     })
-    .to_system();
+    .into_system();
     let mut universe = Universe::builder()
         .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(0))))
         .with_system(|mut query: Query<&mut Counter>| {
@@ -656,7 +723,7 @@ fn mutable_iteration_and_lookups_edit_live_values_in_one_system() {
     assert_eq!(universe.component::<Counter>(included).unwrap().0, 5);
     assert_eq!(universe.component::<Counter>(hidden).unwrap().0, 0);
     assert_eq!(universe.component::<Counter>(other_world).unwrap().0, 0);
-    let query = Query::<(Entity, &Counter), Without<Hidden>>::new(&universe);
+    let query = universe.query_filtered::<(Entity, &Counter), Without<Hidden>>();
     assert!(query.get(hidden).is_none());
     assert_eq!(query.iter_in_world(first).count(), 1);
 }

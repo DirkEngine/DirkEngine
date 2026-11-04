@@ -9,7 +9,7 @@ use crate::{
         Query,
         filter::{With, Without},
     },
-    systems::ToSystem,
+    systems::IntoSystem,
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -94,7 +94,8 @@ fn query_filters_by_components_and_world_membership() {
             .with_component(Mana(5)),
     );
 
-    let matched: Vec<_> = Query::<(Entity, &Health), Without<Mana>>::new(&universe)
+    let matched: Vec<_> = universe
+        .query_filtered::<(Entity, &Health), Without<Mana>>()
         .iter()
         .filter(|item| {
             universe.is_in_world(world_a, item.0) && !universe.is_in_world(world_b, item.0)
@@ -271,7 +272,8 @@ fn query_iter_applies_filters() {
         Entity::builder().with_component(Mana(15)),
     );
 
-    let matched: Vec<_> = Query::<(Entity, &Health), Without<Mana>>::new(&universe)
+    let matched: Vec<_> = universe
+        .query_filtered::<(Entity, &Health), Without<Mana>>()
         .iter()
         .map(|(entity, health)| (entity.raw(), health.0))
         .collect();
@@ -298,7 +300,8 @@ fn query_tuple_params_require_every_component() {
             .with_component(Mana(5)),
     );
 
-    let matched: Vec<_> = Query::<(Entity, &Health, &Mana)>::new(&universe)
+    let matched: Vec<_> = universe
+        .query::<(Entity, &Health, &Mana)>()
         .iter()
         .map(|(entity, health, mana)| (entity.raw(), health.0, mana.0))
         .collect();
@@ -330,7 +333,8 @@ fn query_fetch_skips_entities_missing_parameters() {
             .with_component(Mana(2)),
     );
 
-    let mut matched: Vec<_> = Query::<(Entity, &Mana)>::new(&universe)
+    let mut matched: Vec<_> = universe
+        .query::<(Entity, &Mana)>()
         .iter()
         .map(|(entity, _)| entity.raw())
         .collect();
@@ -360,7 +364,8 @@ fn query_matches_entities_across_all_worlds() {
         Entity::builder().with_component(Health(20)),
     );
 
-    let mut matched: Vec<_> = Query::<(Entity, &Health)>::new(&universe)
+    let mut matched: Vec<_> = universe
+        .query::<(Entity, &Health)>()
         .iter()
         .map(|(entity, _)| entity.raw())
         .collect();
@@ -374,8 +379,8 @@ fn query_on_empty_universe_yields_nothing() {
     let mut universe = Universe::builder().with_world(World::builder("w")).build();
     universe.tick(0.0);
 
-    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 0);
-    assert_eq!(Query::<Entity>::new(&universe).iter().count(), 0);
+    assert_eq!(universe.query::<(Entity, &Health)>().iter().count(), 0);
+    assert_eq!(universe.query::<Entity>().iter().count(), 0);
 }
 
 #[test]
@@ -389,14 +394,14 @@ fn query_excludes_despawned_entities() {
         world,
         Entity::builder().with_component(Health(10)),
     );
-    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 1);
+    assert_eq!(universe.query::<(Entity, &Health)>().iter().count(), 1);
 
     let mut command_buffer = universe.handle().command_buffer();
     command_buffer.despawn(despawned);
     command_buffer.submit();
     universe.tick(0.016);
 
-    assert_eq!(Query::<(Entity, &Health)>::new(&universe).iter().count(), 0);
+    assert_eq!(universe.query::<(Entity, &Health)>().iter().count(), 0);
 }
 
 #[test]
@@ -424,35 +429,36 @@ fn with_and_without_filters_compose() {
     );
     let neither = spawn_entity(&mut universe, world, Entity::builder());
 
-    let mut with_health: Vec<_> = Query::<Entity, With<Health>>::new(&universe)
+    let mut with_health: Vec<_> = universe
+        .query_filtered::<Entity, With<Health>>()
         .iter()
         .map(Entity::raw)
         .collect();
     with_health.sort_unstable();
     assert_eq!(with_health, vec![health_only.raw(), both.raw()]);
 
-    let mut without_health: Vec<_> = Query::<Entity, Without<Health>>::new(&universe)
+    let mut without_health: Vec<_> = universe
+        .query_filtered::<Entity, Without<Health>>()
         .iter()
         .map(Entity::raw)
         .collect();
     without_health.sort_unstable();
     assert_eq!(without_health, vec![mana_only.raw(), neither.raw()]);
 
-    let combined: Vec<_> = Query::<Entity, (With<Health>, Without<Mana>)>::new(&universe)
+    let combined: Vec<_> = universe
+        .query_filtered::<Entity, (With<Health>, Without<Mana>)>()
         .iter()
         .collect();
     assert_eq!(combined, vec![health_only]);
     assert_eq!(
-        Query::<Entity, (With<Health>, Without<Health>)>::new(&universe)
+        universe
+            .query_filtered::<Entity, (With<Health>, Without<Health>)>()
             .iter()
             .count(),
         0
     );
 
-    let mut everything: Vec<_> = Query::<Entity, ()>::new(&universe)
-        .iter()
-        .map(Entity::raw)
-        .collect();
+    let mut everything: Vec<_> = universe.query::<Entity>().iter().map(Entity::raw).collect();
     everything.sort_unstable();
     assert_eq!(
         everything,
@@ -493,7 +499,7 @@ fn function_system_iterates_filtered_query() {
             .borrow_mut()
             .extend(query.iter().map(|health| health.0));
     })
-    .to_system();
+    .into_system();
 
     system.run(
         &universe,
@@ -530,7 +536,7 @@ fn function_system_sums_all_matching_entities() {
     let mut system = (move |query: Query<'_, &Health>| {
         system_total.set(system_total.get() + query.iter().map(|health| health.0).sum::<u32>());
     })
-    .to_system();
+    .into_system();
 
     system.run(
         &universe,
