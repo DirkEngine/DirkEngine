@@ -1,6 +1,6 @@
 //! Component definitions and storage.
 
-use crate::Entity;
+use crate::{Entity, macros::sealed::Sealed};
 use std::{
     any::{Any, TypeId},
     cell::{Cell, Ref, RefCell, RefMut},
@@ -9,10 +9,31 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-/// Base marker trait for component types.
-pub trait Component: 'static + Sized + Debug + Send {}
+/// Data attached to an entity. Derive it with `#[derive(Component)]`.
+pub trait Component: 'static + Sized + Debug + Send {
+    /// [`Mutable`] for ordinary components, or [`ReadOnly`] for components
+    /// that only the engine writes, such as [`InWorld`](crate::InWorld).
+    type Mutability: Mutability;
+}
 #[doc(hidden)]
 pub use dirk_proc::Component;
+
+/// Whether systems and commands may write a component.
+pub trait Mutability: Sealed {}
+
+/// Components that systems edit and commands insert or remove.
+pub enum Mutable {}
+impl Sealed for Mutable {}
+impl Mutability for Mutable {}
+
+/// Components that queries can read but only the engine writes.
+pub enum ReadOnly {}
+impl Sealed for ReadOnly {}
+impl Mutability for ReadOnly {}
+
+/// A component that `&mut C` queries, commands and entity builders may write.
+pub trait MutableComponent: Component<Mutability = Mutable> {}
+impl<C: Component<Mutability = Mutable>> MutableComponent for C {}
 
 pub(crate) trait AnyComponent: Send + Any + Debug {
     fn as_any(&self) -> &dyn Any;
@@ -139,10 +160,34 @@ impl Components {
             .is_some_and(|slot| slot.changed.get() > last_run)
     }
 
-    pub fn remove(&mut self, entity: Entity, type_id: TypeId) -> bool {
+    /// Entities whose `C` changed after `last_run`.
+    pub fn changed_since<C: Component>(&self, last_run: u64) -> impl Iterator<Item = Entity> + '_ {
         self.storages
-            .get_mut(&type_id)
-            .is_some_and(|storage| storage.remove(&entity).is_some())
+            .get(&TypeId::of::<C>())
+            .into_iter()
+            .flat_map(move |storage| {
+                storage
+                    .iter()
+                    .filter(move |(_, slot)| slot.changed.get() > last_run)
+                    .map(|(entity, _)| *entity)
+            })
+    }
+
+    /// Iterates over every entity holding `C`, with its value.
+    pub fn iter<C: Component>(&self) -> impl Iterator<Item = (Entity, Ref<'_, C>)> {
+        self.storages
+            .get(&TypeId::of::<C>())
+            .into_iter()
+            .flat_map(|storage| storage.keys())
+            .filter_map(|entity| Some((*entity, self.get::<C>(*entity)?)))
+    }
+
+    /// Removes a component, returning the tick at which it was added.
+    pub fn remove(&mut self, entity: Entity, type_id: TypeId) -> Option<u64> {
+        self.storages
+            .get_mut(&type_id)?
+            .remove(&entity)
+            .map(|slot| slot.added)
     }
 
     pub fn contains(&self, entity: Entity, type_id: TypeId) -> bool {
