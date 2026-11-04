@@ -15,7 +15,11 @@ pub use assets::*;
 
 mod handle;
 use handle::AssetRef;
+
+mod lease;
 pub use handle::{AssetGeneration, Handle};
+pub use lease::AssetLease;
+use lease::PendingLease;
 
 use dirk_engine::{EngineBuilder, EngineHandle, EnginePlugin, Subsystem};
 use dirk_events::{Consumer, Dispatcher, EventManager};
@@ -476,6 +480,9 @@ struct AssetRegistryInner {
 
     /// Weak references to currently live assets.
     loaded_assets: RwLock<HashMap<AssetHandle, CachedAsset>>,
+
+    /// Leases whose loads [`AssetRegistry::tick`] still has to complete.
+    pending_leases: Mutex<Vec<Box<dyn PendingLease>>>,
 }
 
 struct CachedAsset {
@@ -528,6 +535,7 @@ impl AssetRegistry {
             load_dispatchers: RwLock::new(HashMap::new()),
             load_locks: Mutex::new(HashMap::new()),
             loaded_assets: RwLock::new(HashMap::new()),
+            pending_leases: Mutex::new(Vec::new()),
         };
 
         let assets_path = root.as_ref().canonicalize()?;
@@ -539,12 +547,19 @@ impl AssetRegistry {
         })
     }
 
-    /// Processes deferred asset-unload notifications and emits public events.
+    /// Completes pending [`AssetLease`] loads, processes deferred
+    /// asset-unload notifications and emits public events.
     ///
     /// Must be called **exactly once per frame**. Skipping this call means
-    /// [`AssetUnloaded`] events are never delivered, causing potential memory
-    /// leaks (e.g. the renderer cannot free GPU resources).
+    /// leases never finish loading and [`AssetUnloaded`] events are never
+    /// delivered, causing potential memory leaks (e.g. the renderer cannot
+    /// free GPU resources).
     pub fn tick(&self) {
+        self.inner
+            .pending_leases
+            .lock()
+            .retain(|lease| lease.poll());
+
         let unloaded: Vec<_> = self
             .inner
             .internal_unload_consumer
@@ -584,6 +599,16 @@ impl AssetRegistry {
             .spawn_blocking(move || registry.load_asset_immediate::<T>(handle));
 
         AssetLoad::new(task)
+    }
+
+    /// Keeps the asset `handle` loaded for as long as the returned lease
+    /// lives. The load runs on the worker pool and completes during
+    /// [`tick`](Self::tick), which logs failures.
+    #[must_use]
+    pub fn lease<T: Asset>(&self, handle: &AssetHandle) -> AssetLease<T> {
+        let (lease, pending) = AssetLease::new(handle.clone(), self.load_asset(handle));
+        self.inner.pending_leases.lock().push(pending);
+        lease
     }
 
     fn load_asset_immediate<T: Asset>(&self, handle: AssetHandle) -> Result<Handle<T>> {
