@@ -340,10 +340,7 @@ where
 {
     let max_sets = reflected_layouts.len().max(S::DescriptorSets::SET_COUNT);
     for set in 0..max_sets {
-        let reflected = reflected_layouts
-            .get(set)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let reflected = reflected_layouts.get(set).map_or_default(Vec::as_slice);
         let expected = S::DescriptorSets::BINDINGS
             .get(set)
             .copied()

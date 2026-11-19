@@ -339,22 +339,14 @@ impl ModelRegistry {
     ) -> Result<Primitive> {
         let reader = primitive.reader(|buf| Some(&buffers[buf.index()]));
 
-        let positions: Vec<_> = reader
-            .read_positions()
-            .map(Iterator::collect)
-            .unwrap_or_default();
-        let normals: Vec<_> = reader
-            .read_normals()
-            .map(Iterator::collect)
-            .unwrap_or_default();
+        let positions: Vec<_> = reader.read_positions().map_or_default(Iterator::collect);
+        let normals: Vec<_> = reader.read_normals().map_or_default(Iterator::collect);
         let texcoords: Vec<_> = reader
             .read_tex_coords(0)
-            .map(|iter| iter.into_f32().collect())
-            .unwrap_or_default();
+            .map_or_default(|iter| iter.into_f32().collect());
         let indices: Vec<_> = reader
             .read_indices()
-            .map(|iter| iter.into_u32().collect())
-            .unwrap_or_default();
+            .map_or_default(|iter| iter.into_u32().collect());
 
         let vertices: Vec<Vertex> = positions
             .iter()
