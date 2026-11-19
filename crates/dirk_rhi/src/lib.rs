@@ -60,7 +60,7 @@ pub use format::{Format, FormatCapabilities, FormatFeatures, ImageUsage, SampleC
 pub use frame::{FRAMES_IN_FLIGHT, Frame, PerFrame};
 pub use image::{
     Extent3d, Image, ImageDesc, ImageDimension, ImageInfo, ImageRange, ImageRegion, ImageView,
-    Origin3d, SampleCount, ViewType,
+    Origin3d, SampleCount, Subresource, ViewType,
 };
 pub use pass::{
     ColorAttachment, DepthAttachment, IndexBuffer, IndexFormat, Indices, IndirectDraws, LoadOp,
