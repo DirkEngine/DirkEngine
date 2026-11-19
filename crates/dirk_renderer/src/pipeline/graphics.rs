@@ -123,6 +123,8 @@ where
         let set_layouts = Self::create_pipeline_set_layouts(&mut device, &reflected_layouts)?;
 
         let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        // SAFETY: `set_layouts` are live layouts from this device (their
+        // deferred destruction is frames away), and `layout_info` outlives the call.
         let pipeline_layout = unsafe { device.device.create_pipeline_layout(&layout_info, None)? };
 
         let shader_stages = [
@@ -192,6 +194,10 @@ where
             .base_pipeline_index(-1)
             .push_next(&mut pipeline_rendering_info);
 
+        // SAFETY: every state struct, slice and chained struct `pipeline_info`
+        // points to lives until the end of this function. The shader modules
+        // (destroyed only frames from now) and `pipeline_layout` are live
+        // objects from this device, created with `dynamic_rendering`.
         let pipeline = unsafe {
             device
                 .device
@@ -230,6 +236,9 @@ where
             .iter()
             .map(|bindings| {
                 let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings);
+                // SAFETY: `info` and `bindings` outlive the call. The layout is
+                // enqueued for destruction at once: it only has to outlive the
+                // `create_pipeline_layout` call, frames before the queue frees it.
                 let layout = unsafe { device.device.create_descriptor_set_layout(&info, None)? };
                 device.destroy(Garbage::DescriptorSetLayout(layout));
                 Ok(layout)

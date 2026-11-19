@@ -12,6 +12,8 @@ pub struct PhysicalDeviceInfo {
 
 impl PhysicalDeviceInfo {
     pub fn query(instance: &ash::Instance, handle: vk::PhysicalDevice) -> Self {
+        // SAFETY: `handle` was enumerated from `instance`, and `features2` and
+        // the `vulkan12_features` it chains outlive the call that fills them.
         unsafe {
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
             let mut features2 =
@@ -75,6 +77,8 @@ impl QueueFamilyIndices {
             })
             .unwrap_or(compute as usize) as u32;
 
+        // SAFETY: `info.handle` comes from the instance that owns `surface`,
+        // and `i` indexes one of its queue families.
         let present = families.iter().enumerate().position(|(i, _)| unsafe {
             surface_loader
                 .get_physical_device_surface_support(info.handle, i as u32, surface)
@@ -139,6 +143,8 @@ impl PhysicalDeviceSelector {
         self.require(move |info: &PhysicalDeviceInfo| {
             extensions.iter().all(|&extension| {
                 info.extensions.iter().any(|e| {
+                    // SAFETY: Vulkan fills `extension_name` with a
+                    // NUL-terminated string within the array.
                     unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }
                         .to_str()
                         .unwrap_or("")
@@ -159,6 +165,7 @@ impl PhysicalDeviceSelector {
         surface_loader: &surface::Instance,
         surface: vk::SurfaceKHR,
     ) -> Option<(PhysicalDeviceInfo, QueueFamilyIndices)> {
+        // SAFETY: `instance` is a live instance.
         let devices = unsafe { instance.enumerate_physical_devices().ok()? };
         devices
             .into_iter()

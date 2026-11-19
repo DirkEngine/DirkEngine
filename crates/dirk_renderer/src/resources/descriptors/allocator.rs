@@ -82,6 +82,9 @@ impl<L: SetLayout> DescriptorAllocator<L> {
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(std::slice::from_ref(&self.layout));
+        // SAFETY: `pool` and `self.layout` are live objects from this device,
+        // and `alloc_info` outlives the call. On success Vulkan returns one set
+        // per layout, here exactly one.
         let raw_sets = unsafe { self.device.device.allocate_descriptor_sets(&alloc_info)? };
         Ok(DescriptorSet::new(self.device.clone(), pool, raw_sets[0]))
     }
@@ -96,6 +99,7 @@ impl<L: SetLayout> DescriptorAllocator<L> {
             .pool_sizes(&pool_sizes)
             .max_sets(max_sets);
 
+        // SAFETY: `pool_info` and `pool_sizes` outlive the call.
         let pool = unsafe {
             self.device
                 .device

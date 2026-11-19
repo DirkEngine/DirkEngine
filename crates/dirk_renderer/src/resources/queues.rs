@@ -13,6 +13,11 @@ pub enum QueueType {
     Compute,
 }
 
+/// The device's queues.
+///
+/// Vulkan requires external synchronization of a queue on submit and present.
+/// `submit` and `present` take `&self` and lock nothing: they rely on every
+/// call coming from the renderer thread.
 pub struct Queues {
     device: Device,
     swapchain_loader: swapchain::Device,
@@ -24,13 +29,16 @@ pub struct Queues {
 
 impl Queues {
     pub fn new(instance: &Instance, device: &Device, indices: &QueueFamilyIndices) -> Self {
+        // SAFETY: `create_device` requested one queue from each of these
+        // families, so queue 0 exists in each.
+        let queue = |family| unsafe { device.get_device_queue(family, 0) };
         Self {
             device: device.clone(),
             swapchain_loader: swapchain::Device::new(instance, device),
-            graphics: unsafe { device.get_device_queue(indices.graphics, 0) },
-            present: unsafe { device.get_device_queue(indices.present, 0) },
-            compute: unsafe { device.get_device_queue(indices.compute, 0) },
-            transfer: unsafe { device.get_device_queue(indices.transfer, 0) },
+            graphics: queue(indices.graphics),
+            present: queue(indices.present),
+            compute: queue(indices.compute),
+            transfer: queue(indices.transfer),
         }
     }
 
@@ -46,6 +54,9 @@ impl Queues {
             QueueType::Transfer => self.transfer,
         };
         let fence = fence.map_or_else(Fence::null_handle, Fence::raw);
+        // SAFETY: the queue and fence come from `self.device`; the submit infos
+        // and the slices they point to outlive the call. The renderer thread
+        // is the only one submitting (see `Queues`).
         unsafe { self.device.queue_submit(queue, submits, fence) }
     }
 
@@ -67,6 +78,8 @@ impl Queues {
     }
 
     pub fn present(&self, info: &vk::PresentInfoKHR) -> VkResult<bool> {
+        // SAFETY: the present queue comes from this device and `info` outlives
+        // the call. The renderer thread is the only one presenting (see `Queues`).
         unsafe { self.swapchain_loader.queue_present(self.present, info) }
     }
 }

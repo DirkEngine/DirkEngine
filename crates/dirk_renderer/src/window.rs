@@ -26,6 +26,9 @@ pub struct Window {
 
 impl Window {
     pub fn build(device: &RenderDevice, plat_window: &dirk_platform::Window) -> Result<Self> {
+        // SAFETY: the display and window handles come from a live platform
+        // window, and the instance enables the extensions
+        // `ash_window::enumerate_required_extensions` asked for.
         let surface = unsafe {
             ash_window::create_surface(
                 &device.entry,
