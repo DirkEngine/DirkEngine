@@ -13,11 +13,11 @@ use bytemuck::NoUninit;
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ColorAttachment,
     ColorTarget, CommandEncoder, CompareOp, CullMode, DepthAttachment, DepthBias, DepthState,
-    Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format, FrontFace, Graphics, GraphicsPipeline,
-    GraphicsPipelineDesc, HeapIndices, Image, ImageAccess, ImageDesc, ImageDimension, ImageUsage,
-    ImageView, IndexFormat, Indices, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi,
-    SampleCount, Sampler, SamplerDesc, SamplerIndex, Shader, ShaderStages, StoreOp, Topology,
-    Viewport,
+    DrawArguments, DrawIndexedArguments, Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format,
+    FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, HeapIndices, Image, ImageAccess,
+    ImageDesc, ImageDimension, ImageUsage, ImageView, IndexBuffer, IndexFormat, Indices,
+    IndirectDraws, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi, SampleCount,
+    Sampler, SamplerDesc, SamplerIndex, Shader, ShaderStages, StoreOp, Topology, Viewport,
 };
 use dirk_rhi_test_shaders::{
     ColorFs, CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Sliced, SlicedVs,
@@ -223,6 +223,171 @@ fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
                 "pixel {index}"
             );
         }
+        Ok(())
+    })
+}
+
+/// An upload buffer of `usage` holding `data`.
+fn upload(rhi: &Rhi, label: &str, usage: BufferUsage, data: &[u8]) -> Result<Buffer> {
+    let mut buffer = rhi.create_buffer(&BufferDesc {
+        label,
+        size: data.len() as u64,
+        usage,
+        memory: Memory::Upload,
+    })?;
+    // SAFETY: the buffer was never submitted.
+    unsafe { buffer.write(0, data)? };
+    Ok(buffer)
+}
+
+#[test]
+fn indirect_draws_read_their_arguments_from_a_buffer() -> Result<()> {
+    with_rhi(|rhi| {
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        // No instances, then the covering triangle.
+        let draws = [
+            DrawArguments {
+                vertex_count: 3,
+                instance_count: 0,
+                ..DrawArguments::default()
+            },
+            DrawArguments {
+                vertex_count: 3,
+                instance_count: 1,
+                ..DrawArguments::default()
+            },
+        ];
+        let arguments = upload(
+            rhi,
+            "draws",
+            BufferUsage::INDIRECT,
+            bytemuck::cast_slice(&draws),
+        )?;
+        let indexed = DrawIndexedArguments {
+            index_count: 3,
+            instance_count: 1,
+            first_index: 1,
+            ..DrawIndexedArguments::default()
+        };
+        let indexed_arguments = upload(
+            rhi,
+            "indexed draws",
+            BufferUsage::INDIRECT,
+            bytemuck::bytes_of(&indexed),
+        )?;
+        let indices = upload(
+            rhi,
+            "indices",
+            BufferUsage::INDEX,
+            bytemuck::cast_slice(&[7_u16, 7, 0, 1, 2]),
+        )?;
+        let fill = |color| Fill { color, depth: 0.5 };
+        let mut render_draws = |offset, count, color| {
+            render(rhi, |encoder, target| {
+                let mut pass = encoder.render_pass(&RenderPassDesc {
+                    label: "indirect",
+                    colors: &[cleared(target)],
+                    depth: None,
+                })?;
+                let draws = IndirectDraws {
+                    buffer: &arguments,
+                    offset,
+                    count,
+                };
+                pass.draw_indirect(&pipeline, &fill(color), draws)
+            })
+        };
+        let black = [0, 0, 0, 255];
+        assert!(render_draws(0, 1, RED)?.iter().all(|pixel| *pixel == black));
+        assert!(
+            render_draws(0, 2, RED)?
+                .iter()
+                .all(|pixel| *pixel == unorm(RED))
+        );
+        assert!(
+            render_draws(16, 1, GREEN)?
+                .iter()
+                .all(|pixel| *pixel == unorm(GREEN))
+        );
+
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "indexed indirect",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            let indices = IndexBuffer {
+                buffer: &indices,
+                format: IndexFormat::U16,
+                // Aligned to the index size only.
+                offset: 2,
+            };
+            let draws = IndirectDraws {
+                buffer: &indexed_arguments,
+                offset: 0,
+                count: 1,
+            };
+            // SAFETY: the draw reads indices 1..4 of the four from offset 2.
+            unsafe { pass.draw_indexed_indirect(&pipeline, &fill(BLUE), indices, draws) }
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(BLUE)));
+        Ok(())
+    })
+}
+
+#[test]
+fn indirect_draws_are_validated() -> Result<()> {
+    with_rhi(|rhi| {
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let draws = [DrawArguments::default(); 2];
+        let arguments = upload(
+            rhi,
+            "draws",
+            BufferUsage::INDIRECT,
+            bytemuck::cast_slice(&draws),
+        )?;
+        let storage = upload(
+            rhi,
+            "storage",
+            BufferUsage::STORAGE,
+            bytemuck::cast_slice(&draws),
+        )?;
+        let fill = Fill {
+            color: RED,
+            depth: 0.5,
+        };
+        render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "invalid indirect",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            let mut draw = |buffer, offset, count| {
+                pass.draw_indirect(
+                    &pipeline,
+                    &fill,
+                    IndirectDraws {
+                        buffer,
+                        offset,
+                        count,
+                    },
+                )
+            };
+            assert_invalid(draw(&storage, 0, 1), "INDIRECT");
+            assert_invalid(draw(&arguments, 2, 1), "misaligned");
+            assert_invalid(draw(&arguments, 16, 2), "exceed");
+            Ok(())
+        })?;
         Ok(())
     })
 }

@@ -123,6 +123,8 @@ impl Device {
             .robust_buffer_access(true)
             .vertex_pipeline_stores_and_atomics(true)
             .fragment_stores_and_atomics(true)
+            .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true)
             .sampler_anisotropy(optional.contains(Features::SAMPLER_ANISOTROPY))
             .image_cube_array(optional.contains(Features::IMAGE_CUBE_ARRAY))
             .independent_blend(optional.contains(Features::INDEPENDENT_BLEND))

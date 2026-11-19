@@ -8,7 +8,10 @@ use objc2_metal::{
 };
 
 use super::{Buffer, CommandBuffer, Device, GraphicsPipeline, usize};
-use crate::{IndexFormat, LoadOp, MAX_PUSH_DATA_SIZE, Rect, RenderPassDesc, StoreOp, Viewport};
+use crate::{
+    DrawArguments, DrawIndexedArguments, IndexFormat, LoadOp, MAX_PUSH_DATA_SIZE, Rect,
+    RenderPassDesc, StoreOp, Viewport,
+};
 
 // Render pass recording. Inputs were validated by the render pass, and every
 // resource is from `device` and outlives the frame's work thanks to deferred
@@ -225,6 +228,67 @@ impl CommandBuffer {
                     base_vertex as isize,
                     instances.start as usize,
                 );
+        }
+    }
+
+    /// Makes `count` draws, one Metal draw each, since Metal has no
+    /// multi-draw indirect.
+    pub(crate) fn draw_indirect(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+        offset: u64,
+        count: u32,
+    ) {
+        self.make_resident(device, self.usage);
+        for draw in 0..u64::from(count) {
+            let offset = offset + draw * size_of::<DrawArguments>() as u64;
+            // SAFETY: see the recording note above; the arguments fit the
+            // buffer.
+            unsafe {
+                self.render()
+                    .drawPrimitives_indirectBuffer_indirectBufferOffset(
+                        self.primitive,
+                        &buffer.raw,
+                        usize(offset),
+                    );
+            }
+        }
+    }
+
+    /// Makes `count` indexed draws, one Metal draw each.
+    pub(crate) fn draw_indexed_indirect(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+        offset: u64,
+        count: u32,
+    ) {
+        self.make_resident(device, self.usage);
+        #[expect(
+            clippy::expect_used,
+            reason = "Render passes bind an index buffer before every indexed draw."
+        )]
+        let (indices, index_offset, format) = self
+            .indices
+            .clone()
+            .expect("indexed draws follow binding an index buffer");
+        for draw in 0..u64::from(count) {
+            let offset = offset + draw * size_of::<DrawIndexedArguments>() as u64;
+            // SAFETY: see the recording note above; the arguments fit the
+            // buffer, and the caller keeps the indices they read inside the
+            // index buffer.
+            unsafe {
+                self.render()
+                    .drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                        self.primitive,
+                        format,
+                        &indices,
+                        usize(index_offset),
+                        &buffer.raw,
+                        usize(offset),
+                    );
+            }
         }
     }
 }

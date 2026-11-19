@@ -15,6 +15,7 @@ unsafe-modules = [
     "dirk_rhi::command",
     "dirk_rhi::frame",
     "dirk_rhi::native",
+    "dirk_rhi::pass",
     "dirk_rhi::shader",
     "dirk_rhi_test_shaders::generated",
     "dirk_shaders::bindless",

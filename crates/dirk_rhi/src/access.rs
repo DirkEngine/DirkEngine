@@ -30,6 +30,8 @@ pub enum BufferAccess {
     CopyDestination,
     /// Read as an index buffer.
     Index,
+    /// Read as the arguments of indirect draws.
+    Indirect,
     /// Read as a storage buffer by the given stages.
     ShaderRead(ShaderStages),
     /// Read and written as a storage buffer by the given stages.
@@ -108,6 +110,7 @@ impl BufferAccess {
             Self::CopySource => BufferUsage::COPY_SRC,
             Self::CopyDestination => BufferUsage::COPY_DST,
             Self::Index => BufferUsage::INDEX,
+            Self::Indirect => BufferUsage::INDIRECT,
             Self::ShaderRead(_) | Self::ShaderWrite(_) => BufferUsage::STORAGE,
         }
     }
