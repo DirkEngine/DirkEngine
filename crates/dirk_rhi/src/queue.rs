@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-use crate::{Error, Result, Rhi};
+use crate::{Error, Result, Rhi, native};
 
 /// The queues work is submitted to. Each has one timeline that its
 /// submissions signal in order.
@@ -140,5 +140,12 @@ impl Rhi {
             ));
         }
         Ok(())
+    }
+}
+
+impl native::Device {
+    /// The value each queue's last submission signals.
+    pub(crate) fn submitted(&self) -> [u64; QueueType::COUNT] {
+        QueueType::ALL.map(|queue| self.submitted_on(queue))
     }
 }
