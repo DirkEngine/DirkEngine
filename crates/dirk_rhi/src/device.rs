@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use bitflags::bitflags;
+use raw_window_handle::DisplayHandle;
 
 use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
 
@@ -15,6 +16,9 @@ pub struct RhiCreateInfo<'a> {
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
     pub validation: bool,
+    /// The display windows will be presented to, such as the platform's
+    /// event loop. Enables presentation; `None` for headless use.
+    pub display: Option<DisplayHandle<'a>>,
     /// Bytes of host-visible memory each frame slot allocates from, with
     /// [`Frame::alloc`](crate::Frame::alloc); 8 MiB by default. Allocations
     /// that do not fit get buffers of their own, so this never grows. Zero
@@ -27,6 +31,7 @@ impl Default for RhiCreateInfo<'_> {
         Self {
             application_name: "",
             validation: false,
+            display: None,
             frame_memory: 8 << 20,
         }
     }

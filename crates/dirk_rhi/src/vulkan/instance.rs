@@ -23,6 +23,9 @@ pub(super) struct Instance {
     validating: bool,
     /// Keeps the Vulkan library loaded for as long as the instance exists.
     pub(super) entry: ash::Entry,
+    /// With presentation, surface functions and the surface extensions
+    /// enabled for the display.
+    pub(super) surface: Option<(ash::khr::surface::Instance, Vec<&'static CStr>)>,
 }
 
 impl Instance {
@@ -41,7 +44,12 @@ impl Instance {
                 .any(|extension| extension.extension_name_as_c_str() == Ok(name))
         };
 
-        let mut extensions = Vec::new();
+        let surface_extensions = info
+            .display
+            .map(|display| ash_window::enumerate_required_extensions(display.as_raw()))
+            .transpose()
+            .check("listing the display's surface extensions")?;
+        let mut extensions = surface_extensions.unwrap_or_default().to_vec();
         let mut flags = vk::InstanceCreateFlags::empty();
         if has(&available, ash::khr::portability_enumeration::NAME) {
             extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
@@ -100,12 +108,23 @@ impl Instance {
         // SAFETY: every pointer in `create_info` outlives the call.
         let raw = unsafe { entry.create_instance(&create_info, None) }.check("vkCreateInstance")?;
 
+        let surface = surface_extensions.map(|names| {
+            (
+                ash::khr::surface::Instance::new(&entry, &raw),
+                names
+                    .iter()
+                    // SAFETY: ash-window lists pointers to static C strings.
+                    .map(|&name| unsafe { CStr::from_ptr(name) })
+                    .collect(),
+            )
+        });
         let mut instance = Self {
             raw,
             messenger: None,
             validation_errors,
             validating: !layers.is_empty() && debug_messages,
             entry,
+            surface,
         };
         if debug_messages {
             let loader = debug_utils::Instance::new(&instance.entry, &instance.raw);
