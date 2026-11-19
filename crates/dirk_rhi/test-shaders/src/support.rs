@@ -14,7 +14,7 @@ use dirk_rhi::{Error, Result, Rhi, RhiCreateInfo};
 /// Returns the RHI's errors and `test`'s. Returns `Ok` without running
 /// `test`, after printing why, on machines without a
 /// graphics driver or a suitable device.
-pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
+pub fn with_rhi<E: From<Error>>(test: impl FnOnce(&mut Rhi) -> Result<(), E>) -> Result<(), E> {
     let Some(mut rhi) = rhi(&RhiCreateInfo {
         application_name: "dirk_rhi tests",
         validation: true,
