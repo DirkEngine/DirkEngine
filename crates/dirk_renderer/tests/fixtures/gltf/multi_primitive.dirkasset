@@ -1,0 +1,8 @@
+{
+    "meta": {
+        "asset_type": "Model"
+    },
+    "model": {
+        "gltf": "./multi_primitive.gltf"
+    }
+}
