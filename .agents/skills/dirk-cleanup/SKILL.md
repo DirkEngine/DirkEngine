@@ -78,11 +78,11 @@ backend cached in `~/.cache/rust-gpu`. Run at most 4 reviews at a time.
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
 `refactor: cleanup pass, November 2026`. Each cleanup PR says `Part of #<n>`.
-Tell the owner the split in one message, with the files outside PRs hold in
-each area. Start an area no outside PR touches without waiting. For the rest,
-ask the owner whether to start now, leaving the held files alone, or after
-those PRs merge. A held file that frees up goes to its area's agent if it
-hasn't reported; otherwise its cleanup waits for the next pass.
+Tell the owner the split in one message, with the files held by PRs outside
+the pass in each area. Start an area no such PR touches without waiting. For
+the rest, ask the owner whether to start now, leaving the held files alone, or
+after those PRs merge. A held file that frees up goes to its area's agent if
+that agent hasn't reported; otherwise its cleanup waits for the next pass.
 
 ### Start the agents
 
@@ -90,7 +90,7 @@ Call `orchestrator_capabilities` once. For each area, start a `delegate_task`
 on Claude Opus 5.5 with `isolation: "worktree"` and `role: "implementation"`.
 The task says to follow `.agents/skills/dirk-cleanup/references/agent-brief.md`.
 It names the area, paths, crates, branch prefix, issue, what the other areas
-own, the files outside PRs hold, and `CARGO_BUILD_JOBS`.
+own, the files held by PRs outside the pass, and `CARGO_BUILD_JOBS`.
 
 Start a docs lane the same way, with the docs lane's files as its area and
 `docs/cleanup-<YYYY-MM-DD>-` as its branch prefix. It fixes drift between the
