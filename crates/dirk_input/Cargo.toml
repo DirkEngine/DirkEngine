@@ -14,9 +14,6 @@ documentation.workspace = true
 glam.workspace = true
 egui = { workspace = true, optional = true }
 
-[build-dependencies]
-dirk_build.workspace = true
-
 [features]
 default = []
 egui = ["dep:egui"]
