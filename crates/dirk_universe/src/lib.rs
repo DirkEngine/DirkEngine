@@ -17,7 +17,7 @@ use tracing::warn;
 mod macros;
 
 pub mod components;
-use components::{AnyComponent, Component, Components};
+use components::{AnyComponent, Component, Components, Removals};
 
 pub mod query;
 use query::{Query, ReadOnlyQueryData, filter::QueryFilter};
@@ -86,16 +86,6 @@ impl UniverseHandle {
     }
 }
 
-/// A component removal, kept until every system has observed it.
-struct Removal {
-    type_id: TypeId,
-    entity: Entity,
-    /// When the removed component was added, so additions and removals that
-    /// cancel out between two runs are not reported.
-    added: u64,
-    tick: u64,
-}
-
 /// This struct is the manager for all the worlds.
 ///
 /// Worlds are entities carrying a [`World`] component. Every other entity
@@ -111,7 +101,7 @@ pub struct Universe {
     schedule: Schedule,
 
     components: Components,
-    removals: Vec<Removal>,
+    removals: Removals,
     change_tick: Cell<u64>,
     /// The change tick at which the previous tick started.
     previous_tick: u64,
@@ -133,7 +123,7 @@ impl Universe {
             systems,
             schedule,
             components: Components::default(),
-            removals: Vec::new(),
+            removals: Removals::default(),
             change_tick: Cell::new(0),
             previous_tick: 0,
         };
@@ -181,7 +171,7 @@ impl Universe {
         // recorded before then have been observed by all of them.
         let tick = self.advance_change_tick();
         let previous_tick = std::mem::replace(&mut self.previous_tick, tick);
-        self.removals.retain(|removal| removal.tick > previous_tick);
+        self.removals.forget_until(previous_tick);
         for command in commands {
             self.apply_command(command);
         }
@@ -258,12 +248,8 @@ impl Universe {
 
     fn remove_component(&mut self, entity: Entity, type_id: TypeId) {
         if let Some(added) = self.components.remove(entity, type_id) {
-            self.removals.push(Removal {
-                type_id,
-                entity,
-                added,
-                tick: self.change_tick.get(),
-            });
+            self.removals
+                .record(type_id, entity, added, self.change_tick.get());
         }
     }
 
@@ -286,21 +272,6 @@ impl Universe {
             self.despawn(entity);
         }
         self.despawn(world.entity());
-    }
-
-    /// Entities whose `C` was removed after `last_run`, having existed then.
-    pub(crate) fn removed_since<C: Component>(
-        &self,
-        last_run: u64,
-    ) -> impl Iterator<Item = Entity> + '_ {
-        self.removals
-            .iter()
-            .filter(move |removal| {
-                removal.type_id == TypeId::of::<C>()
-                    && removal.tick > last_run
-                    && removal.added <= last_run
-            })
-            .map(|removal| removal.entity)
     }
 
     // A separate counter for each invocation makes same-frame ordering visible.
