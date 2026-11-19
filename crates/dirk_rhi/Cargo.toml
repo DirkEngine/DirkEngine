@@ -1,0 +1,45 @@
+[package]
+name = "dirk_rhi"
+description = "DirkEngine's render hardware interface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Every target uses Vulkan until the Metal backend lands; Apple targets go
+# through MoltenVK's portability subset.
+ash.workspace = true
+
+# The workspace lints (../../Cargo.toml), except `unsafe_code`: the RHI calls
+# the native graphics API, and every unsafe block says why its call is sound.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Production code propagates errors; tests may panic (see clippy.toml).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+# Every exception names its lint with `#[expect]` and says why.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Every unsafe block says why it is sound.
+undocumented_unsafe_blocks = "warn"
+# Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
+self_named_module_files = "warn"

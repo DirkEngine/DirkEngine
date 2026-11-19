@@ -24,6 +24,7 @@ categories = ["game-engines", "graphics", "rendering", "vulkan"]
 tracing = "0.1"
 piquel-log = { version = "0.0.6", features = ["log", "file"] }
 parking_lot = "0.12"
+bitflags = "2"
 tempfile = "3"
 slotmap = "1"
 signal-hook = "0.4"
