@@ -61,6 +61,47 @@ pub mod heap {
     pub const SAMPLER_CAPACITY: u32 = 1 << 10;
     /// Slots in the storage buffer array.
     pub const BUFFER_CAPACITY: u32 = 1 << 16;
+
+    /// Capacity of each array, indexed by binding.
+    pub const CAPACITIES: [u32; 10] = [
+        TEXTURE_CAPACITY,
+        TEXTURE_CAPACITY,
+        TEXTURE_CAPACITY,
+        TEXTURE_CAPACITY,
+        TEXTURE_CAPACITY,
+        STORAGE_IMAGE_CAPACITY,
+        STORAGE_IMAGE_CAPACITY,
+        STORAGE_IMAGE_CAPACITY,
+        SAMPLER_CAPACITY,
+        BUFFER_CAPACITY,
+    ];
+
+    /// Index of the first element of the array at `binding` when the arrays
+    /// are laid out back to back in binding order, as Metal's argument
+    /// buffer holds them. The binding after the last gives their total.
+    #[must_use]
+    pub const fn first_element(binding: u32) -> u32 {
+        let mut first = 0;
+        let mut index = 0;
+        while index < binding as usize {
+            first += CAPACITIES[index];
+            index += 1;
+        }
+        first
+    }
+
+    /// How Metal shaders reach the heap, which the shader build's MSL
+    /// translation and the RHI's Metal backend agree on.
+    pub mod metal {
+        /// Buffer index of the heap's argument buffer.
+        pub const HEAP_BUFFER: u32 = 0;
+        /// Buffer index of push data.
+        pub const PUSH_BUFFER: u32 = 1;
+        /// Argument buffer element after the arrays: a pointer to one `u32`
+        /// per element, the byte length of storage buffers, which shaders
+        /// bound their reads with.
+        pub const BUFFER_LENGTHS: u32 = super::first_element(super::CAPACITIES.len() as u32);
+    }
 }
 
 /// Declares an index into one of the heap's arrays.
