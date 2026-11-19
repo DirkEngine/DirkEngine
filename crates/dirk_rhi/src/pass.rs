@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use dirk_shaders::indirect::{DrawArguments, DrawIndexedArguments};
+
 use crate::{
     Buffer, BufferUsage, CommandEncoder, Error, Graphics, GraphicsPipeline, Image, ImageAccess,
     ImageDimension, ImageUsage, MAX_COLOR_TARGETS, PushData, Result, SampleCount, command::Wrap,
@@ -143,6 +145,32 @@ pub struct Indices<'a> {
     pub range: Range<u32>,
     /// Added to each index before reading the vertex.
     pub base_vertex: i32,
+}
+
+/// The index buffer of indirect indexed draws, whose arguments choose the
+/// indices drawn.
+#[derive(Clone, Copy)]
+pub struct IndexBuffer<'a> {
+    /// A buffer with [`BufferUsage::INDEX`], in the
+    /// [`BufferAccess::Index`](crate::BufferAccess::Index) state.
+    pub buffer: &'a Buffer,
+    /// Type of its indices.
+    pub format: IndexFormat,
+    /// Offset of index zero, in bytes; a multiple of the index size.
+    pub offset: u64,
+}
+
+/// Arguments of indirect draws in a buffer, which the host or shaders
+/// wrote: [`DrawArguments`] or [`DrawIndexedArguments`], back to back.
+#[derive(Clone, Copy)]
+pub struct IndirectDraws<'a> {
+    /// A buffer with [`BufferUsage::INDIRECT`], in the
+    /// [`BufferAccess::Indirect`](crate::BufferAccess::Indirect) state.
+    pub buffer: &'a Buffer,
+    /// Offset of the first draw's arguments, in bytes; a multiple of four.
+    pub offset: u64,
+    /// Number of draws.
+    pub count: u32,
 }
 
 /// Records draws into attachments. Ends when dropped, and borrows its
@@ -348,10 +376,93 @@ impl RenderPass<'_, '_> {
         vertices: Range<u32>,
         instances: Range<u32>,
     ) -> Result<()> {
-        self.prepare(pipeline, push, &vertices, &instances)?;
+        Self::check_ranges(pipeline, &vertices, &instances)?;
+        self.prepare(pipeline, push)?;
         self.encoder
             .raw
             .draw(self.encoder.device(), vertices, instances);
+        Ok(())
+    }
+
+    /// Makes the draws whose [`DrawArguments`] `draws` holds with
+    /// `pipeline`, whose shaders read `push`. Each draw's arguments may be
+    /// anything: shaders pull vertices through bounds-checked storage
+    /// buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the pipeline belongs to another device
+    /// or its targets differ from the pass's, or the arguments' buffer is
+    /// from another device, lacks the indirect usage, or is too small for
+    /// the draws or misaligned, or they exceed
+    /// [`Limits::max_draw_indirect_count`](crate::Limits::max_draw_indirect_count).
+    pub fn draw_indirect<P: PushData>(
+        &mut self,
+        pipeline: &GraphicsPipeline<P>,
+        push: &P,
+        draws: IndirectDraws<'_>,
+    ) -> Result<()> {
+        self.check_draws(draws, size_of::<DrawArguments>())?;
+        self.prepare(pipeline, push)?;
+        self.encoder.raw.draw_indirect(
+            self.encoder.device(),
+            &draws.buffer.raw,
+            draws.offset,
+            draws.count,
+        );
+        Ok(())
+    }
+
+    /// Makes the indexed draws whose [`DrawIndexedArguments`] `draws` holds,
+    /// reading `indices`, with `pipeline`, whose shaders read `push`.
+    ///
+    /// # Safety
+    ///
+    /// The indices each draw reads lie inside the index buffer:
+    /// `offset + (first_index + index_count) * index size` is at most its
+    /// size. Arguments are only known on the GPU, and neither Vulkan
+    /// without `robustBufferAccess2` nor Metal bound index reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the pipeline belongs to another device
+    /// or its targets differ from the pass's, a buffer is from another
+    /// device or lacks its usage, the index offset is misaligned or past the
+    /// index buffer, or the arguments' buffer is too small for the draws or
+    /// misaligned, or they exceed
+    /// [`Limits::max_draw_indirect_count`](crate::Limits::max_draw_indirect_count).
+    pub unsafe fn draw_indexed_indirect<P: PushData>(
+        &mut self,
+        pipeline: &GraphicsPipeline<P>,
+        push: &P,
+        indices: IndexBuffer<'_>,
+        draws: IndirectDraws<'_>,
+    ) -> Result<()> {
+        self.check_draws(draws, size_of::<DrawIndexedArguments>())?;
+        let IndexBuffer {
+            buffer,
+            format,
+            offset,
+        } = indices;
+        self.encoder.check_buffer(buffer, BufferUsage::INDEX)?;
+        if !offset.is_multiple_of(format.size()) || offset >= buffer.info().size {
+            return Err(Error::invalid(
+                "indexed draw",
+                buffer.label(),
+                format!(
+                    "{format:?} indices at offset {offset} are misaligned or past its {} bytes",
+                    buffer.info().size
+                ),
+            ));
+        }
+        self.prepare(pipeline, push)?;
+        self.bind_indices(indices);
+        self.encoder.raw.draw_indexed_indirect(
+            self.encoder.device(),
+            &draws.buffer.raw,
+            draws.offset,
+            draws.count,
+        );
         Ok(())
     }
 
@@ -371,7 +482,8 @@ impl RenderPass<'_, '_> {
         indices: Indices<'_>,
         instances: Range<u32>,
     ) -> Result<()> {
-        self.prepare(pipeline, push, &indices.range, &instances)?;
+        Self::check_ranges(pipeline, &indices.range, &instances)?;
+        self.prepare(pipeline, push)?;
         let Indices {
             buffer,
             format,
@@ -394,13 +506,11 @@ impl RenderPass<'_, '_> {
                 ),
             ));
         }
-        let bound = Some((buffer.raw.id(), offset, format));
-        if self.indices != bound {
-            self.encoder
-                .raw
-                .bind_index_buffer(self.encoder.device(), &buffer.raw, offset, format);
-            self.indices = bound;
-        }
+        self.bind_indices(IndexBuffer {
+            buffer,
+            format,
+            offset,
+        });
         self.encoder.raw.draw_indexed(
             self.encoder.device(),
             indices.range,
@@ -491,14 +601,77 @@ impl RenderPass<'_, '_> {
     /// Ends the pass. Dropping it does the same.
     pub fn end(self) {}
 
-    /// Checks a draw, then binds `pipeline` unless bound and pushes `push`.
-    fn prepare<P: PushData>(
-        &mut self,
+    /// Rejects reversed ranges of a direct draw.
+    fn check_ranges<P: PushData>(
         pipeline: &GraphicsPipeline<P>,
-        push: &P,
         elements: &Range<u32>,
         instances: &Range<u32>,
     ) -> Result<()> {
+        if elements.start > elements.end || instances.start > instances.end {
+            return Err(Error::invalid(
+                "draw",
+                pipeline.label(),
+                format!("range {elements:?} or {instances:?} is reversed"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks that `draws`, each `size` bytes of arguments, fit their
+    /// buffer, which has the indirect usage, and the device's draw count.
+    fn check_draws(&self, draws: IndirectDraws<'_>, size: usize) -> Result<()> {
+        let IndirectDraws {
+            buffer,
+            offset,
+            count,
+        } = draws;
+        self.encoder.check_buffer(buffer, BufferUsage::INDIRECT)?;
+        let limit = self
+            .encoder
+            .frame
+            .rhi()
+            .capabilities()
+            .limits
+            .max_draw_indirect_count;
+        let end = (size as u64)
+            .checked_mul(u64::from(count))
+            .and_then(|size| size.checked_add(offset));
+        if !offset.is_multiple_of(4)
+            || end.is_none_or(|end| end > buffer.info().size)
+            || count > limit
+        {
+            return Err(Error::invalid(
+                "indirect draw",
+                buffer.label(),
+                format!(
+                    "{count} draws of {size} bytes at offset {offset} are misaligned, exceed its \
+                     {} bytes or the device's {limit} draws",
+                    buffer.info().size
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Binds `indices` unless bound.
+    fn bind_indices(&mut self, indices: IndexBuffer<'_>) {
+        let IndexBuffer {
+            buffer,
+            format,
+            offset,
+        } = indices;
+        let bound = Some((buffer.raw.id(), offset, format));
+        if self.indices != bound {
+            self.encoder
+                .raw
+                .bind_index_buffer(self.encoder.device(), &buffer.raw, offset, format);
+            self.indices = bound;
+        }
+    }
+
+    /// Binds `pipeline` unless bound, after checking it renders to this
+    /// pass, and pushes `push`.
+    fn prepare<P: PushData>(&mut self, pipeline: &GraphicsPipeline<P>, push: &P) -> Result<()> {
         let device = self.encoder.device();
         if pipeline.targets != self.targets || !pipeline.raw.is_from(device) {
             return Err(Error::invalid(
@@ -508,13 +681,6 @@ impl RenderPass<'_, '_> {
                     "the pipeline renders to {:?} on its device, not this pass's {:?}",
                     pipeline.targets, self.targets
                 ),
-            ));
-        }
-        if elements.start > elements.end || instances.start > instances.end {
-            return Err(Error::invalid(
-                "draw",
-                pipeline.label(),
-                format!("range {elements:?} or {instances:?} is reversed"),
             ));
         }
         let id = pipeline.raw.id();
