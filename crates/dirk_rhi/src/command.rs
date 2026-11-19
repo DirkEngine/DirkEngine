@@ -373,12 +373,12 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// The device commands are recorded for.
-    fn device(&self) -> &native::Device {
+    pub(crate) fn device(&self) -> &native::Device {
         &self.frame.rhi().device
     }
 
     /// Checks that `buffer` is from this device and has `usage`.
-    fn check_buffer(&self, buffer: &Buffer, usage: BufferUsage) -> Result<()> {
+    pub(crate) fn check_buffer(&self, buffer: &Buffer, usage: BufferUsage) -> Result<()> {
         let invalid = |reason| Err(Error::invalid("buffer", buffer.label(), reason));
         if !buffer.raw.is_from(self.device()) {
             return invalid("belongs to another device".to_owned());
@@ -390,7 +390,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// Checks that `image` is from this device and has `usage`.
-    fn check_image(&self, image: &Image, usage: ImageUsage) -> Result<()> {
+    pub(crate) fn check_image(&self, image: &Image, usage: ImageUsage) -> Result<()> {
         let invalid = |reason| Err(Error::invalid("image", image.label(), reason));
         if !image.raw.is_from(self.device()) {
             return invalid("belongs to another device".to_owned());
