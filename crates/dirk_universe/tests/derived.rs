@@ -11,11 +11,11 @@ struct Velocity(i32);
 struct Mass(i32);
 
 #[derive(Debug, PartialEq, Component)]
-#[component(read_only)]
+#[component(derived)]
 struct Momentum(i32);
 
 #[derive(Debug, PartialEq, Component)]
-#[component(read_only)]
+#[component(derived)]
 struct Moving(bool);
 
 thread_local! {

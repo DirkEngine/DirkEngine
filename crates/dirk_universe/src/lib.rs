@@ -431,8 +431,9 @@ impl UniverseBuilder {
     ///
     /// Returns a [`ScheduleError`] when systems conflict: one system borrows
     /// a component incompatibly, two systems write a component in no defined
-    /// order, systems depend on each other in a cycle, or a system is ordered
-    /// against one that was never registered.
+    /// order, systems depend on each other in a cycle, a system is ordered
+    /// against one that was never registered, or two derivations compute the
+    /// same component.
     pub fn build(self) -> Result<Universe, ScheduleError> {
         Universe::build(self)
     }

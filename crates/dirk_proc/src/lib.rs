@@ -97,50 +97,50 @@ pub fn derive_event(input: proc_macro::TokenStream) -> TokenStream {
 /// Derive `dirk_universe`'s `Component` trait for any type.
 ///
 /// The component is mutable: systems may edit it through `&mut C` queries and
-/// commands may insert or remove it. `#[component(read_only)]` makes it
-/// read-only instead, so only the engine writes it, as with derived
-/// components. Generics on the type are respected:
+/// commands may insert or remove it. `#[component(derived)]` makes it the
+/// output of a derivation instead, so only that derivation writes it.
+/// Generics on the type are respected:
 ///
 /// ```rust
 /// # extern crate self as dirk_universe;
 /// # pub mod components {
 /// #     pub trait Component: std::fmt::Debug + Send + 'static { type Mutability; }
 /// #     pub enum Mutable {}
-/// #     pub enum ReadOnly {}
+/// #     pub enum Derived {}
 /// # }
 /// # use components::Component;
 /// # use dirk_proc::Component;
 /// #[derive(Debug, Component)]
 /// struct Transform { position: (i32, i32) }
 ///
-/// #[derive(Component, Clone)]
-/// #[component(read_only)]
+/// #[derive(Debug, PartialEq, Component)]
+/// #[component(derived)]
 /// struct Speed(f32);
 /// # fn main() {}
 /// ```
 #[proc_macro_derive(Component, attributes(component))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mut read_only = false;
+    let mut derived = false;
     for attr in input
         .attrs
         .iter()
         .filter(|attr| attr.path().is_ident("component"))
     {
         let parsed = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("read_only") {
-                read_only = true;
+            if meta.path.is_ident("derived") {
+                derived = true;
                 Ok(())
             } else {
-                Err(meta.error("expected `read_only`"))
+                Err(meta.error("expected `derived`"))
             }
         });
         if let Err(error) = parsed {
             return error.to_compile_error().into();
         }
     }
-    let mutability = if read_only {
-        quote!(::dirk_universe::components::ReadOnly)
+    let mutability = if derived {
+        quote!(::dirk_universe::components::Derived)
     } else {
         quote!(::dirk_universe::components::Mutable)
     };
