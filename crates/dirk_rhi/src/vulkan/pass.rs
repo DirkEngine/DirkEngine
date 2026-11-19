@@ -3,7 +3,10 @@ use std::ops::Range;
 use ash::vk;
 
 use super::{Buffer, CommandBuffer, Device, GraphicsPipeline, pipeline::PUSH_STAGES};
-use crate::{IndexFormat, LoadOp, Rect, RenderPassDesc, StoreOp, Viewport};
+use crate::{
+    DrawArguments, DrawIndexedArguments, IndexFormat, LoadOp, Rect, RenderPassDesc, StoreOp,
+    Viewport,
+};
 
 // Render pass recording. Inputs were validated by the render pass, and every
 // resource is from `device` and outlives the frame's work thanks to deferred
@@ -217,6 +220,50 @@ impl CommandBuffer {
             );
         }
     }
+
+    pub(crate) fn draw_indirect(self, device: &Device, buffer: &Buffer, offset: u64, count: u32) {
+        // SAFETY: see the recording note above; the device supports
+        // multi-draw indirect and the arguments fit the buffer.
+        unsafe {
+            device.raw.cmd_draw_indirect(
+                self.raw,
+                buffer.raw,
+                offset,
+                count,
+                stride::<DrawArguments>(),
+            );
+        }
+    }
+
+    pub(crate) fn draw_indexed_indirect(
+        self,
+        device: &Device,
+        buffer: &Buffer,
+        offset: u64,
+        count: u32,
+    ) {
+        // SAFETY: see the recording note above; the device supports
+        // multi-draw indirect, the arguments fit the buffer, and the caller
+        // keeps the indices they read inside the index buffer.
+        unsafe {
+            device.raw.cmd_draw_indexed_indirect(
+                self.raw,
+                buffer.raw,
+                offset,
+                count,
+                stride::<DrawIndexedArguments>(),
+            );
+        }
+    }
+}
+
+/// The stride of indirect arguments `T`, packed back to back.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "arguments are 20 bytes at most"
+)]
+const fn stride<T>() -> u32 {
+    size_of::<T>() as u32
 }
 
 impl<T: Copy> LoadOp<T> {

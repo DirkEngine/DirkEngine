@@ -479,6 +479,7 @@ impl BufferAccess {
             Self::CopySource => (S::COPY, A::TRANSFER_READ),
             Self::CopyDestination => (S::COPY, A::TRANSFER_WRITE),
             Self::Index => (S::INDEX_INPUT, A::INDEX_READ),
+            Self::Indirect => (S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ),
             Self::ShaderRead(stages) => (stages.vk(), A::SHADER_STORAGE_READ),
             Self::ShaderWrite(stages) => (
                 stages.vk(),
