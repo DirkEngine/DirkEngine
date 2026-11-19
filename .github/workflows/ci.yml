@@ -98,6 +98,10 @@ jobs:
         os: ${{ fromJSON(needs.changes.outputs.platforms) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # Linux runs native tests on lavapipe, so failing to create a device
+      # fails them instead of skipping them.
+      DIRK_REQUIRE_GPU: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
@@ -114,6 +118,10 @@ jobs:
       # no-default-features passes leave it out.
       - run: cargo clippy --workspace --locked --all-features -- -D warnings
       - run: cargo clippy --workspace --exclude dirk_editor --locked --no-default-features -- -D warnings
+      # Runners have no GPU, so native rendering tests run on Mesa's software
+      # Vulkan driver (lavapipe) under the Khronos validation layer.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-validationlayers
       - run: cargo nextest run --workspace --locked --all-features
       - run: cargo nextest run --workspace --exclude dirk_editor --locked --no-default-features
       - if: runner.os == 'Linux'
