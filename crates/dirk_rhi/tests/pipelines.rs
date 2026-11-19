@@ -301,7 +301,7 @@ fn indirect_draws_read_their_arguments_from_a_buffer() -> Result<()> {
             rhi,
             "indices",
             BufferUsage::INDEX,
-            bytemuck::cast_slice(&[7_u16, 0, 1, 2]),
+            bytemuck::cast_slice(&[7_u16, 7, 0, 1, 2]),
         )?;
         let fill = |color| Fill { color, depth: 0.5 };
         let mut render_draws = |offset, count, color| {
@@ -341,14 +341,15 @@ fn indirect_draws_read_their_arguments_from_a_buffer() -> Result<()> {
             let indices = IndexBuffer {
                 buffer: &indices,
                 format: IndexFormat::U16,
-                offset: 0,
+                // Aligned to the index size only.
+                offset: 2,
             };
             let draws = IndirectDraws {
                 buffer: &indexed_arguments,
                 offset: 0,
                 count: 1,
             };
-            // SAFETY: the draw reads indices 1..4 of the four.
+            // SAFETY: the draw reads indices 1..4 of the four from offset 2.
             unsafe { pass.draw_indexed_indirect(&pipeline, &fill(BLUE), indices, draws) }
         })?;
         assert!(pixels.iter().all(|pixel| *pixel == unorm(BLUE)));
