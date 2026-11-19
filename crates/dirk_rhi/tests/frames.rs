@@ -754,8 +754,9 @@ fn timestamps_are_read_once_their_frame_slot_comes_round() -> Result<()> {
             panic!("the first frame wrote its first two timestamps only");
         };
         // Copying 1 MiB takes some time, but far less than a second.
+        let elapsed = end.checked_sub(start);
         assert!(
-            start < end && end - start < Duration::from_secs(1),
+            elapsed.is_some_and(|elapsed| !elapsed.is_zero() && elapsed < Duration::from_secs(1)),
             "{start:?} to {end:?} is not the time of a 1 MiB copy"
         );
         // The slot's timestamps were cleared for this frame.
