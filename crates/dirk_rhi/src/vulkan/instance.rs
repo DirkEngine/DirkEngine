@@ -27,8 +27,8 @@ pub(super) struct Instance {
 }
 
 impl Instance {
-    /// Creates an instance with the portability, validation and debug
-    /// extensions the request needs.
+    /// Creates an instance with the surface, validation and debug extensions
+    /// the request needs.
     pub(super) fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
         // SAFETY: the loaded library is kept alive by the returned instance.
         let entry = unsafe { ash::Entry::load() }
@@ -48,11 +48,6 @@ impl Instance {
             .transpose()
             .check("listing the display's surface extensions")?;
         let mut extensions = surface_extensions.unwrap_or_default().to_vec();
-        let mut flags = vk::InstanceCreateFlags::empty();
-        if has(&available, ash::khr::portability_enumeration::NAME) {
-            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
-            flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
-        }
 
         let mut layers = Vec::new();
         let mut synchronization_validation = false;
@@ -75,13 +70,9 @@ impl Instance {
         }
         let debug_messages = extensions.contains(&debug_utils::NAME.as_ptr());
 
-        let application_name = CString::new(info.application_name).map_err(|_| {
-            Error::invalid(
-                "application name",
-                info.application_name,
-                "contains a NUL byte",
-            )
-        })?;
+        // `Rhi::new` rejected names with NUL bytes.
+        let application_name = CString::new(info.application_name)
+            .map_err(|error| Error::native("encoding the application name", error))?;
         let application = vk::ApplicationInfo::default()
             .application_name(&application_name)
             .engine_name(c"DirkEngine")
@@ -92,7 +83,6 @@ impl Instance {
         let mut validation_features =
             vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_validation);
         let mut create_info = vk::InstanceCreateInfo::default()
-            .flags(flags)
             .application_info(&application)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);

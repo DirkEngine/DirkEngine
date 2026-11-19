@@ -4,7 +4,7 @@ use dirk_rhi::{Error, Result, Rhi, RhiCreateInfo};
 
 /// Runs `test` on an RHI with validation enabled, then fails if validation
 /// reported any error. Skips the test, with a note, on machines without a
-/// Vulkan driver or a suitable device.
+/// graphics driver or a suitable device.
 pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
     let Some(mut rhi) = rhi(&RhiCreateInfo {
         application_name: "dirk_rhi tests",
@@ -19,7 +19,7 @@ pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
     assert_eq!(
         rhi.validation_error_count(),
         0,
-        "validation reported errors; they are logged to the `vulkan` tracing target"
+        "validation reported errors; they are logged to the `vulkan` or `metal` tracing target"
     );
     Ok(())
 }
