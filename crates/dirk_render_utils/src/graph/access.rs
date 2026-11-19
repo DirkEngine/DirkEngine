@@ -63,12 +63,7 @@ impl Access for ImageAccess {
     }
 
     fn shader_stages(self) -> Option<ShaderStages> {
-        match self {
-            Self::Sampled(stages) | Self::StorageRead(stages) | Self::StorageWrite(stages) => {
-                Some(stages)
-            }
-            _ => None,
-        }
+        ImageAccess::shader_stages(self)
     }
 
     fn in_pass(self) -> bool {
@@ -118,10 +113,7 @@ impl Access for BufferAccess {
     }
 
     fn shader_stages(self) -> Option<ShaderStages> {
-        match self {
-            Self::ShaderRead(stages) | Self::ShaderWrite(stages) => Some(stages),
-            _ => None,
-        }
+        BufferAccess::shader_stages(self)
     }
 
     fn in_pass(self) -> bool {
