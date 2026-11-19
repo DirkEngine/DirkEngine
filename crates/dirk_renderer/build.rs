@@ -1,10 +1,7 @@
 //! Builds the shaders and generated shader metadata for `dirk_renderer`.
 
 use anyhow::{Context, anyhow, bail, ensure};
-use cargo_gpu_install::{
-    install::Install,
-    spirv_builder::{ModuleResult, SpirvMetadata},
-};
+use cargo_gpu_install::spirv_builder::{ModuleResult, SpirvMetadata};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 use rspirv::{
@@ -38,7 +35,7 @@ fn build_shaders() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=shaders/Cargo.toml");
     println!("cargo:rerun-if-changed=shaders/src/lib.rs");
 
-    let backend = Install::from_shader_crate(shader_crate.clone()).run()?;
+    let backend = dirk_build::shaders::install(&shader_crate)?;
     let mut builder = backend.to_spirv_builder(shader_crate, "spirv-unknown-vulkan1.3");
     builder.build_script.defaults = true;
     builder.build_script.env_shader_spv_path = Some(false);
