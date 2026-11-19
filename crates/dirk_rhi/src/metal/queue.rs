@@ -94,8 +94,7 @@ impl Device {
             if raw.status() == MTLCommandBufferStatus::Error {
                 let label = raw
                     .label()
-                    .map(|label| label.to_string())
-                    .unwrap_or_default();
+                    .map_or_else(String::new, |label| label.to_string());
                 let reason = raw.error().map_or_else(
                     || "failed without an error".to_owned(),
                     |error| error.to_string(),
