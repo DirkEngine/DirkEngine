@@ -1,11 +1,17 @@
 //! Vulkan 1.3 backend.
 
 mod adapter;
+mod buffer;
 mod convert;
 mod device;
+mod image;
 mod instance;
+mod sampler;
 
+pub(crate) use buffer::Buffer;
 pub(crate) use device::Device;
+pub(crate) use image::{Image, ImageView};
+pub(crate) use sampler::Sampler;
 
 use crate::{Error, Result};
 use ash::vk;
