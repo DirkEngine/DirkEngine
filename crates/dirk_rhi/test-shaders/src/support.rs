@@ -34,7 +34,8 @@ pub fn with_rhi<E: From<Error>>(test: impl FnOnce(&mut Rhi) -> Result<(), E>) ->
 }
 
 /// Creates an RHI, or returns `None` after printing why when the machine
-/// cannot run native tests.
+/// cannot run native tests, unless the `DIRK_REQUIRE_GPU` environment
+/// variable is `1`.
 ///
 /// # Errors
 ///
