@@ -127,6 +127,7 @@ impl CommandEncoder<'_, Graphics> {
                 "{workgroups:?} workgroups exceed the device's {limit:?}"
             ));
         }
+        self.end_pass();
         self.raw.dispatch(
             self.device(),
             &pipeline.raw,
