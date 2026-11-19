@@ -66,6 +66,11 @@ pub enum ImageAccess {
     ColorAttachment,
     /// Read and written as a depth/stencil attachment.
     DepthStencilAttachment,
+    /// Owned by presentation: the resting access of swapchain images, which
+    /// presentation reads and each acquisition hands back with undefined
+    /// contents. Work using an acquired image waits for its acquisition at
+    /// attachment writes and copies, so its first access must be one.
+    Present,
 }
 
 impl BufferAccess {
@@ -163,7 +168,7 @@ impl ImageAccess {
     #[must_use]
     pub const fn usage(self) -> ImageUsage {
         match self {
-            Self::Undefined => ImageUsage::empty(),
+            Self::Undefined | Self::Present => ImageUsage::empty(),
             Self::CopySource => ImageUsage::COPY_SRC,
             Self::CopyDestination => ImageUsage::COPY_DST,
             Self::Sampled(_) => ImageUsage::SAMPLED,
