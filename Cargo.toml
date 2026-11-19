@@ -146,6 +146,8 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 pedantic = "warn"
 unwrap_used = "warn"
+# Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
+self_named_module_files = "warn"
 
 # Line tables keep file and line numbers in backtraces but drop the variable
 # and type info that makes up most of a debug build's output. Also applies to
