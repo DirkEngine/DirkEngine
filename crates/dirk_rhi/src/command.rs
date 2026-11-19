@@ -258,7 +258,9 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     /// Copies regions between images of the same format and sample count,
     /// in the [`ImageAccess::CopySource`] and
     /// [`ImageAccess::CopyDestination`] layouts. Destinations may not overlap
-    /// each other, nor, within one image, any source.
+    /// each other. Within one image, which can only be in one layout per
+    /// subresource, no source may share a mip level and layer with a
+    /// destination.
     ///
     /// # Errors
     ///
@@ -452,7 +454,9 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// Rejects regions writing what another region writes and, when they
-    /// copy within one resource, reading what any region writes.
+    /// copy within one resource, reading what any region writes, by
+    /// `read_overlaps_write`: within an image, a subresource any region
+    /// writes.
     fn check_conflicts<T: std::fmt::Debug>(
         regions: &[T],
         same_resource: bool,
@@ -582,7 +586,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             regions,
             std::ptr::eq(src, dst),
             |write, other| write.dst.overlaps(&other.dst),
-            |read, write| read.src.overlaps(&write.dst),
+            |read, write| read.src.shares_subresource(&write.dst),
         ) {
             return invalid(reason);
         }
@@ -594,8 +598,8 @@ impl CommandEncoder<'_, Graphics> {
     /// Blits regions between images of the same format, scaling with
     /// `filter`, in the [`ImageAccess::CopySource`] and
     /// [`ImageAccess::CopyDestination`] layouts. Destinations may not overlap
-    /// each other, nor, within one image, any source, so mips can be
-    /// generated from the previous level.
+    /// each other, nor, within one image, share a mip level and layer with
+    /// any source, so mips can be generated from the previous level.
     ///
     /// # Errors
     ///
@@ -685,32 +689,40 @@ impl CommandEncoder<'_, Graphics> {
 }
 
 impl ImageRegion {
-    /// Whether the two regions share a texel.
-    fn overlaps(&self, other: &Self) -> bool {
-        let overlap = |start: u32, length: u32, other_start: u32, other_length: u32| {
-            u64::from(start) < u64::from(other_start) + u64::from(other_length)
-                && u64::from(other_start) < u64::from(start) + u64::from(length)
-        };
+    /// Whether the ranges of `length` from `start` and of `other_length`
+    /// from `other_start` intersect.
+    fn overlap(start: u32, length: u32, other_start: u32, other_length: u32) -> bool {
+        u64::from(start) < u64::from(other_start) + u64::from(other_length)
+            && u64::from(other_start) < u64::from(start) + u64::from(length)
+    }
+
+    /// Whether the two regions share a mip level and layer.
+    fn shares_subresource(&self, other: &Self) -> bool {
         self.mip_level == other.mip_level
-            && overlap(
+            && Self::overlap(
                 self.base_layer,
                 self.layer_count,
                 other.base_layer,
                 other.layer_count,
             )
-            && overlap(
+            && Self::overlap(
                 self.origin.x,
                 self.extent.width,
                 other.origin.x,
                 other.extent.width,
             )
-            && overlap(
+    }
+
+    /// Whether the two regions share a texel.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.shares_subresource(other)
+            && Self::overlap(
                 self.origin.y,
                 self.extent.height,
                 other.origin.y,
                 other.extent.height,
             )
-            && overlap(
+            && Self::overlap(
                 self.origin.z,
                 self.extent.depth,
                 other.origin.z,

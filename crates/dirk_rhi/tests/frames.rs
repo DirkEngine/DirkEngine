@@ -208,6 +208,14 @@ fn copies_within_one_buffer_or_image_need_disjoint_regions() -> Result<()> {
             encoder.copy_image(&texture, &texture, &[mip(1)]),
             "overlaps",
         );
+        // Nor can disjoint halves of one mip, which is in one layout.
+        let mut halves = mip(0);
+        (halves.src.extent.width, halves.dst.extent.width) = (4, 4);
+        halves.dst.origin.x = 4;
+        assert_invalid(
+            encoder.copy_image(&texture, &texture, &[halves]),
+            "overlaps",
+        );
         let downsample = ImageCopy {
             src: info.mip_region(0),
             dst: info.mip_region(1),
