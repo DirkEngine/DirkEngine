@@ -1,205 +1,279 @@
-//! This crate has all the traits for the ECS [`System`]s.
+//! Systems run in registration order, once per tick.
+//!
+//! Functions and stateful [`System`] implementations declare the data they
+//! receive. The universe fetches those parameters before each run.
 
-use std::{any::TypeId, collections::HashMap};
+use std::{
+    any::type_name,
+    cell::{RefCell, RefMut},
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 
 use crate::{
-    CommandBuffer, Entity, Universe, World, WorldId,
-    components::{AnyComponent, Component},
-    query::Query,
+    CommandBuffer, Universe,
+    macros::sealed::Sealed,
+    query::{Join, Query, QueryAccess, QueryData, filter::QueryFilter},
 };
-use dirk_proc::system_trait;
 
-/// All systems must implement this trait.
-pub trait System: 'static {
-    /// Get a name for the system. For debug purposes only.
-    fn name() -> &'static str;
-}
+/// Everything a system parameter can be fetched from during one run.
 #[doc(hidden)]
-pub use dirk_proc::System;
-
-/// A system that is run by the [`Universe`].
-#[system_trait]
-pub trait UniverseSystem: System {
-    /// Called right after the world is created.
-    fn world_created(&self, cmd: &mut CommandBuffer, universe: &Universe, world: &World);
-    /// Called as the world is being destroyed.
-    /// In this state, the world is still valid
-    /// and no entities have been removed.
-    fn world_destroyed(&self, cmd: &mut CommandBuffer, universe: &Universe, world: &World);
-
-    /// Called when an entity is spawned. At this point, components have
-    /// already been added. They can thus be queried for.
-    fn entity_spawned(&self, cmd: &mut CommandBuffer, universe: &Universe, entity: Entity);
-    /// Called when the entity is moved to another [`World`].
-    fn entity_sent(
-        &self,
-        cmd: &mut CommandBuffer,
-        universe: &Universe,
-        entity: Entity,
-        old: WorldId,
-        new: WorldId,
-    );
-    /// Called when an entity is despawned. At this point, components have
-    /// not yet been removed. They can thus be queried for.
-    /// However, the entity has been removed from the [`World`], so
-    /// querying for it will not work.
-    fn entity_despawned(&self, cmd: &mut CommandBuffer, universe: &Universe, entity: Entity);
-
-    /// This function will be called by the [`Universe`] on every tick.
-    fn tick(&self, cmd: &mut CommandBuffer, universe: &Universe, delta_time: f64);
+pub struct SystemContext<'u> {
+    universe: &'u Universe,
+    last_run: u64,
+    delta_time: f64,
+    commands: &'u RefCell<CommandBuffer>,
 }
 
-/// A [`System`] that is run on every entity that matches the query.
-#[system_trait]
-pub trait EntitySystem: System {
-    /// Called when an entity is spawned. At this point, components have
-    /// already been added. They can thus be queried for.
-    fn spawned(&self, cmd: &mut CommandBuffer, universe: &Universe, entity: Entity);
-    /// Called when an entity is despawned. At this point, components have
-    /// not yet been removed. They can thus be queried for.
-    /// However, the entity has been removed from the [`World`], so
-    /// querying for it will not work.
-    fn despawned(&self, cmd: &mut CommandBuffer, universe: &Universe, entity: Entity);
+/// Data supplied to one system invocation: queries, [`Commands`],
+/// [`DeltaTime`], or tuples of these.
+pub trait SystemParam: Sealed {
+    /// The value supplied while the universe is borrowed for this invocation.
+    type Item<'u>;
 
-    /// Called when the entity is moved to another [`World`].
-    fn sent(
-        &self,
-        cmd: &mut CommandBuffer,
-        universe: &Universe,
-        entity: Entity,
-        from: WorldId,
-        to: WorldId,
-    );
+    /// Fetches this parameter for one run.
+    #[doc(hidden)]
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u>;
 
-    /// This query will decide if `entity_spawned` & `entity_despawned` should
-    /// be run for given entities. If there is not query, the system will run
-    /// on every entity.
-    fn query(&self) -> Query;
+    /// Registers this parameter's accesses before the system runs.
+    #[doc(hidden)]
+    fn register_access(access: &mut QueryAccess);
 }
 
-/// Run for [`Entity`]s that match the query
-#[system_trait]
-pub trait TickingSystem: System {
-    /// `entities`: the list of entities that were returned by the query returned
-    /// by [`TickingSystem::query`].
-    fn tick(
-        &self,
-        cmd: &mut CommandBuffer,
-        universe: &Universe,
-        delta_time: f64,
-        entities: &mut dyn Iterator<Item = Entity>,
-    );
-    /// Returns the query used to construct the `entities` of the tick function.
-    fn query(&self) -> Query;
+impl SystemParam for () {
+    type Item<'u> = ();
+
+    fn fetch<'u>(_: &SystemContext<'u>) -> Self::Item<'u> {}
+
+    fn register_access(_: &mut QueryAccess) {}
 }
 
-/// System run for every component of the specified type.
-/// Can be registered on both the [`Entity`] & [`Universe`]
-pub trait ComponentSystem: System {
-    /// The concrete component type this system handles.
-    type Component: Component;
+macro_rules! impl_system_param_for_tuple {
+    ($($ty:ident $binding:ident),+) => {
+        impl<$($ty: SystemParam),+> SystemParam for ($($ty,)+) {
+            type Item<'u> = ($($ty::Item<'u>,)+);
 
-    /// When a component is added.
-    /// `entity`: the entity with this component.
-    fn added(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Self::Component);
+            fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+                ($($ty::fetch(context),)+)
+            }
 
-    /// When a component is updated.
-    /// `entity`: the entity with this component.
-    fn updated(
-        &self,
-        cmd: &mut CommandBuffer,
-        entity: Entity,
-        old: &Self::Component,
-        new: &Self::Component,
-    );
-
-    /// When a component is removed.
-    /// `entity`: the entity with this component.
-    fn removed(&self, cmd: &mut CommandBuffer, entity: Entity, component: &Self::Component);
+            fn register_access(access: &mut QueryAccess) {
+                $($ty::register_access(access);)+
+            }
+        }
+    };
 }
+all_tuples!(impl_system_param_for_tuple);
 
-/// Private type-erasure trait for storage in [`Entity`] & [`Universe`]
-pub(crate) trait AnyComponentSystem {
-    /// Returns the [`TypeId`] of the [`Component`] that this system is running for.
-    fn component_type_id(&self) -> TypeId;
-    fn added(&self, cmd: &mut CommandBuffer, entity: Entity, component: &dyn AnyComponent);
-    fn updated(
-        &self,
-        cmd: &mut CommandBuffer,
-        entity: Entity,
-        old: &dyn AnyComponent,
-        new: &dyn AnyComponent,
-    );
-    fn removed(&self, cmd: &mut CommandBuffer, entity: Entity, component: &dyn AnyComponent);
-}
+impl<D: QueryData, F: QueryFilter> Sealed for Query<'_, D, F> {}
+impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F>
+where
+    D::Liveness: Join<F::Liveness>,
+{
+    type Item<'u> = Query<'u, D, F>;
 
-impl<T: ComponentSystem> AnyComponentSystem for T {
-    fn component_type_id(&self) -> TypeId {
-        TypeId::of::<T::Component>()
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Query::new(context.universe, context.last_run)
     }
 
-    fn added(&self, cmd: &mut CommandBuffer, entity: Entity, component: &dyn AnyComponent) {
-        if let Some(component) = component.as_any().downcast_ref::<T::Component>() {
-            T::added(self, cmd, entity, component);
+    fn register_access(access: &mut QueryAccess) {
+        D::register_access(access);
+    }
+}
+
+/// Optional structural commands for a system. Component values can be edited
+/// directly through `Query<&mut C>`.
+pub struct Commands<'u> {
+    buffer: RefMut<'u, CommandBuffer>,
+}
+
+impl Deref for Commands<'_> {
+    type Target = CommandBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buffer
+    }
+}
+
+impl DerefMut for Commands<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.buffer
+    }
+}
+
+impl Sealed for Commands<'_> {}
+impl SystemParam for Commands<'_> {
+    type Item<'u> = Commands<'u>;
+
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Commands {
+            buffer: context.commands.borrow_mut(),
         }
     }
 
-    fn updated(
-        &self,
-        cmd: &mut CommandBuffer,
-        entity: Entity,
-        old: &dyn AnyComponent,
-        new: &dyn AnyComponent,
-    ) {
-        let Some(old) = old.as_any().downcast_ref::<T::Component>() else {
-            return;
-        };
-        let Some(new) = new.as_any().downcast_ref::<T::Component>() else {
-            return;
-        };
+    fn register_access(access: &mut QueryAccess) {
+        access.commands();
+    }
+}
 
-        T::updated(self, cmd, entity, old, new);
+/// Time since the previous tick, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeltaTime(pub f64);
+
+impl Sealed for DeltaTime {}
+impl SystemParam for DeltaTime {
+    type Item<'u> = Self;
+
+    fn fetch<'u>(context: &SystemContext<'u>) -> Self::Item<'u> {
+        Self(context.delta_time)
     }
 
-    fn removed(&self, cmd: &mut CommandBuffer, entity: Entity, component: &dyn AnyComponent) {
-        if let Some(component) = component.as_any().downcast_ref::<T::Component>() {
-            T::removed(self, cmd, entity, component);
+    fn register_access(_: &mut QueryAccess) {}
+}
+
+/// A stateful system. `Params` names its inputs once, with `'u` standing for
+/// the universe borrow of one run:
+///
+/// ```
+/// # use dirk_universe::prelude::*;
+/// # #[derive(Debug, Component)] struct Position(f64);
+/// struct Drift { speed: f64 }
+///
+/// impl System for Drift {
+///     type Params<'u> = (Query<'u, &'u mut Position>, DeltaTime);
+///
+///     fn run(&mut self, (mut positions, DeltaTime(dt)): Self::Params<'_>) {
+///         for mut position in &mut positions {
+///             position.0 += self.speed * dt;
+///         }
+///     }
+/// }
+/// ```
+///
+/// Systems run once per tick, even when their queries are empty. Mutable
+/// edits are visible to later systems in the same tick; structural commands
+/// apply on the next tick.
+pub trait System: 'static {
+    /// The parameters fetched for each run.
+    type Params<'u>: SystemParam<Item<'u> = Self::Params<'u>>;
+
+    /// Returns the type name for diagnostics.
+    fn name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    /// Runs once with the fetched parameters.
+    fn run(&mut self, params: Self::Params<'_>);
+}
+
+/// Converts a [`System`] or a function into a registered system.
+///
+/// Functions and `FnMut` closures qualify when every argument is a
+/// [`SystemParam`]. The marker distinguishes these cases and is inferred by
+/// `UniverseBuilder::with_system`.
+pub trait IntoSystem<Marker>: 'static {
+    /// Converts this value into the internal system representation.
+    #[doc(hidden)]
+    fn into_system(self) -> Box<dyn ErasedSystem>;
+}
+
+/// Internal execution interface used by the universe's system list.
+#[doc(hidden)]
+pub trait ErasedSystem: 'static {
+    /// Runs a system once and advances its change-detection counter.
+    fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
+}
+
+/// Fetches parameters from a context and invokes a system's body.
+trait Run: 'static {
+    fn run(&mut self, context: &SystemContext<'_>);
+
+    fn register_access(access: &mut QueryAccess);
+}
+
+/// Tracks the change-detection counter shared by every kind of system.
+struct Runner<R> {
+    inner: R,
+    last_run: u64,
+}
+
+impl<R: Run> Runner<R> {
+    fn boxed(inner: R) -> Box<dyn ErasedSystem> {
+        R::register_access(&mut QueryAccess::default());
+        Box::new(Self { inner, last_run: 0 })
+    }
+}
+
+impl<R: Run> ErasedSystem for Runner<R> {
+    fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
+        let this_run = universe.advance_change_tick();
+        self.inner.run(&SystemContext {
+            universe,
+            last_run: self.last_run,
+            delta_time,
+            commands,
+        });
+        self.last_run = this_run;
+    }
+}
+
+/// Adapts a [`System`]. Its `'static` parameters describe access for every borrow.
+struct StructSystem<S>(S);
+
+impl<S: System> Run for StructSystem<S> {
+    fn run(&mut self, context: &SystemContext<'_>) {
+        self.0.run(S::Params::fetch(context));
+    }
+
+    fn register_access(access: &mut QueryAccess) {
+        S::Params::<'static>::register_access(access);
+    }
+}
+
+/// Marker distinguishing [`System`] implementations from functions.
+#[doc(hidden)]
+pub struct SystemMarker;
+
+impl<S: System> IntoSystem<SystemMarker> for S {
+    fn into_system(self) -> Box<dyn ErasedSystem> {
+        Runner::boxed(StructSystem(self))
+    }
+}
+
+/// Adapts a function whose arguments are the system parameters `Params`.
+struct FunctionSystem<Func, Params> {
+    func: Func,
+    _marker: PhantomData<fn() -> Params>,
+}
+
+macro_rules! impl_function_system {
+    ($($ty:ident $binding:ident),*) => {
+        impl<Func, $($ty: SystemParam + 'static),*> Run for FunctionSystem<Func, ($($ty,)*)>
+        where
+            Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
+        {
+            fn run(&mut self, context: &SystemContext<'_>) {
+                let ($($binding,)*) = <($($ty,)*) as SystemParam>::fetch(context);
+                (self.func)($($binding),*);
+            }
+
+            fn register_access(access: &mut QueryAccess) {
+                <($($ty,)*) as SystemParam>::register_access(access);
+            }
         }
-    }
+
+        impl<Func, $($ty: SystemParam + 'static),*> IntoSystem<fn($($ty),*)> for Func
+        where
+            Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
+        {
+            fn into_system(self) -> Box<dyn ErasedSystem> {
+                Runner::boxed(FunctionSystem::<_, ($($ty,)*)> {
+                    func: self,
+                    _marker: PhantomData,
+                })
+            }
+        }
+    };
 }
-
-#[derive(Default)]
-pub(crate) struct ComponentSystemStorage {
-    systems: HashMap<TypeId, Vec<Box<dyn AnyComponentSystem>>>,
-}
-
-impl ComponentSystemStorage {
-    pub fn push<S: ComponentSystem>(&mut self, system: S) {
-        self.systems
-            .entry(system.component_type_id())
-            .or_default()
-            .push(Box::new(system));
-    }
-
-    pub fn push_any(&mut self, type_id: TypeId, system: Box<dyn AnyComponentSystem>) {
-        self.systems.entry(type_id).or_default().push(system);
-    }
-
-    pub fn iter(&self, type_id: TypeId) -> std::slice::Iter<'_, Box<dyn AnyComponentSystem>> {
-        // fixing the lint breaks because of some weird type stuff, so we allow.
-        #[allow(clippy::map_unwrap_or)]
-        self.systems
-            .get(&type_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .iter()
-    }
-}
-
-impl IntoIterator for ComponentSystemStorage {
-    type Item = (TypeId, Vec<Box<dyn AnyComponentSystem>>);
-    type IntoIter = std::collections::hash_map::IntoIter<TypeId, Vec<Box<dyn AnyComponentSystem>>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.systems.into_iter()
-    }
-}
+impl_function_system!();
+all_tuples!(impl_function_system);

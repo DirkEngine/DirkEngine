@@ -2,12 +2,13 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use crate::{Entity, WorldId};
 
-/// Shared allocator for [`WorldId`] and [`Entity`] handles.
+/// Shared allocator for [`Entity`] handles, including the entities behind
+/// [`WorldId`]s.
 ///
 /// Cloning this type is cheap. Every clone points at the same counters, so
 /// handles allocated from any clone stay unique within that allocator.
@@ -18,7 +19,6 @@ pub struct Allocator {
 
 #[derive(Debug, Default)]
 struct Inner {
-    next_world: AtomicU32,
     next_entity: AtomicU64,
 }
 
@@ -29,10 +29,15 @@ impl Allocator {
         Self::default()
     }
 
+    /// A builder can be merged only while no handle or queued buffer from it survives.
+    pub(crate) fn is_unique(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Allocates a new [`WorldId`].
     #[must_use]
     pub fn allocate_world(&self) -> WorldId {
-        WorldId::new(self.inner.next_world.fetch_add(1, Ordering::Relaxed))
+        WorldId::new(self.allocate_entity())
     }
 
     /// Allocates a new [`Entity`].
