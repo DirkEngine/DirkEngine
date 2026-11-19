@@ -89,8 +89,10 @@ let image = frame.acquire(&mut swapchain)?;   // AcquiredImage: render to image.
 let mut cmd = frame.encoder::<Graphics>("scene")?;
 cmd.wait_for(upload)?;                       // the GPU waits for another queue's Completion
 // ... record, leaving the image in ImageAccess::Present ...
-let image = frame.submit_with(cmd, image)?;   // PresentableImage; frame.submit for other work
-frame.present(image)?;                        // presentation is part of the frame
+let images = frame.submit_with(cmd, [image])?; // PresentableImages; frame.submit for other work
+for image in images {
+    frame.present(image)?;                    // presentation is part of the frame
+}
 frame.finish();                               // closes the frame (also on Drop)
 ```
 
@@ -170,13 +172,15 @@ frame.finish();                               // closes the frame (also on Drop)
   culling, front face, depth test and bias, per-target blending and write masks; stencil
   tests come when something needs them.
 - Typestate presentation: `frame.acquire(&mut swapchain) -> AcquiredImage`,
-  `frame.submit_with(encoder, acquired) -> PresentableImage`, `frame.present(presentable)`.
+  `frame.submit_with(encoder, [acquired, ..]) -> Vec<PresentableImage>`,
+  `frame.present(presentable)`.
   Each step consumes the previous token, and tokens borrow the frame and the swapchain, so
   presenting before submit, submitting twice, outliving the frame, or resizing while an
   image is out do not compile (`compile_fail` doctests). No atomics: the swapchain keeps a
   plain `pending` field so an image abandoned at any step is released (its acquire
   semaphore consumed by an empty submission) and the swapchain recreated on the next
-  acquisition. One image per swapchain and frame.
+  acquisition. One image per swapchain and frame; one submission renders to the images of
+  any number of swapchains, waiting for each acquisition and signaling each presentation.
 
 ## Compute
 

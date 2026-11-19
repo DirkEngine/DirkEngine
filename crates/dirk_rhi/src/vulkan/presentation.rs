@@ -20,11 +20,11 @@ pub(super) const PRESENT_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlag
 
 /// Binary semaphores a submission waits for or signals for presentation.
 #[derive(Clone, Copy, Default)]
-pub(super) struct Presentation {
-    /// Signaled when the image a submission renders to is acquired.
-    pub(super) acquired: Option<vk::Semaphore>,
+pub(super) struct Presentation<'a> {
+    /// Signaled when the images a submission renders to are acquired.
+    pub(super) acquired: &'a [vk::Semaphore],
     /// Signaled by the submission, for presentation to wait for.
-    pub(super) rendered: Option<vk::Semaphore>,
+    pub(super) rendered: &'a [vk::Semaphore],
 }
 
 /// A Vulkan surface and the window it presents to.
@@ -341,34 +341,13 @@ impl Swapchain {
         }
     }
 
-    /// Submits `commands`, rendering to image `index` acquired with frame
-    /// slot `slot`, to the graphics queue after the GPU reaches `waits`.
-    pub(crate) fn submit(
-        &self,
-        commands: CommandBuffer,
-        waits: [u64; QueueType::COUNT],
-        slot: usize,
-        index: u32,
-    ) -> Result<u64> {
-        let generation = self.current();
-        self.device.submit_batch(
-            QueueType::Graphics,
-            Some(commands),
-            waits,
-            Presentation {
-                acquired: Some(generation.acquired[slot]),
-                rendered: Some(generation.rendered[index as usize]),
-            },
-        )
-    }
-
     /// Consumes the acquisition of frame slot `slot` without rendering, so
     /// its semaphore can be destroyed. The image stays acquired until the
     /// swapchain is recreated.
     pub(crate) fn release(&self, slot: usize) -> Result<()> {
         let presentation = Presentation {
-            acquired: Some(self.current().acquired[slot]),
-            rendered: None,
+            acquired: &[self.current().acquired[slot]],
+            rendered: &[],
         };
         self.device
             .submit_batch(
@@ -433,6 +412,39 @@ impl Swapchain {
             .swapchains
             .as_ref()
             .expect("swapchains exist only with presentation")
+    }
+}
+
+impl Device {
+    /// Submits `commands` to the graphics queue after the GPU reaches
+    /// `waits`, rendering to `images`: swapchains and the indices of their
+    /// images acquired with frame slot `slot`.
+    pub(crate) fn submit_presenting(
+        &self,
+        commands: CommandBuffer,
+        waits: [u64; QueueType::COUNT],
+        slot: usize,
+        images: &[(&Swapchain, u32)],
+    ) -> Result<u64> {
+        let (acquired, rendered): (Vec<_>, Vec<_>) = images
+            .iter()
+            .map(|&(swapchain, index)| {
+                let generation = swapchain.current();
+                (
+                    generation.acquired[slot],
+                    generation.rendered[index as usize],
+                )
+            })
+            .unzip();
+        self.submit_batch(
+            QueueType::Graphics,
+            Some(commands),
+            waits,
+            Presentation {
+                acquired: &acquired,
+                rendered: &rendered,
+            },
+        )
     }
 }
 

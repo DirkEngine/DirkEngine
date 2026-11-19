@@ -90,54 +90,54 @@ impl Device {
         queue: QueueType,
         commands: Option<CommandBuffer>,
         waits: [u64; QueueType::COUNT],
-        presentation: Presentation,
+        presentation: Presentation<'_>,
     ) -> Result<u64> {
         if let Some(commands) = commands {
             // SAFETY: the command buffer is recording and only used by its
             // encoder.
             unsafe { self.raw.end_command_buffer(commands.raw) }.check("vkEndCommandBuffer")?;
         }
-        let mut wait_infos = [vk::SemaphoreSubmitInfo::default(); QueueType::COUNT + 1];
-        let mut wait_count = 0;
-        for (queue, value) in self.queues.iter().zip(waits) {
-            if value > 0 {
-                wait_infos[wait_count] = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(queue.timeline)
-                    .value(value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-                wait_count += 1;
-            }
-        }
-        if let Some(acquired) = presentation.acquired {
+        let semaphore = |semaphore, stages| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(stages)
+        };
+        let wait_infos: Vec<_> = self
+            .queues
+            .iter()
+            .zip(waits)
+            .filter(|&(_, value)| value > 0)
+            .map(|(queue, value)| {
+                semaphore(queue.timeline, vk::PipelineStageFlags2::ALL_COMMANDS).value(value)
+            })
             // The first use of an acquired image writes it as an attachment
             // or by a transfer; see `ImageAccess::Present`.
-            wait_infos[wait_count] = vk::SemaphoreSubmitInfo::default()
-                .semaphore(acquired)
-                .stage_mask(PRESENT_STAGES);
-            wait_count += 1;
-        }
+            .chain(
+                presentation
+                    .acquired
+                    .iter()
+                    .map(|&acquired| semaphore(acquired, PRESENT_STAGES)),
+            )
+            .collect();
         let target = &self.queues[queue as usize];
         let vk_queue = self.lock_queue(queue);
         let value = target.submitted.load(Ordering::Relaxed) + 1;
-        let mut signals = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(target.timeline)
-            .value(value)
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS); 2];
-        let signal_count = match presentation.rendered {
-            Some(rendered) => {
-                signals[1] = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(rendered)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-                2
-            }
-            None => 1,
-        };
+        let signals: Vec<_> = std::iter::once(
+            semaphore(target.timeline, vk::PipelineStageFlags2::ALL_COMMANDS).value(value),
+        )
+        .chain(
+            presentation
+                .rendered
+                .iter()
+                .map(|&rendered| semaphore(rendered, vk::PipelineStageFlags2::ALL_COMMANDS)),
+        )
+        .collect();
         let commands = commands
             .map(|commands| vk::CommandBufferSubmitInfo::default().command_buffer(commands.raw));
         let submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&wait_infos[..wait_count])
+            .wait_semaphore_infos(&wait_infos)
             .command_buffer_infos(commands.as_slice())
-            .signal_semaphore_infos(&signals[..signal_count]);
+            .signal_semaphore_infos(&signals);
         // SAFETY: the queue is locked, the commands were recorded for its
         // family, waits refer to values already submitted or to acquired
         // images, and the presentation semaphores are unsignaled.

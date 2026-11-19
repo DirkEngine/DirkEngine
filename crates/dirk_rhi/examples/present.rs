@@ -188,8 +188,10 @@ impl App {
                 &[barrier(ImageAccess::ColorAttachment, ImageAccess::Present)],
             )?;
         }
-        let presentable = frame.submit_with(encoder, acquired)?;
-        frame.present(presentable)
+        for presentable in frame.submit_with(encoder, [acquired])? {
+            frame.present(presentable)?;
+        }
+        Ok(())
     }
 
     /// Runs `step`, ending the example on errors and once every frame is

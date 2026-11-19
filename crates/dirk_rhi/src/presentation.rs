@@ -63,9 +63,10 @@ pub struct SwapchainDesc<'a> {
 /// Images presented to a surface, recreated when the surface changes.
 ///
 /// Acquire an image in a frame with [`Frame::acquire`], render to it, submit
-/// that rendering with [`Frame::submit_with`] and present it with
-/// [`Frame::present`]. Each step consumes the previous one's result, so
-/// presenting before submitting does not compile:
+/// that rendering with [`Frame::submit_with`], which may render to images
+/// of several swapchains, and present it with [`Frame::present`]. Each step
+/// consumes the previous one's result, so presenting before submitting does
+/// not compile:
 /// ```compile_fail
 /// use dirk_rhi::{Frame, Result, Swapchain};
 /// fn present(frame: &Frame<'_>, swapchain: &mut Swapchain) -> Result<()> {
@@ -79,9 +80,9 @@ pub struct SwapchainDesc<'a> {
 /// use dirk_rhi::{Frame, Graphics, Result, Swapchain};
 /// fn submit(frame: &Frame<'_>, swapchain: &mut Swapchain) -> Result<()> {
 ///     let image = frame.acquire(swapchain)?;
-///     let first = frame.submit_with(frame.encoder::<Graphics>("first")?, image)?;
-///     let second = frame.submit_with(frame.encoder::<Graphics>("second")?, image)?;
-///     frame.present(first)
+///     frame.submit_with(frame.encoder::<Graphics>("first")?, [image])?;
+///     frame.submit_with(frame.encoder::<Graphics>("second")?, [image])?;
+///     Ok(())
 /// }
 /// ```
 ///
@@ -323,9 +324,10 @@ impl Frame<'_> {
         })
     }
 
-    /// Submits `encoder`'s commands, which render to `image`, so the image
-    /// can be presented once they complete. They must leave it in the
-    /// [`ImageAccess::Present`](crate::ImageAccess::Present) state.
+    /// Submits `encoder`'s commands, which render to `images`, so the images
+    /// can be presented once they complete. They must leave each in the
+    /// [`ImageAccess::Present`](crate::ImageAccess::Present) state. Returns
+    /// the images, in order.
     ///
     /// # Errors
     ///
@@ -334,22 +336,37 @@ impl Frame<'_> {
     pub fn submit_with<'a>(
         &self,
         encoder: CommandEncoder<'_, Graphics>,
-        image: AcquiredImage<'a>,
-    ) -> Result<PresentableImage<'a>> {
+        images: impl IntoIterator<Item = AcquiredImage<'a>>,
+    ) -> Result<Vec<PresentableImage<'a>>> {
         let (raw, waits) = self.take(encoder)?;
-        let AcquiredImage {
-            swapchain, index, ..
-        } = image;
-        let value = swapchain.raw.submit(raw, waits, self.slot(), index)?;
-        swapchain.pending = Some(Pending::Submitted);
-        Ok(PresentableImage {
-            swapchain,
-            index,
-            completion: Completion {
-                queue: QueueType::Graphics,
-                value,
-            },
-        })
+        let images: Vec<_> = images.into_iter().collect();
+        let targets: Vec<_> = images
+            .iter()
+            .map(|image| (&image.swapchain.raw, image.index))
+            .collect();
+        let value = self
+            .rhi()
+            .device
+            .submit_presenting(raw, waits, self.slot(), &targets)?;
+        let completion = Completion {
+            queue: QueueType::Graphics,
+            value,
+        };
+        Ok(images
+            .into_iter()
+            .map(
+                |AcquiredImage {
+                     swapchain, index, ..
+                 }| {
+                    swapchain.pending = Some(Pending::Submitted);
+                    PresentableImage {
+                        swapchain,
+                        index,
+                        completion,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Presents `image` once its rendering completes. If the swapchain no
