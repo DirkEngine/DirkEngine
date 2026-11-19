@@ -190,6 +190,7 @@ impl CommandEncoder<'_, Graphics> {
             ));
         }
         *written = true;
+        self.end_pass();
         self.raw.write_timestamp(self.device(), &queries.raw, index);
         Ok(())
     }
