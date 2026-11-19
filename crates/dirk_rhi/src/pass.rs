@@ -7,6 +7,14 @@ use crate::{
     MAX_COLOR_TARGETS, PushData, Result, SampleCount, Subresource, native, pipeline::Targets,
 };
 
+impl crate::Limits {
+    /// Most color targets a pipeline or render pass may have: the device's
+    /// limit, at most [`MAX_COLOR_TARGETS`].
+    pub(crate) fn color_targets(&self) -> usize {
+        (self.max_color_targets as usize).min(MAX_COLOR_TARGETS)
+    }
+}
+
 /// What a render pass does with an attachment's contents when it begins.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LoadOp<T> {
@@ -246,9 +254,10 @@ impl<'f> CommandEncoder<'f, Graphics> {
     /// Validates a render pass and returns its targets and extent.
     fn check_pass(&self, desc: &RenderPassDesc<'_>) -> Result<(Targets, (u32, u32))> {
         let invalid = |reason: String| Err(Error::invalid("render pass", desc.label, reason));
-        if desc.colors.len() > MAX_COLOR_TARGETS {
+        let limit = self.frame.rhi().capabilities().limits.color_targets();
+        if desc.colors.len() > limit {
             return invalid(format!(
-                "{} color attachments exceed the limit of {MAX_COLOR_TARGETS}",
+                "{} color attachments exceed the limit of {limit}",
                 desc.colors.len()
             ));
         }

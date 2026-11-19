@@ -318,12 +318,11 @@ impl<P: PushData> GraphicsPipelineDesc<'_, P> {
                 self.fragment.map_or("", |fragment| fragment.entry_point())
             )));
         }
-        let limit = capabilities.limits.max_color_targets as usize;
-        if self.color_targets.len() > limit.min(MAX_COLOR_TARGETS) {
+        let limit = capabilities.limits.color_targets();
+        if self.color_targets.len() > limit {
             return Err(self.invalid(format!(
-                "{} color targets exceed the limit of {}",
-                self.color_targets.len(),
-                limit.min(MAX_COLOR_TARGETS)
+                "{} color targets exceed the limit of {limit}",
+                self.color_targets.len()
             )));
         }
         if self.color_targets.is_empty() && self.depth.is_none() {
