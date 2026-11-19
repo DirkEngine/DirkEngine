@@ -726,6 +726,26 @@ fn draws_and_passes_are_validated() -> Result<()> {
 }
 
 /// The description `image` was created with.
+#[test]
+fn leaked_render_passes_end_before_the_next_command() -> Result<()> {
+    with_rhi(|rhi| {
+        let pixels = render(rhi, |encoder, target| {
+            let pass = encoder.render_pass(&RenderPassDesc {
+                label: "leaked",
+                colors: &[ColorAttachment {
+                    load: LoadOp::Clear(RED),
+                    ..cleared(target)
+                }],
+                depth: None,
+            })?;
+            std::mem::forget(pass);
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(RED)));
+        Ok(())
+    })
+}
+
 fn desc_of(image: &Image) -> ImageDesc<'static> {
     let info = image.info();
     ImageDesc {

@@ -183,7 +183,8 @@ pub struct IndirectDraws<'a> {
 }
 
 /// Records draws into attachments. Ends when dropped, and borrows its
-/// encoder until then:
+/// encoder until then (or, if leaked, until the encoder records another
+/// command or is submitted):
 /// ```compile_fail
 /// use dirk_rhi::{Buffer, BufferCopy, CommandEncoder, RenderPassDesc, Result};
 /// fn copy_in_pass(
@@ -241,7 +242,9 @@ impl<'f> CommandEncoder<'f, Graphics> {
     /// attachment.
     pub fn render_pass<'e>(&'e mut self, desc: &RenderPassDesc<'_>) -> Result<RenderPass<'e, 'f>> {
         let (targets, extent) = self.check_pass(desc)?;
+        self.end_pass();
         self.raw.begin_rendering(self.device(), desc, extent);
+        self.rendering = true;
         Ok(RenderPass {
             encoder: self,
             targets,
@@ -675,6 +678,6 @@ impl RenderPass<'_, '_> {
 
 impl Drop for RenderPass<'_, '_> {
     fn drop(&mut self) {
-        self.encoder.raw.end_rendering(self.encoder.device());
+        self.encoder.end_pass();
     }
 }

@@ -113,6 +113,10 @@ pub struct CommandEncoder<'f, Q: QueueKind = Graphics> {
     pub(crate) raw: native::CommandBuffer,
     /// Timeline values on each queue the GPU waits for before running this.
     pub(crate) waits: [u64; QueueType::COUNT],
+    /// Whether a render pass began and did not end. Passes borrow their
+    /// encoder, so one still open when the encoder is used again was leaked,
+    /// such as with `mem::forget`; see [`CommandEncoder::end_pass`].
+    pub(crate) rendering: bool,
     queue: PhantomData<Q>,
 }
 
@@ -122,7 +126,17 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             frame,
             raw,
             waits: [0; QueueType::COUNT],
+            rendering: false,
             queue: PhantomData,
+        }
+    }
+
+    /// Ends the render pass begun last if it is open: when it drops, or, if
+    /// it was leaked, before recording any other command, which may not be
+    /// recorded inside a pass, or submitting.
+    pub(crate) fn end_pass(&mut self) {
+        if std::mem::take(&mut self.rendering) {
+            self.raw.end_rendering(self.device());
         }
     }
 
@@ -188,6 +202,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         ) {
             return invalid(reason);
         }
+        self.end_pass();
         self.raw
             .copy_buffer(self.device(), &src.raw, &dst.raw, regions);
         Ok(())
@@ -214,6 +229,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             ImageUsage::COPY_DST,
             regions,
         )?;
+        self.end_pass();
         self.raw.copy_buffer_to_image(
             self.device(),
             &src.raw,
@@ -245,6 +261,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             ImageUsage::COPY_SRC,
             regions,
         )?;
+        self.end_pass();
         self.raw.copy_image_to_buffer(
             self.device(),
             &src.raw,
@@ -279,6 +296,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                 format!("{region:?} changes size; blit to scale"),
             ));
         }
+        self.end_pass();
         self.raw.copy_image(
             self.device(),
             &src.raw,
@@ -364,6 +382,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                 Err(reason) => return invalid(reason),
             }
         }
+        self.end_pass();
         self.raw
             .barrier(self.device(), Q::TYPE, buffers, images, &ranges);
         Ok(())
