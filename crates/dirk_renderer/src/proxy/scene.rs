@@ -252,7 +252,8 @@ impl SceneManager {
 
 impl SceneTargets {
     /// The most precise depth format the device renders to, and the most
-    /// samples it supports for it and [`COLOR_FORMAT`], up to eight.
+    /// samples it supports for it and [`COLOR_FORMAT`], up to four, which
+    /// smooths edges well for far less memory and bandwidth than eight.
     fn select(capabilities: &Capabilities) -> Result<Self> {
         let depth = [
             Format::Depth32Float,
@@ -269,7 +270,7 @@ impl SceneTargets {
         .ok_or(Error::NoDepthFormat)?;
         let supported = capabilities.format(depth).sample_counts
             & capabilities.format(COLOR_FORMAT).sample_counts;
-        let samples = [SampleCount::X8, SampleCount::X4, SampleCount::X2]
+        let samples = [SampleCount::X4, SampleCount::X2]
             .into_iter()
             .find(|samples| supported.contains(samples.flag()))
             .unwrap_or(SampleCount::X1);

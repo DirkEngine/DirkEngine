@@ -44,7 +44,7 @@ impl Window {
                 label: "window",
                 extent,
                 formats: &[Format::Bgra8Srgb, Format::Rgba8Srgb],
-                present_mode: PresentMode::Mailbox,
+                present_mode: PresentMode::Fifo,
                 usage: ImageUsage::COLOR_ATTACHMENT,
             },
         )?;
