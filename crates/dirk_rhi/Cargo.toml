@@ -12,6 +12,7 @@ documentation.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+bytemuck.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
