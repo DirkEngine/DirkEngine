@@ -150,6 +150,9 @@ impl Swapchain {
         desc: &SwapchainDesc<'_>,
     ) -> Result<(Self, Format)> {
         let invalid = |reason: String| Error::invalid("swapchain", desc.label, reason);
+        if !Arc::ptr_eq(&surface.device, device) {
+            return Err(invalid("the surface belongs to another device".to_owned()));
+        }
         let usage = desc.usage;
         let functions = surface.functions();
         // SAFETY: the surface belongs to this device's instance and adapter.

@@ -177,9 +177,9 @@ impl Rhi {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Invalid`] if the usage is empty or not allowed, or
-    /// the surface supports neither the usage nor any format the RHI
-    /// represents, or a native error.
+    /// Returns [`Error::Invalid`] if the surface belongs to another device,
+    /// the usage is empty or not allowed, or the surface supports neither
+    /// the usage nor any format the RHI represents, or a native error.
     pub fn create_swapchain(
         &self,
         surface: Surface,
@@ -348,10 +348,7 @@ impl Frame<'_> {
             .rhi()
             .device
             .submit_presenting(raw, waits, self.slot(), &targets)?;
-        let completion = Completion {
-            queue: QueueType::Graphics,
-            value,
-        };
+        let completion = self.rhi().completion(QueueType::Graphics, value);
         Ok(images
             .into_iter()
             .map(
