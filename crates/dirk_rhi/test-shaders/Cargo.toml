@@ -1,0 +1,26 @@
+[package]
+name = "dirk_rhi_test_shaders"
+description = "Shaders for dirk_rhi's native tests, built like the engine's"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+dirk_rhi = { version = "0.1.0", path = ".." }
+dirk_rhi_test_shaders_gpu = { version = "0.1.0", path = "gpu" }
+
+[build-dependencies]
+anyhow.workspace = true
+dirk_build.workspace = true
+
+# The workspace forbids `unsafe`; the generated `Shader` implementations need
+# it, so it is denied here and expected where they are included.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"

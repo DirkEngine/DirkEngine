@@ -582,7 +582,10 @@ dependencies = [
 name = "dirk_build"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "cargo-gpu-install",
  "cargo_metadata",
+ "rspirv",
 ]
 
 [[package]]
@@ -684,6 +687,7 @@ dependencies = [
  "ash-window",
  "cargo-gpu-install",
  "dirk_assets",
+ "dirk_build",
  "dirk_engine",
  "dirk_events",
  "dirk_input",
@@ -716,10 +720,30 @@ dependencies = [
  "ash",
  "bitflags 2.13.2",
  "bytemuck",
+ "dirk_rhi_test_shaders",
  "gpu-allocator",
  "parking_lot",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "dirk_rhi_test_shaders"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirk_build",
+ "dirk_rhi",
+ "dirk_rhi_test_shaders_gpu",
+]
+
+[[package]]
+name = "dirk_rhi_test_shaders_gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "spirv-std",
 ]
 
 [[package]]

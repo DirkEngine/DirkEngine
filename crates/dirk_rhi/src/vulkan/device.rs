@@ -28,12 +28,15 @@ pub(super) enum Garbage {
         allocation: Allocation,
     },
     Sampler(vk::Sampler),
+    Pipeline(vk::Pipeline),
 }
 
 /// The logical device, shared by the RHI and every object created from it.
 pub(crate) struct Device {
     pub(crate) capabilities: Capabilities,
     pub(super) raw: ash::Device,
+    /// The layout every pipeline shares.
+    pub(super) pipeline_layout: vk::PipelineLayout,
     /// Size non-coherent host memory is flushed and invalidated in.
     pub(super) non_coherent_atom_size: u64,
     /// Locked only to allocate and free memory, which `gpu-allocator` needs
@@ -89,17 +92,23 @@ impl Device {
         // `create_info` outlives the call.
         let raw = unsafe { instance.raw.create_device(adapter.raw, &create_info, None) }
             .check("vkCreateDevice")?;
-        let allocator = Allocator::new(&AllocatorCreateDesc {
-            instance: instance.raw.clone(),
-            device: raw.clone(),
-            physical_device: adapter.raw,
-            debug_settings: AllocatorDebugSettings::default(),
-            buffer_device_address: false,
-            allocation_sizes: AllocationSizes::default(),
-        })
-        .map_err(|error| Error::native("creating the memory allocator", error))
-        .and_then(|allocator| Ok((allocator, Queue::create(&raw, adapter.families)?)));
-        let (allocator, queues) = match allocator {
+        let parts = Self::create_pipeline_layout(&raw).and_then(|layout| {
+            Allocator::new(&AllocatorCreateDesc {
+                instance: instance.raw.clone(),
+                device: raw.clone(),
+                physical_device: adapter.raw,
+                debug_settings: AllocatorDebugSettings::default(),
+                buffer_device_address: false,
+                allocation_sizes: AllocationSizes::default(),
+            })
+            .map_err(|error| Error::native("creating the memory allocator", error))
+            .and_then(|allocator| Ok((layout, allocator, Queue::create(&raw, adapter.families)?)))
+            .inspect_err(|_| {
+                // SAFETY: nothing uses the layout yet.
+                unsafe { raw.destroy_pipeline_layout(layout, None) };
+            })
+        });
+        let (pipeline_layout, allocator, queues) = match parts {
             Ok(parts) => parts,
             Err(error) => {
                 // SAFETY: nothing created from the device is left.
@@ -116,6 +125,7 @@ impl Device {
                 .debug_utils()
                 .then(|| debug_utils::Device::new(&instance.raw, &raw)),
             raw,
+            pipeline_layout,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
             queues,
@@ -188,6 +198,7 @@ impl Device {
                     self.free(allocation);
                 }
                 Garbage::Sampler(raw) => self.raw.destroy_sampler(raw, None),
+                Garbage::Pipeline(raw) => self.raw.destroy_pipeline(raw, None),
             }
         }
     }
@@ -238,6 +249,24 @@ impl Device {
         }
     }
 
+    /// Opens a debug label region `label` in `commands`, when validation is
+    /// enabled.
+    pub(super) fn begin_label(&self, commands: vk::CommandBuffer, label: &str) {
+        let Some(debug) = &self.debug else { return };
+        let name = CString::new(label).unwrap_or_default();
+        let info = vk::DebugUtilsLabelEXT::default().label_name(&name);
+        // SAFETY: `commands` is recording and was allocated from this device.
+        unsafe { debug.cmd_begin_debug_utils_label(commands, &info) };
+    }
+
+    /// Closes the debug label region opened last in `commands`.
+    pub(super) fn end_label(&self, commands: vk::CommandBuffer) {
+        if let Some(debug) = &self.debug {
+            // SAFETY: `begin_label` opened a region in `commands`.
+            unsafe { debug.cmd_end_debug_utils_label(commands) };
+        }
+    }
+
     /// Number of errors validation reported.
     pub(crate) fn validation_error_count(&self) -> usize {
         self.instance.validation_errors()
@@ -256,6 +285,7 @@ impl Drop for Device {
             for queue in &self.queues {
                 queue.destroy(&self.raw);
             }
+            self.raw.destroy_pipeline_layout(self.pipeline_layout, None);
             // The allocator frees its memory through the device.
             ManuallyDrop::drop(self.allocator.get_mut());
             self.raw.destroy_device(None);
