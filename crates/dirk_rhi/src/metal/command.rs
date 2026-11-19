@@ -21,6 +21,7 @@ use crate::{
 /// buffers are created per submission, so there is nothing to recycle.
 pub(crate) struct CommandPool {
     device: Arc<Device>,
+    queue: QueueType,
 }
 
 /// The encoder a command buffer records with. Metal records copies and
@@ -46,9 +47,10 @@ impl CommandPool {
         clippy::unnecessary_wraps,
         reason = "the signature is shared with Vulkan, where this can fail"
     )]
-    pub(crate) fn new(device: &Arc<Device>, _queue: QueueType) -> Result<Self> {
+    pub(crate) fn new(device: &Arc<Device>, queue: QueueType) -> Result<Self> {
         Ok(Self {
             device: device.clone(),
+            queue,
         })
     }
 
@@ -69,8 +71,12 @@ impl CommandPool {
         if self.device.validation {
             desc.setErrorOptions(MTLCommandBufferErrorOption::EncoderExecutionStatus);
         }
-        let raw = autoreleasepool(|_| self.device.queue.commandBufferWithDescriptor(&desc))
-            .check("commandBufferWithDescriptor")?;
+        let raw = autoreleasepool(|_| {
+            self.device.queues[self.queue as usize]
+                .raw
+                .commandBufferWithDescriptor(&desc)
+        })
+        .check("commandBufferWithDescriptor")?;
         raw.setLabel(Some(&NSString::from_str(label)));
         Ok(CommandBuffer {
             raw,

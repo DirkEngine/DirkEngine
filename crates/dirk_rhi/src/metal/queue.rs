@@ -14,6 +14,8 @@ use objc2_metal::{
 };
 use parking_lot::Mutex;
 
+use objc2_foundation::NSString;
+
 use super::{Check, CommandBuffer, Device, Object};
 use crate::{QueueType, Result};
 
@@ -21,8 +23,10 @@ use crate::{QueueType, Result};
 /// which may leave a timeline short of its value forever.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
 
-/// A queue's timeline: an event its submissions signal, one value each.
-pub(super) struct Timeline {
+/// A command queue and its timeline: an event its submissions signal, one
+/// value each.
+pub(super) struct Queue {
+    pub(super) raw: Object<dyn MTLCommandQueue>,
     event: Object<dyn MTLSharedEvent>,
     /// The value the last submission signals. Advanced while holding
     /// `submitting`, read without it.
@@ -32,9 +36,19 @@ pub(super) struct Timeline {
     submitting: Mutex<()>,
 }
 
-impl Timeline {
-    pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Self> {
+impl Queue {
+    /// Creates the queue of `kind`, labelled after it and `application`.
+    pub(super) fn new(
+        device: &ProtocolObject<dyn MTLDevice>,
+        kind: QueueType,
+        application: &str,
+    ) -> Result<Self> {
+        let raw: Object<_> = device.newCommandQueue().check("newCommandQueue")?.into();
+        raw.setLabel(Some(&NSString::from_str(&format!(
+            "{application} {kind:?}"
+        ))));
         Ok(Self {
+            raw,
             event: device.newSharedEvent().check("newSharedEvent")?.into(),
             submitted: AtomicU64::new(0),
             submitting: Mutex::new(()),
@@ -49,9 +63,8 @@ impl Device {
     ///
     /// Metal waits for events only before the passes encoded after the wait,
     /// and `waits` are known only now, after the passes. So they are encoded
-    /// in a command buffer committed just before, which the queue runs first,
-    /// and again before the signal, so reaching the signal's value implies
-    /// the waits' values were reached.
+    /// in a command buffer committed just before: a queue blocks at a wait
+    /// until the event reaches its value, holding back what follows.
     pub(crate) fn submit(
         &self,
         queue: QueueType,
@@ -60,17 +73,20 @@ impl Device {
     ) -> Result<u64> {
         commands.end_encoding();
         let raw = commands.raw();
-        let waiting = waits.iter().any(|&value| value > 0);
-        if waiting {
-            let wait = autoreleasepool(|_| self.queue.commandBuffer()).check("commandBuffer")?;
-            self.encode_waits(&wait, waits);
+        let target = &self.queues[queue as usize];
+        let _submitting = target.submitting.lock();
+        if waits.iter().any(|&value| value > 0) {
+            let wait = autoreleasepool(|_| target.raw.commandBuffer()).check("commandBuffer")?;
+            wait.setLabel(Some(&NSString::from_str("waits")));
+            for (queue, value) in self.queues.iter().zip(waits) {
+                if value > 0 {
+                    wait.encodeWaitForEvent_value(ProtocolObject::from_ref(&*queue.event), value);
+                }
+            }
             wait.commit();
-            self.encode_waits(raw, waits);
         }
-        let timeline = &self.timelines[queue as usize];
-        let _submitting = timeline.submitting.lock();
-        let value = timeline.submitted.load(Ordering::Relaxed) + 1;
-        raw.encodeSignalEvent_value(ProtocolObject::from_ref(&*timeline.event), value);
+        let value = target.submitted.load(Ordering::Relaxed) + 1;
+        raw.encodeSignalEvent_value(ProtocolObject::from_ref(&*target.event), value);
         let health = Arc::clone(&self.health);
         let completed = RcBlock::new(move |raw: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             // SAFETY: Metal passes the completed command buffer.
@@ -91,22 +107,8 @@ impl Device {
         // health record, before `commit` returns.
         unsafe { raw.addCompletedHandler(RcBlock::as_ptr(&completed)) };
         raw.commit();
-        timeline.submitted.store(value, Ordering::Release);
+        target.submitted.store(value, Ordering::Release);
         Ok(value)
-    }
-
-    /// Encodes a wait for each queue's value in `waits` into `commands`.
-    fn encode_waits(
-        &self,
-        commands: &ProtocolObject<dyn MTLCommandBuffer>,
-        waits: [u64; QueueType::COUNT],
-    ) {
-        for (timeline, value) in self.timelines.iter().zip(waits) {
-            if value > 0 {
-                commands
-                    .encodeWaitForEvent_value(ProtocolObject::from_ref(&*timeline.event), value);
-            }
-        }
     }
 
     /// Blocks until every queue reaches its value in `values`, or `timeout`
@@ -118,7 +120,7 @@ impl Device {
     /// submitted work has failed.
     pub(crate) fn wait(&self, values: [u64; QueueType::COUNT], timeout: Duration) -> Result<bool> {
         let deadline = Instant::now().checked_add(timeout);
-        for (timeline, value) in self.timelines.iter().zip(values) {
+        for (queue, value) in self.queues.iter().zip(values) {
             loop {
                 self.health.check()?;
                 let remaining =
@@ -126,7 +128,7 @@ impl Device {
                 let slice = remaining.map_or(WAIT_SLICE, |remaining| remaining.min(WAIT_SLICE));
                 #[expect(clippy::cast_possible_truncation, reason = "a slice is 100 ms at most")]
                 let milliseconds = slice.as_millis() as u64;
-                if timeline
+                if queue
                     .event
                     .waitUntilSignaledValue_timeoutMS(value, milliseconds)
                 {
@@ -144,13 +146,13 @@ impl Device {
     /// The value `queue`'s timeline has reached.
     pub(crate) fn completed(&self, queue: QueueType) -> Result<u64> {
         self.health.check()?;
-        Ok(self.timelines[queue as usize].event.signaledValue())
+        Ok(self.queues[queue as usize].event.signaledValue())
     }
 
     /// The value each queue's last submission signals.
     pub(crate) fn submitted(&self) -> [u64; QueueType::COUNT] {
         QueueType::ALL.map(|queue| {
-            self.timelines[queue as usize]
+            self.queues[queue as usize]
                 .submitted
                 .load(Ordering::Acquire)
         })

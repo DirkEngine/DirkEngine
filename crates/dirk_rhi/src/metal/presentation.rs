@@ -221,8 +221,12 @@ impl Swapchain {
             .drawable
             .take()
             .expect("images are presented after being acquired");
-        let commands =
-            autoreleasepool(|_| self.device.queue.commandBuffer()).check("commandBuffer")?;
+        let commands = autoreleasepool(|_| {
+            self.device.queues[QueueType::Graphics as usize]
+                .raw
+                .commandBuffer()
+        })
+        .check("commandBuffer")?;
         commands.setLabel(Some(&NSString::from_str("present")));
         commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
         commands.commit();
