@@ -345,18 +345,13 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                     reason,
                 ))
             };
-            if let Err(reason) =
-                Self::check_stages([barrier.before, barrier.after], ImageAccess::shader_stages)
-            {
-                return invalid(reason);
-            }
-            self.check_image(
+            self.check_image_accesses(
+                "image barrier",
                 barrier.image,
-                barrier.before.usage() | barrier.after.usage(),
+                ImageUsage::empty(),
+                barrier.before,
+                barrier.after,
             )?;
-            if barrier.after == ImageAccess::Undefined {
-                return invalid("cannot transition to Undefined".to_owned());
-            }
             if let Err(reason) = Self::check_transfer(
                 barrier.transfer,
                 barrier.before.on_copy_queue(),
@@ -400,6 +395,28 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         }
         if !image.info().usage.contains(usage) {
             return invalid(format!("lacks the {usage:?} usage"));
+        }
+        Ok(())
+    }
+
+    /// Checks that `image` is from this device and has `usage` and the usage
+    /// `before` and `after` need, that they name a stage if they are shader
+    /// accesses, and that `after` is not [`ImageAccess::Undefined`].
+    fn check_image_accesses(
+        &self,
+        operation: &'static str,
+        image: &Image,
+        usage: ImageUsage,
+        before: ImageAccess,
+        after: ImageAccess,
+    ) -> Result<()> {
+        let invalid = |reason: String| Err(Error::invalid(operation, image.label(), reason));
+        if let Err(reason) = Self::check_stages([before, after], ImageAccess::shader_stages) {
+            return invalid(reason);
+        }
+        self.check_image(image, usage | before.usage() | after.usage())?;
+        if after == ImageAccess::Undefined {
+            return invalid("cannot transition to Undefined".to_owned());
         }
         Ok(())
     }
@@ -638,22 +655,25 @@ impl CommandEncoder<'_, Graphics> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Invalid`] if `image` is from another device, lacks
-    /// the copy usages or those `before` and `after` need, is multisampled,
-    /// its format cannot be blitted with linear filtering, `before`
-    /// discards mip 0 or `after` is [`ImageAccess::Undefined`].
+    /// Returns [`Error::Invalid`] as [`CommandEncoder::barrier`] does for
+    /// `before` and `after`, or if `image` lacks the copy usages, is
+    /// multisampled, its format cannot be blitted with linear filtering or
+    /// `before` discards mip 0.
     pub fn generate_mips(
         &mut self,
         image: &Image,
         before: ImageAccess,
         after: ImageAccess,
     ) -> Result<()> {
-        let copies = ImageUsage::COPY_SRC | ImageUsage::COPY_DST;
-        self.check_image(image, copies | before.usage() | after.usage())?;
+        self.check_image_accesses(
+            "mip generation",
+            image,
+            ImageUsage::COPY_SRC | ImageUsage::COPY_DST,
+            before,
+            after,
+        )?;
         self.check_blit("mip generation", image, Filter::Linear)?;
-        if matches!(before, ImageAccess::Undefined | ImageAccess::Present)
-            || after == ImageAccess::Undefined
-        {
+        if matches!(before, ImageAccess::Undefined | ImageAccess::Present) {
             return Err(Error::invalid(
                 "mip generation",
                 image.label(),
@@ -705,17 +725,17 @@ impl ImageRegion {
                 other.base_layer,
                 other.layer_count,
             )
+    }
+
+    /// Whether the two regions share a texel.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.shares_subresource(other)
             && Self::overlap(
                 self.origin.x,
                 self.extent.width,
                 other.origin.x,
                 other.extent.width,
             )
-    }
-
-    /// Whether the two regions share a texel.
-    fn overlaps(&self, other: &Self) -> bool {
-        self.shares_subresource(other)
             && Self::overlap(
                 self.origin.y,
                 self.extent.height,

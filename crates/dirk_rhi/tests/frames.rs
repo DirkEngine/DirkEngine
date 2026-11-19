@@ -490,6 +490,21 @@ fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
 }
 
 #[test]
+fn mip_generation_validates_accesses_like_barriers() -> Result<()> {
+    with_rhi(|rhi| {
+        let texture = image(rhi, Extent3d::new_2d(4, 4), 3)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("mips")?;
+        let stageless = ImageAccess::Sampled(ShaderStages::empty());
+        assert_invalid(
+            encoder.generate_mips(&texture, ImageAccess::CopyDestination, stageless),
+            "names no shader stage",
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn recording_rejects_invalid_requests() -> Result<()> {
     with_rhi(|rhi| {
         let source = buffer(rhi, 64, BufferUsage::COPY_SRC, Memory::Device)?;
