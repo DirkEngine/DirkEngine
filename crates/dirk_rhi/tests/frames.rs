@@ -372,7 +372,8 @@ fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
     with_rhi(|rhi| {
         // Two layers of 7x5 in one uniform color each, so every mip of a
         // layer keeps its color however odd sizes are filtered; and a 2x1
-        // black and white image, whose mip averages them in linear space.
+        // black and white image, whose mip averages them in linear space. A
+        // 1x1 image has no mips to generate.
         let colors = [[200, 100, 50, 255], [10, 220, 120, 128]];
         let layers = Extent3d::new_2d(7, 5);
         let pair = Extent3d::new_2d(2, 1);
@@ -390,6 +391,7 @@ fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
         };
         let layered = create("layers", layers, 2)?;
         let black_and_white = create("black and white", pair, 1)?;
+        let single = create("single mip", Extent3d::new_2d(1, 1), 1)?;
         let mut texels: Vec<u8> = colors.iter().flat_map(|color| color.repeat(35)).collect();
         let pair_offset = texels.len() as u64;
         texels.extend([0, 0, 0, 255, 255, 255, 255, 255]);
@@ -424,8 +426,9 @@ fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
 
         let frame = rhi.begin_frame()?;
         let mut encoder = frame.encoder::<Graphics>("mips")?;
+        let new = [&layered, &black_and_white, &single].map(prepare);
         // SAFETY: the images are new.
-        unsafe { encoder.barrier(&[], &[prepare(&layered), prepare(&black_and_white)])? };
+        unsafe { encoder.barrier(&[], &new)? };
         let base = |image: &Image| image.info().mip_region(0);
         encoder.copy_buffer_to_image(&staging, &layered, &[packed(0, base(&layered))])?;
         let pair_base = packed(pair_offset, base(&black_and_white));
@@ -434,7 +437,7 @@ fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
             encoder.generate_mips(&layered, ImageAccess::Undefined, ImageAccess::CopySource),
             "cannot generate mips from Undefined",
         );
-        for image in [&layered, &black_and_white] {
+        for image in [&layered, &black_and_white, &single] {
             encoder.generate_mips(image, ImageAccess::CopyDestination, ImageAccess::CopySource)?;
         }
         for ((image, region), &offset) in mips.iter().zip(&offsets) {
