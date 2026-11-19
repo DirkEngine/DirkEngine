@@ -704,6 +704,7 @@ dependencies = [
  "dirk_player",
  "dirk_render_utils",
  "dirk_rhi",
+ "dirk_rhi_test_shaders",
  "dirk_shaders",
  "dirk_threads",
  "dirk_universe",
