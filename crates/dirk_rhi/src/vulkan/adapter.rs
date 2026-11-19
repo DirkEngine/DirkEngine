@@ -230,9 +230,8 @@ impl Adapter {
         }
     }
 
-    /// The device extensions to enable: robustness2 for null descriptors,
-    /// swapchains with presentation, and the portability subset whenever a
-    /// device offers it. Also returns the required ones `available` lacks.
+    /// The device extensions to enable: robustness2 for null descriptors and
+    /// swapchains with presentation. Also returns the ones `available` lacks.
     fn extensions(
         available: &[vk::ExtensionProperties],
         presentation: bool,
@@ -252,13 +251,7 @@ impl Adapter {
             .filter(|name| !has(name))
             .map(|name| name.to_str().unwrap_or("a required extension"))
             .collect();
-        let portability = Some(ash::khr::portability_subset::NAME).filter(|name| has(name));
-        let enabled = required
-            .into_iter()
-            .chain([portability])
-            .flatten()
-            .map(CStr::as_ptr)
-            .collect();
+        let enabled = required.into_iter().flatten().map(CStr::as_ptr).collect();
         (enabled, missing)
     }
 }
