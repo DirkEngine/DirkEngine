@@ -36,6 +36,10 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   Native types are plain structs over native handles. No `XInner` newtype layers. At most
   one `Arc` per object (the shared device context, needed by `Drop`), never nested.
 - GPU objects are not `Clone`. Small value types (`Completion`, bindless indices) are `Copy`.
+- An image owns its view. `create_image` creates a view of every mip and layer when the
+  usage reads or writes the image through one (sampled, storage, attachment); transfer-only
+  images get none. `image.view()` borrows it, so a view can never outlive its image without
+  a second `Arc`. Subresource views arrive with per-layer/per-mip graph passes.
 
 ## Validation and errors
 

@@ -66,6 +66,13 @@ impl Format {
         )
     }
 
+    /// Whether this format stores colors sRGB-encoded, encoding them when
+    /// written and decoding them when read, so shaders see linear colors.
+    #[must_use]
+    pub const fn is_srgb(self) -> bool {
+        matches!(self, Self::Rgba8Srgb | Self::Bgra8Srgb)
+    }
+
     /// Whether this format has a stencil component.
     #[must_use]
     pub const fn has_stencil(self) -> bool {

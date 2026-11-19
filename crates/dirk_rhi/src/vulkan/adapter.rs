@@ -75,6 +75,7 @@ pub(super) struct Adapter {
     /// Device extensions to enable.
     pub(super) extensions: Vec<*const c_char>,
     pub(super) capabilities: Capabilities,
+    pub(super) non_coherent_atom_size: u64,
     score: u32,
 }
 
@@ -210,6 +211,7 @@ impl Adapter {
             raw,
             families,
             extensions,
+            non_coherent_atom_size: limits.non_coherent_atom_size,
             capabilities,
             score,
         }))

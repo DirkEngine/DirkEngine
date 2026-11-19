@@ -22,10 +22,9 @@ no engine crate but `dirk_shaders` and the bottom ones. Never add a dependency
 that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
-`deny.toml` bans them elsewhere: `ash` in `dirk_renderer` and `dirk_rhi`,
-`gpu-allocator` in `dirk_renderer`, `winit` in `dirk_platform`, and `egui` in
-the editor and the crates that feed it. Add a new library of that kind to its
-ban list.
+`deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
+and `dirk_rhi`, `winit` in `dirk_platform`, and `egui` in the editor and the
+crates that feed it. Add a new library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor
@@ -73,8 +72,9 @@ doesn't trigger the lint.
 ## Unsafe code
 
 Only `dirk_renderer` and `dirk_rhi` may use `unsafe`, to call the native
-graphics API (Vulkan through ash), and only in the modules `standard.toml`
-lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
+graphics API (Vulkan through ash), and `dirk_rhi`'s native tests, for its
+unsafe host access to buffers. It stays in the modules `standard.toml` lists
+in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
 `just lint` denies it everywhere else. Keep it in the modules that wrap a
 native object, and give every `unsafe` block a `// SAFETY:` comment stating
 why it is sound: which handles are valid and owned, which lock provides the
