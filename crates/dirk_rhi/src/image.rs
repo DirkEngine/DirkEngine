@@ -250,6 +250,28 @@ impl Rhi {
     }
 }
 
+impl Image {
+    /// Wraps a native image created elsewhere, such as a swapchain's, with
+    /// a view of `view_type` outside the heap.
+    pub(crate) fn from_native(
+        raw: native::Image,
+        info: ImageInfo,
+        view_type: ViewType,
+        label: &str,
+    ) -> Self {
+        Self {
+            raw,
+            info,
+            view: Some(ImageView {
+                view_type,
+                texture: None,
+                storage: None,
+            }),
+            label: label.into(),
+        }
+    }
+}
+
 impl ImageDesc<'_> {
     /// Validates the description against `capabilities` and returns the type
     /// of the view it needs, if any.

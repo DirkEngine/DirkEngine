@@ -4,8 +4,13 @@ use std::{
 };
 
 use ash::vk;
+use parking_lot::MutexGuard;
 
-use super::{Check, CommandBuffer, Device, adapter::QueueFamilies};
+use super::{
+    Check, CommandBuffer, Device,
+    adapter::QueueFamilies,
+    presentation::{PRESENT_STAGES, Presentation},
+};
 use crate::{QueueType, Result};
 
 /// A queue and the timeline its submissions signal, one value per
@@ -74,33 +79,68 @@ impl Device {
         commands: CommandBuffer,
         waits: [u64; QueueType::COUNT],
     ) -> Result<u64> {
-        // SAFETY: the command buffer is recording and only used by its encoder.
-        unsafe { self.raw.end_command_buffer(commands.raw) }.check("vkEndCommandBuffer")?;
-        let mut wait_infos = [vk::SemaphoreSubmitInfo::default(); QueueType::COUNT];
-        let mut wait_count = 0;
-        for (queue, value) in self.queues.iter().zip(waits) {
-            if value > 0 {
-                wait_infos[wait_count] = vk::SemaphoreSubmitInfo::default()
-                    .semaphore(queue.timeline)
-                    .value(value)
-                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
-                wait_count += 1;
-            }
+        self.submit_batch(queue, Some(commands), waits, Presentation::default())
+    }
+
+    /// Submits `commands`, if any, to `queue` after the GPU reaches each
+    /// queue's value in `waits` and the presentation semaphores' waits, and
+    /// returns the value the submission signals on the queue's timeline.
+    pub(super) fn submit_batch(
+        &self,
+        queue: QueueType,
+        commands: Option<CommandBuffer>,
+        waits: [u64; QueueType::COUNT],
+        presentation: Presentation<'_>,
+    ) -> Result<u64> {
+        if let Some(commands) = commands {
+            // SAFETY: the command buffer is recording and only used by its
+            // encoder.
+            unsafe { self.raw.end_command_buffer(commands.raw) }.check("vkEndCommandBuffer")?;
         }
+        let semaphore = |semaphore, stages| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(stages)
+        };
+        let wait_infos: Vec<_> = self
+            .queues
+            .iter()
+            .zip(waits)
+            .filter(|&(_, value)| value > 0)
+            .map(|(queue, value)| {
+                semaphore(queue.timeline, vk::PipelineStageFlags2::ALL_COMMANDS).value(value)
+            })
+            // The first use of an acquired image writes it as an attachment
+            // or by a transfer; see `ImageAccess::Present`.
+            .chain(
+                presentation
+                    .acquired
+                    .iter()
+                    .map(|&acquired| semaphore(acquired, PRESENT_STAGES)),
+            )
+            .collect();
         let target = &self.queues[queue as usize];
-        let vk_queue = self.vk_queues[target.submits_to].lock();
+        let vk_queue = self.lock_queue(queue);
         let value = target.submitted.load(Ordering::Relaxed) + 1;
-        let signal = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(target.timeline)
-            .value(value)
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-        let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(commands.raw)];
+        let signals: Vec<_> = std::iter::once(
+            semaphore(target.timeline, vk::PipelineStageFlags2::ALL_COMMANDS).value(value),
+        )
+        .chain(
+            presentation
+                .rendered
+                .iter()
+                .map(|&rendered| semaphore(rendered, vk::PipelineStageFlags2::ALL_COMMANDS)),
+        )
+        .collect();
+        let commands = commands
+            .map(|commands| vk::CommandBufferSubmitInfo::default().command_buffer(commands.raw));
         let submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(&wait_infos[..wait_count])
-            .command_buffer_infos(&commands)
-            .signal_semaphore_infos(&signal);
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(commands.as_slice())
+            .signal_semaphore_infos(&signals);
         // SAFETY: the queue is locked, the commands were recorded for its
-        // family, and waits refer to values already submitted.
+        // family, waits refer to values already submitted or to acquired
+        // images, and the presentation semaphores are unsignaled.
         unsafe {
             self.raw
                 .queue_submit2(*vk_queue, &[submit], vk::Fence::null())
@@ -136,6 +176,11 @@ impl Device {
             Err(vk::Result::TIMEOUT) => Ok(false),
             Err(error) => Err(error).check("vkWaitSemaphores"),
         }
+    }
+
+    /// Locks the Vulkan queue `queue` submits to, to submit or present.
+    pub(super) fn lock_queue(&self, queue: QueueType) -> MutexGuard<'_, vk::Queue> {
+        self.vk_queues[self.queues[queue as usize].submits_to].lock()
     }
 
     /// The value `queue`'s timeline has reached.

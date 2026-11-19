@@ -372,6 +372,7 @@ fn objects_of_another_device_are_rejected() -> Result<()> {
         let Some(mut other) = support::rhi(&RhiCreateInfo {
             application_name: "second dirk_rhi test device",
             validation: true,
+            display: None,
         })?
         else {
             return Ok(());

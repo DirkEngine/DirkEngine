@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use super::{Buffer, Check, Device, Image};
+use super::{Buffer, Check, Device, Image, presentation::PRESENT_STAGES};
 use crate::{
     BufferAccess, BufferBarrier, BufferCopy, BufferImageCopy, Filter, Format, ImageAccess,
     ImageBarrier, ImageCopy, ImageRange, ImageRegion, QueueTransfer, QueueType, Result,
@@ -278,9 +278,11 @@ impl CommandBuffer {
                     .dst_stage_mask(scope.dst.0)
                     .dst_access_mask(scope.dst.1)
                     // Without a family change, the release half already
-                    // changed the layout.
+                    // changed the layout. Acquired images are discarded.
                     .old_layout(if scope.acquires_in_place {
                         new_layout
+                    } else if barrier.before == ImageAccess::Present {
+                        vk::ImageLayout::UNDEFINED
                     } else {
                         old_layout
                     })
@@ -477,6 +479,9 @@ impl ImageAccess {
                 },
                 L::READ_ONLY_OPTIMAL,
             ),
+            // Ordered after acquiring by the acquire semaphore's wait, and
+            // before presenting by the present semaphore's signal.
+            Self::Present => (PRESENT_STAGES, A::NONE, L::PRESENT_SRC_KHR),
         }
     }
 }

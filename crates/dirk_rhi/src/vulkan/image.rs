@@ -8,7 +8,7 @@ use super::{
     device::Garbage,
     heap::{Descriptor, Slot},
 };
-use crate::{ImageDesc, ImageDimension, ImageUsage, SampleCount, ViewType};
+use crate::{Format, ImageDesc, ImageDimension, ImageUsage, SampleCount, ViewType};
 
 /// A Vulkan image, its memory and its view of every mip and layer.
 pub(crate) struct Image {
@@ -16,6 +16,9 @@ pub(crate) struct Image {
     pub(super) raw: vk::Image,
     allocation: Allocation,
     view: Option<vk::ImageView>,
+    /// Whether the image is destroyed with this object; swapchain images
+    /// belong to their swapchain.
+    owned: bool,
     /// The view's slots in the heap: sampled with sampled usage, and storage
     /// with storage usage when its view type has a storage array.
     slots: [Option<Slot>; 2],
@@ -62,6 +65,7 @@ impl Image {
             raw,
             allocation: Allocation::default(),
             view: None,
+            owned: true,
             slots: [None; 2],
         };
         // SAFETY: `raw` was created from this device.
@@ -79,22 +83,7 @@ impl Image {
         device.name(raw, desc.label);
 
         if let Some(view_type) = view {
-            let info = vk::ImageViewCreateInfo::default()
-                .image(raw)
-                .view_type(view_type.vk())
-                .format(format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: desc.format.vk_aspects(),
-                    base_mip_level: 0,
-                    level_count: vk::REMAINING_MIP_LEVELS,
-                    base_array_layer: 0,
-                    layer_count: vk::REMAINING_ARRAY_LAYERS,
-                });
-            // SAFETY: the image is bound to memory and the view matches it.
-            let view =
-                unsafe { device.raw.create_image_view(&info, None) }.check("vkCreateImageView")?;
-            device.name(view, desc.label);
-            image.view = Some(view);
+            let view = image.create_view(view_type, desc.format, desc.label)?;
             let (sampled, storage) = view_type.heap_bindings();
             if desc.usage.contains(ImageUsage::SAMPLED) {
                 image.slots[0] = Some(device.add_to_heap(sampled, Descriptor::Image(view))?);
@@ -104,6 +93,53 @@ impl Image {
             }
         }
         Ok(image)
+    }
+
+    /// Wraps the swapchain image `raw` of `format`, which its swapchain owns,
+    /// with a view.
+    pub(super) fn swapchain(
+        device: &Arc<Device>,
+        raw: vk::Image,
+        format: Format,
+        label: &str,
+    ) -> crate::Result<Self> {
+        // Dropping it destroys only the view.
+        let mut image = Self {
+            device: device.clone(),
+            raw,
+            allocation: Allocation::default(),
+            view: None,
+            owned: false,
+            slots: [None; 2],
+        };
+        image.create_view(ViewType::D2, format, label)?;
+        Ok(image)
+    }
+
+    /// Creates the image's view of every mip and layer, as `view_type`.
+    fn create_view(
+        &mut self,
+        view_type: ViewType,
+        format: Format,
+        label: &str,
+    ) -> crate::Result<vk::ImageView> {
+        let info = vk::ImageViewCreateInfo::default()
+            .image(self.raw)
+            .view_type(view_type.vk())
+            .format(format.vk())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: format.vk_aspects(),
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            });
+        // SAFETY: the image is bound to memory and the view matches it.
+        let view =
+            unsafe { self.device.raw.create_image_view(&info, None) }.check("vkCreateImageView")?;
+        self.device.name(view, label);
+        self.view = Some(view);
+        Ok(view)
     }
 
     /// The view rendered to when the image is an attachment, which its
@@ -121,7 +157,7 @@ impl Image {
 impl Drop for Image {
     fn drop(&mut self) {
         self.device.bury(Garbage::Image {
-            raw: self.raw,
+            raw: self.owned.then_some(self.raw),
             view: self.view,
             allocation: std::mem::take(&mut self.allocation),
             slots: self.slots,
@@ -131,7 +167,7 @@ impl Drop for Image {
 
 impl ImageUsage {
     /// The equivalent Vulkan usage.
-    fn vk(self) -> vk::ImageUsageFlags {
+    pub(super) fn vk(self) -> vk::ImageUsageFlags {
         [
             (Self::COPY_SRC, vk::ImageUsageFlags::TRANSFER_SRC),
             (Self::COPY_DST, vk::ImageUsageFlags::TRANSFER_DST),

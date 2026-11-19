@@ -63,6 +63,11 @@ pub enum ImageAccess {
     /// Read as a depth/stencil attachment and sampled by the given stages,
     /// which may be empty.
     DepthStencilRead(ShaderStages),
+    /// Owned by presentation: before a barrier, a swapchain image just
+    /// acquired, whose contents are discarded; after it, ready to present.
+    /// The first access after acquiring must be an attachment write or a
+    /// copy.
+    Present,
 }
 
 impl BufferAccess {
@@ -139,7 +144,7 @@ impl ImageAccess {
     #[must_use]
     pub const fn usage(self) -> ImageUsage {
         match self {
-            Self::Undefined => ImageUsage::empty(),
+            Self::Undefined | Self::Present => ImageUsage::empty(),
             Self::CopySource => ImageUsage::COPY_SRC,
             Self::CopyDestination => ImageUsage::COPY_DST,
             Self::Sampled(_) => ImageUsage::SAMPLED,
