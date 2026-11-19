@@ -734,6 +734,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirk_rhi"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "bitflags 2.13.2",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "dirk_shaders"
 version = "0.1.0"
 dependencies = [

@@ -64,9 +64,10 @@ doc:
 doc-test:
     @cargo test --locked --workspace --doc --all-features
 
-# Advisories, licenses, bans and sources, as deny.toml configures them.
+# Advisories, licenses, bans and sources, as deny.toml configures them, for
+# every workspace member, including crates the binary doesn't depend on.
 audit:
-    @cargo deny check -D warnings
+    @cargo deny --workspace check -D warnings
 
 # Dependencies a crate declares but never names.
 unused:

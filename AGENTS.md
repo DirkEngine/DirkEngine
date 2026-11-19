@@ -22,8 +22,10 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
 - `dirk_world`: the components and systems that populate a world (transforms,
   renderables, model uploads).
 - `dirk_player`: players, their input and movement.
-- `dirk_renderer`: the Vulkan renderer, the only crate that uses `ash` and
-  `unsafe`.
+- `dirk_rhi`: the render hardware interface: the device and what is
+  recorded on it, over one native graphics backend per target (Vulkan).
+- `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
+  that use `ash` and `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
   shaders are `dirk_shaders_gpu` in `crates/dirk_renderer/shaders`, compiled
   to SPIR-V by the renderer's build script with rust-gpu.
@@ -87,7 +89,9 @@ uses it too. Before anything destructive, ask what else it touches.
   the layer isn't installed system-wide, point `LD_LIBRARY_PATH` at the loader
   and `VK_ADD_LAYER_PATH` at the layer. Tests never need a GPU or a window,
   since CI can't count on either: test the logic around GPU code, as the frame
-  graph's tests do.
+  graph's tests do. `dirk_rhi`'s integration tests are the exception: they use
+  a device when there is one and skip otherwise; `DIRK_REQUIRE_GPU=1` makes a
+  missing device fail them (see its README).
 
 ## Conventions
 

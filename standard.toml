@@ -1,9 +1,10 @@
 # How DirkEngine applies the engineering standard; the README of the
 # `sourceorigin-standard` crate lists its rules and every key here.
 
-# The renderer's modules that call Vulkan through ash, which #133 replaces with
-# the RHI's. An `#[expect(unsafe_code)]` counts for the first entry holding it,
-# so the crate root, for lib.rs's own calls, comes last.
+# The modules that use unsafe code: the renderer's, which call Vulkan through
+# ash until #133 replaces them with the RHI, and the RHI's native backend. An
+# `#[expect(unsafe_code)]` counts for the first entry holding it, so a crate
+# root, for lib.rs's own calls, comes after its modules.
 unsafe-modules = [
     "dirk_renderer::debug",
     "dirk_renderer::init",
@@ -15,6 +16,7 @@ unsafe-modules = [
     "dirk_renderer::viewport_editor",
     "dirk_renderer::window",
     "dirk_renderer",
+    "dirk_rhi::native",
 ]
 
 # The binary's library, which holds `DefaultPlugins` and the CLI, and the build
@@ -92,5 +94,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 186 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 190 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]
