@@ -449,11 +449,9 @@ impl ImageAccess {
                 A::TRANSFER_WRITE,
                 L::TRANSFER_DST_OPTIMAL,
             ),
-            Self::Sampled(stages) => (
-                stages.vk(),
-                A::SHADER_SAMPLED_READ,
-                L::SHADER_READ_ONLY_OPTIMAL,
-            ),
+            // One read-only layout for sampling and depth reads, which the
+            // heap's sampled descriptors name.
+            Self::Sampled(stages) => (stages.vk(), A::SHADER_SAMPLED_READ, L::READ_ONLY_OPTIMAL),
             Self::StorageRead(stages) => (stages.vk(), A::SHADER_STORAGE_READ, L::GENERAL),
             Self::StorageWrite(stages) => (
                 stages.vk(),
@@ -477,7 +475,7 @@ impl ImageAccess {
                 } else {
                     A::DEPTH_STENCIL_ATTACHMENT_READ | A::SHADER_SAMPLED_READ
                 },
-                L::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                L::READ_ONLY_OPTIMAL,
             ),
         }
     }
