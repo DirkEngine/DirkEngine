@@ -115,9 +115,7 @@ impl<C: Component> DerivedArg for Option<&C> {
 
     fn changed(entity: Entity, universe: &Universe, last_run: u64) -> bool {
         universe.components.changed::<C>(entity, last_run)
-            || universe
-                .removed_since::<C>(last_run)
-                .any(|removed| removed == entity)
+            || universe.removals.contains::<C>(entity, last_run)
     }
 }
 
