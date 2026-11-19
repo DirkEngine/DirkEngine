@@ -686,6 +686,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "dirk_rhi",
+ "dirk_rhi_test_shaders",
 ]
 
 [[package]]
