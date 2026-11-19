@@ -120,10 +120,11 @@ impl Deref for Windows<'_> {
     }
 }
 
-/// Internal platform representation of a window. Holds the
-/// [`winit::window::Window`] and other state.
+/// Internal platform representation of a window. Holds the platform's
+/// mutable window state and shares the native window through a
+/// [`WindowSurfaceTarget`].
 pub struct Window {
-    raw: Box<dyn winit::window::Window>,
+    raw: Arc<WindowSurfaceTarget>,
     focused: bool,
     theme: Theme,
     /// If the window is completely hidden (minized or covered by another
@@ -139,25 +140,37 @@ impl Window {
             focused: false,
             theme: window.theme().unwrap_or(Theme::Dark),
             occluded: false,
-            raw: window,
+            raw: Arc::new(WindowSurfaceTarget { raw: window }),
         }
     }
     /// Returns the unique ID of the window
     #[must_use]
     pub fn id(&self) -> WindowId {
-        self.raw.id()
+        self.raw.raw.id()
     }
     /// Returns the size of the window's renderable surface. Used by
     /// renderer to create correct surface sizes
     #[must_use]
     pub fn size(&self) -> PhysicalSize<u32> {
-        self.raw.surface_size()
+        self.raw.raw.surface_size()
+    }
+
+    /// Returns a shared owner of the native window, for graphics surfaces
+    /// that must keep it alive after the platform removes this window.
+    ///
+    /// Callers that only borrow the window use its [`HasWindowHandle`] and
+    /// [`HasDisplayHandle`] implementations instead. See
+    /// [`WindowSurfaceTarget`] for the thread the last clone must be
+    /// dropped on.
+    #[must_use]
+    pub fn surface_target(&self) -> Arc<WindowSurfaceTarget> {
+        self.raw.clone()
     }
 
     /// Returns the native scale factor for this window.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
-        self.raw.scale_factor()
+        self.raw.raw.scale_factor()
     }
 
     /// Returns whether this window is focused.
@@ -199,6 +212,40 @@ impl HasWindowHandle for Window {
 }
 
 impl HasDisplayHandle for Window {
+    fn display_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        self.raw.display_handle()
+    }
+}
+
+/// Native window owned jointly by the platform's [`Window`] and the graphics
+/// surfaces created for it.
+///
+/// A graphics surface must not outlive its native window, but the platform
+/// removes a [`Window`] as soon as it is closed, while the renderer destroys
+/// the surface only once the GPU has finished with it. Surfaces therefore
+/// hold a clone, which keeps the native window alive until they are gone.
+///
+/// The last clone must be dropped on the main thread, which runs the platform
+/// event loop. Dropping it closes the native window, and on macOS winit
+/// dispatches that close synchronously to the main thread, so dropping it on
+/// another thread while the main thread waits for that thread deadlocks.
+pub struct WindowSurfaceTarget {
+    raw: Box<dyn winit::window::Window>,
+}
+
+impl HasWindowHandle for WindowSurfaceTarget {
+    fn window_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        self.raw.window_handle()
+    }
+}
+
+impl HasDisplayHandle for WindowSurfaceTarget {
     fn display_handle(
         &self,
     ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
