@@ -5,7 +5,7 @@ use dirk_rhi::{Error, Result, Rhi, RhiCreateInfo};
 /// Runs `test` on an RHI with validation enabled, then fails if validation
 /// reported any error. Skips the test, with a note, on machines without a
 /// graphics driver or a suitable device.
-pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
+pub fn with_rhi<E: From<Error>>(test: impl FnOnce(&mut Rhi) -> Result<(), E>) -> Result<(), E> {
     let Some(mut rhi) = rhi(&RhiCreateInfo {
         application_name: "dirk_rhi tests",
         validation: true,
