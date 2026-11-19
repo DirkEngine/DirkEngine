@@ -78,11 +78,12 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
 ```rust
 let frame = rhi.begin_frame()?;              // waits for this slot's previous work, frees garbage
 scene_data.write(&frame, 0, bytes)?;         // PerFrame<Buffer>: safe per-slot host writes
+let image = frame.acquire(&mut swapchain)?;   // AcquiredImage: render to image.image()
 let mut cmd = frame.encoder::<Graphics>("scene")?;
 cmd.wait_for(upload)?;                       // the GPU waits for another queue's Completion
-// ... record ...
-frame.submit(cmd)?;                           // or submit several, across queues
-frame.present(acquired)?;                     // presentation is part of the frame
+// ... record, leaving the image in ImageAccess::Present ...
+let image = frame.submit_with(cmd, image)?;   // PresentableImage; frame.submit for other work
+frame.present(image)?;                        // presentation is part of the frame
 frame.finish();                               // closes the frame (also on Drop)
 ```
 
@@ -136,8 +137,40 @@ frame.finish();                               // closes the frame (also on Drop)
   independent blend, the color target limit, depth bias clamp. Pipelines have topology,
   culling, front face, depth test and bias, per-target blending and write masks; stencil
   tests come when something needs them.
-- Typestate presentation: `AcquiredFrame` -> submitted -> presented. Presenting before
-  submit, or submitting twice, does not compile. No atomics tracking frame phase.
+- Typestate presentation: `frame.acquire(&mut swapchain) -> AcquiredImage`,
+  `frame.submit_with(encoder, acquired) -> PresentableImage`, `frame.present(presentable)`.
+  Each step consumes the previous token, and tokens borrow the frame and the swapchain, so
+  presenting before submit, submitting twice, outliving the frame, or resizing while an
+  image is out do not compile (`compile_fail` doctests). No atomics: the swapchain keeps a
+  plain `pending` field so an image abandoned at any step is released (its acquire
+  semaphore consumed by an empty submission) and the swapchain recreated on the next
+  acquisition. One image per swapchain and frame.
+
+## Presentation
+
+- `RhiCreateInfo::display` enables presentation (surface instance extensions, and
+  `VK_KHR_swapchain` becomes a device requirement). `rhi.create_surface(Arc<T: SurfaceTarget>)`
+  takes the platform's shared window owner (`dirk_platform::WindowSurfaceTarget`); the
+  surface keeps it alive until its deferred free, so whoever drops the last clone must do
+  so on the main thread. `rhi.create_swapchain(surface, &SwapchainDesc { extent, formats,
+  present_mode, usage })` chooses the format (sRGB color space) and present mode (FIFO
+  fallback) up front; images are created on the first acquisition.
+- Swapchain images are `Image`s (single-mip 2D with a view, outside the heap) that the
+  swapchain owns; usage is limited to color attachment and copies. The image access
+  `ImageAccess::Present` describes them before their first barrier after acquisition
+  (contents discarded) and before presenting.
+- Lifecycle (Vulkan): acquire semaphores per frame slot, reusable because beginning a
+  frame waits for its slot's previous work; present semaphores per image, reused when the
+  image is reacquired. The acquire budget is one image per swapchain at a time, enforced by
+  the borrow. Out-of-date or suboptimal acquisitions and presents mark the swapchain for
+  recreation; a recreation that still finds it out of date, or a 0x0 surface, returns
+  `Error::SwapchainOutOfDate`: skip presenting that frame. `swapchain.resize(w, h)` only
+  marks it. Recreation passes the old swapchain as `oldSwapchain` without waiting; the old
+  one is destroyed through deferred destruction after waiting for the graphics queue to
+  idle, since nothing else proves presentation finished (`VK_EXT_swapchain_maintenance1`
+  present fences would; not needed yet). That is the only stall, once per recreation.
+- Headless tests cover what needs no display; `cargo run -p dirk_rhi --example present`
+  checks acquisition, presentation and recreation on a real window.
 
 ## Binding model: bindless, verified at compile time
 

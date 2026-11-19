@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bitflags::bitflags;
+use raw_window_handle::DisplayHandle;
 
 use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
 
@@ -12,6 +13,9 @@ pub struct RhiCreateInfo<'a> {
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
     pub validation: bool,
+    /// The display windows will be presented to, such as the platform's
+    /// event loop. Enables presentation; `None` for headless use.
+    pub display: Option<DisplayHandle<'a>>,
 }
 
 /// The render hardware interface: one device and everything created from it.

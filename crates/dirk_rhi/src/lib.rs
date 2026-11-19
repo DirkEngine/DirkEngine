@@ -20,6 +20,7 @@ mod graveyard;
 mod image;
 mod pass;
 mod pipeline;
+mod presentation;
 mod queue;
 mod sampler;
 mod shader;
@@ -51,6 +52,9 @@ pub use pipeline::{
     BlendComponent, BlendFactor, BlendOp, BlendState, ColorTarget, ColorWrites, CompareOp,
     CullMode, DepthBias, DepthState, FrontFace, GraphicsPipeline, GraphicsPipelineDesc,
     MAX_COLOR_TARGETS, Topology,
+};
+pub use presentation::{
+    AcquiredImage, PresentMode, PresentableImage, Surface, SurfaceTarget, Swapchain, SwapchainDesc,
 };
 pub use queue::{Completion, CopyQueue, Graphics, QueueKind, QueueTransfer, QueueType};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc, SamplerInfo};

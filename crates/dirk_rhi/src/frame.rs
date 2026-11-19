@@ -141,11 +141,25 @@ impl Frame<'_> {
     ///
     /// Returns [`Error::Invalid`] if the encoder belongs to another frame, or
     /// a native error such as [`Error::DeviceLost`].
+    pub fn submit<Q: QueueKind>(&self, encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+        let (raw, waits) = self.take(encoder)?;
+        let value = self.rhi.device.submit(Q::TYPE, raw, waits)?;
+        Ok(Completion {
+            queue: Q::TYPE,
+            value,
+        })
+    }
+
+    /// The commands and waits of `encoder`, checking it belongs to this
+    /// frame.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "submitting consumes the encoder so its commands cannot be submitted twice"
     )]
-    pub fn submit<Q: QueueKind>(&self, encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+    pub(crate) fn take<Q: QueueKind>(
+        &self,
+        encoder: CommandEncoder<'_, Q>,
+    ) -> Result<(native::CommandBuffer, [u64; QueueType::COUNT])> {
         let CommandEncoder {
             frame, raw, waits, ..
         } = encoder;
@@ -156,18 +170,14 @@ impl Frame<'_> {
                 "the encoder belongs to another frame",
             ));
         }
-        let value = self.rhi.device.submit(Q::TYPE, raw, waits)?;
-        Ok(Completion {
-            queue: Q::TYPE,
-            value,
-        })
+        Ok((raw, waits))
     }
 
     /// Closes the frame. Dropping it does the same.
     pub fn finish(self) {}
 
     /// The slot this frame uses.
-    fn slot(&self) -> usize {
+    pub(crate) fn slot(&self) -> usize {
         Rhi::slot(self.number)
     }
 }
