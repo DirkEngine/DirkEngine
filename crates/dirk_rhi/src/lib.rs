@@ -26,9 +26,21 @@ mod queue;
 mod sampler;
 mod shader;
 
-// Every target uses Vulkan, Apple targets through MoltenVK, until the Metal
-// backend selects `metal/mod.rs` on Apple targets.
-#[path = "vulkan/mod.rs"]
+/// Implements `is_from` for native objects holding their device.
+macro_rules! device_children {
+    ($($object:ty),+) => {$(
+        impl $object {
+            /// Whether this object was created from `device`.
+            pub(crate) fn is_from(&self, device: &Device) -> bool {
+                std::ptr::eq(&*self.device, device)
+            }
+        }
+    )+};
+}
+
+// One native backend per target: Metal on Apple targets, Vulkan elsewhere.
+#[cfg_attr(target_vendor = "apple", path = "metal/mod.rs")]
+#[cfg_attr(not(target_vendor = "apple"), path = "vulkan/mod.rs")]
 mod native;
 
 pub use access::{BufferAccess, ImageAccess, ShaderStages};
