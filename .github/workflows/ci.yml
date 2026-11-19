@@ -114,6 +114,10 @@ jobs:
       # no-default-features passes leave it out.
       - run: cargo clippy --workspace --locked --all-features -- -D warnings
       - run: cargo clippy --workspace --exclude dirk_editor --locked --no-default-features -- -D warnings
+      # Runners have no GPU, so native rendering tests run on Mesa's software
+      # Vulkan driver (lavapipe) under the Khronos validation layer.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-validationlayers
       - run: cargo nextest run --workspace --locked --all-features
       - run: cargo nextest run --workspace --exclude dirk_editor --locked --no-default-features
       - if: runner.os == 'Linux'
