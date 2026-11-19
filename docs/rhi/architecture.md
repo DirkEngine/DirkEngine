@@ -330,16 +330,54 @@ format capabilities follow Apple's feature tables, conservatively.
 
 ## Render graph (`dirk_render_utils`)
 
-- Keep: per-mip barrier derivation (RAW/WAR/WAW), merged overlapping reads, boundary
-  states for imported resources, and its focused tests.
-- Imports are deduplicated with a hash map, not a linear scan.
-- Host-written per-frame buffers are not imported (the frame slot wait covers them).
-- Views are created only when a pass needs one (never for transfer-only textures).
-- Transient textures/buffers come from a pool reused across frames.
-- One barrier call per pass (buffers and images merged); read->read transitions widen the
-  read state instead of emitting a barrier.
-- One graph per frame.
-- Subresource ranges (per-layer/mip passes) are a later, separate PR.
+```rust
+let mut graph = RenderGraph::new();                        // one graph per frame
+let target = graph.import(acquired.image())?;                // from and back to its resting access
+let depth = graph.create_image(&ImageDesc { usage: ImageUsage::empty(), .. }); // usage derived
+graph.pass("scene")
+    .color(target, LoadOp::Clear(black))
+    .depth(depth, LoadOp::Clear(1.0))
+    .sampled(shadow, ShaderStages::FRAGMENT)
+    .record(|pass| pass.draw(&pipeline, &push, 0..3, 0..1))?;
+graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one barrier call per pass
+```
+
+- Passes declare their accesses; `record` validates them and derives the pass's barriers
+  at once, leaving the graph unchanged on error: per-mip RAW/WAR/WAW (repeated writes
+  included), reads of contents nothing wrote, a just-acquired swapchain image first used
+  other than as an attachment or copy destination, shader accesses without stages,
+  conflicting accesses in one pass, imports lacking a usage, and handles of other graphs.
+- Pass kinds are typestate: declaring an attachment makes `record` take a
+  `RenderPass` callback (boxed), otherwise a `CommandEncoder` one, so drawing outside a
+  render pass does not compile. Callbacks reach transients through `pass.image(handle)`,
+  which only resolves what the pass declared.
+- Reads in one pass that can share a state merge (sampling in more stages). Reads in
+  later passes widen the barrier that established the read state rather than adding one;
+  only a read state an import starts in, with no earlier barrier, needs a read-to-read
+  barrier for new stages.
+- Imports are deduplicated with a hash map keyed by address; importing again with other
+  accesses is an error. Images need no state from their importer: `graph.import(&image)`
+  starts from the image's resting access with its contents, `graph.import_scratch(&image)`
+  from undefined contents ordered after the resting access (always legal, with no
+  first-frame special case), and both end at rest. Imported buffers still state the
+  access they are in before the graph and leave it in (`import_buffer(buffer, before,
+  after)`): buffers have no layouts, so a wrong `before` costs synchronization, not a
+  layout. Callbacks recording safe commands on a declared image find it where the graph's
+  barriers left it, which the encoder remembers: in place when the access matches,
+  rejected otherwise.
+- Frame memory (`frame.alloc`) is not imported: no earlier work reads what a frame
+  allocates, and submission makes the host's writes visible.
+- Transients take their usage from their declarations (none: never created), so
+  transfer-only images get no view. Attachment stores are inferred: a transient nothing
+  reads later is discarded, as is a scratch import (`import_scratch`), whose
+  contents are not needed after the graph, such as a depth buffer cleared every frame.
+- `Transients` pools them across frames: a transient used in frame F is reused, by one of
+  the same description and usage, from frame F + `FRAMES_IN_FLIGHT` on, so it starts
+  undefined with no barrier against earlier work, and is left wherever its last pass left
+  it, since nothing outside the graph reaches it; one that frame does not reuse is
+  dropped through deferred destruction. Steady rendering keeps `FRAMES_IN_FLIGHT` sets.
+- Subresource ranges (per-layer/mip passes) are a later, separate PR: the state tracker
+  already works per mip span.
 
 ## Uploads (`dirk_render_utils`)
 
