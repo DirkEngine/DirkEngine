@@ -121,7 +121,8 @@ impl ModelRegistry {
         })
     }
 
-    /// Uploads the models loaded since the last update with `uploads`, and
+    /// Uploads the models loaded since the last update with `uploads`,
+    /// skipping, with a warning, those that cannot be read or uploaded, and
     /// drops those unloaded. An unload only drops the generation it names,
     /// not a newer one loaded since.
     pub fn update(&mut self, rhi: &Rhi, uploads: &mut Uploads<'_>) -> Result<()> {
@@ -135,8 +136,14 @@ impl ModelRegistry {
                     continue;
                 }
             };
-            let model = self.upload(rhi, &asset, event.handle.generation(), uploads)?;
-            self.models.insert(handle, model);
+            match self.upload(rhi, &asset, event.handle.generation(), uploads) {
+                Ok(model) => {
+                    self.models.insert(handle, model);
+                }
+                Err(error) => {
+                    warn!(model = %handle, %error, "skipping a model that cannot be uploaded")
+                }
+            }
         }
         for event in self.unload_consumer.consume_all() {
             if self
