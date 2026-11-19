@@ -12,8 +12,9 @@ Each frame, the renderer:
    visible;
 3. renders the viewports some window shows, each into its own output image,
    with one depth and multisampled color image per viewport;
-4. presents every acquired window: the editor composites its UI, the player
-   build shows the window's viewport.
+4. draws every acquired window: the editor composites its UI, the player
+   build shows the window's viewport;
+5. submits all of it at once, in one render graph, and presents the windows.
 
 Shaders are Rust, in `shaders/`, compiled by `dirk_build::shaders`. They read
 every resource through the bindless heap and pull vertices from storage

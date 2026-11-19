@@ -176,12 +176,14 @@ impl EguiState {
     }
 
     /// Adds the pass drawing the last frame's UI to `graph`, onto a new
-    /// image of `extent` in linear colors, which it returns.
+    /// image of `extent` in linear colors, which it returns. `viewports`
+    /// are the outputs `graph` renders, which the UI may show.
     pub fn record<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
         frame: &Frame<'_>,
         extent: (u32, u32),
+        viewports: impl IntoIterator<Item = Handle<Image>>,
     ) -> Result<Handle<Image>> {
         let (primitives, pixels_per_point, painted) = match &mut self.pending {
             Some(pending) => (
@@ -193,7 +195,7 @@ impl EguiState {
         };
         self.renderer
             .prepare(frame, &primitives, pixels_per_point, painted, extent)?;
-        self.renderer.record(graph, frame, extent)
+        self.renderer.record(graph, frame, extent, viewports)
     }
 
     /// Frees the textures the last frame no longer uses, once its UI is
@@ -420,12 +422,14 @@ impl EguiRenderer {
 
     /// Adds the pass drawing what [`prepare`](Self::prepare) set up for
     /// `frame` to `graph`, onto a new image of `extent` cleared to black,
-    /// which it returns.
+    /// which it returns. The pass samples `viewports`, outputs `graph`
+    /// renders that user textures may show.
     pub fn record<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
         frame: &Frame<'_>,
         (width, height): (u32, u32),
+        viewports: impl IntoIterator<Item = Handle<Image>>,
     ) -> Result<Handle<Image>> {
         let target = graph.create_image(&ImageDesc {
             label: "ui",
@@ -439,8 +443,11 @@ impl EguiRenderer {
         });
         let vertices = self.vertices.get(frame);
         let indices = self.indices.get(frame);
-        graph
-            .pass("egui")
+        viewports
+            .into_iter()
+            .fold(graph.pass("egui"), |pass, viewport| {
+                pass.sampled(viewport, ShaderStages::FRAGMENT)
+            })
             .color(target, LoadOp::Clear([0.0, 0.0, 0.0, 1.0]))
             .record(move |pass| {
                 let vertices = vertices.storage()?;

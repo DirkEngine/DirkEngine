@@ -450,10 +450,9 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 - Owns one `Rhi`. Each frame uploads new models and UI textures, then acquires an image of
   every visible window (not occluded, not empty, presentable). When none is visible, it
   submits nothing else.
-- The viewports some acquired window shows render in one graph and one submission. Each
-  acquired window then gets a small graph of its own, because `Frame::submit_with`
-  presents one swapchain image per submission; the viewports' graph leaves their outputs
-  sampled, so window graphs import them without a barrier.
+- The viewports some acquired window shows and every acquired window render in one graph
+  and one submission, which `Frame::submit_with` presents to every window; the passes
+  drawing windows and the UI sample the viewports' outputs.
 - One depth/MSAA attachment set per viewport (not per frame slot), imported into the graph
   from undefined on its first frame and from its attachment access after that, so frames
   in flight take turns with a barrier between them.

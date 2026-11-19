@@ -336,7 +336,7 @@ fn ui_colors_are_composited_linearly_and_encoded_once() -> Result {
             uploads.submit()?;
             egui.prepare(&frame, &primitives, 1.0, EXTENT, EXTENT)?;
             let done = target.render(&frame, &mut transients, |graph, image| {
-                let ui = egui.record(graph, &frame, EXTENT)?;
+                let ui = egui.record(graph, &frame, EXTENT, [])?;
                 Ok(presenter.record(graph, &pipeline, image, Some(ui))?)
             })?;
             frame.finish();

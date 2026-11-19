@@ -421,9 +421,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// Renders one frame: uploads new assets, renders the viewports shown
-    /// in windows, then presents every visible window. Submits nothing when
-    /// no window is visible, apart from uploads.
+    /// Renders one frame: uploads new assets, then renders the viewports
+    /// shown in windows and every visible window in one graph and one
+    /// submission, which presents the windows. Submits nothing when no
+    /// window is visible, apart from uploads.
     fn render(&mut self) -> Result<()> {
         #[cfg(not(feature = "editor"))]
         self.update_presentation()?;
@@ -449,11 +450,7 @@ impl Renderer {
             .iter()
             .any(|target| Some(target.window) == self.egui_window)
         {
-            self.viewports
-                .iter()
-                .filter(|(_, viewport)| viewport.is_renderable())
-                .map(|(player, _)| *player)
-                .collect()
+            self.viewports.keys().copied().collect()
         } else {
             Vec::new()
         };
@@ -464,58 +461,66 @@ impl Renderer {
                 self.presentation_assignments
                     .player_for_window(target.window)
             })
-            .filter(|player| {
-                self.viewports
-                    .get(player)
-                    .is_some_and(Viewport::is_renderable)
-            })
+            .filter(|player| self.viewports.contains_key(player))
             .collect();
 
-        if !shown.is_empty() {
-            self.scene_manager.write_objects(&frame)?;
+        if !targets.is_empty() {
             let mut graph = RenderGraph::new();
-            for viewport in shown.iter().filter_map(|player| self.viewports.get(player)) {
-                viewport.record(&mut graph, &frame, &self.scene_manager, &self.models)?;
+            // The output each shown viewport shows.
+            let mut outputs = HashMap::new();
+            if !shown.is_empty() {
+                self.scene_manager.write_objects(&frame)?;
+                for player in &shown {
+                    if let Some(viewport) = self.viewports.get(player)
+                        && let Some(output) = viewport.record(
+                            &mut graph,
+                            &frame,
+                            &self.scene_manager,
+                            &self.models,
+                        )?
+                    {
+                        outputs.insert(*player, output);
+                    }
+                }
             }
-            let mut encoder = frame.encoder::<Graphics>("viewports")?;
+
+            #[cfg(feature = "editor")]
+            let ui = targets
+                .iter()
+                .find(|target| Some(target.window) == self.egui_window)
+                .map(|target| {
+                    let extent = target.image.image().info().extent;
+                    let extent = (extent.width, extent.height);
+                    self.egui
+                        .record(&mut graph, &frame, extent, outputs.values().copied())
+                })
+                .transpose()?;
+            for target in &targets {
+                let image = target.image.image();
+                let image =
+                    graph.import_image(image, ImageAccess::Present, ImageAccess::Present)?;
+                #[cfg(feature = "editor")]
+                let source = ui.filter(|_| Some(target.window) == self.egui_window);
+                #[cfg(not(feature = "editor"))]
+                let source = self
+                    .presentation_assignments
+                    .player_for_window(target.window)
+                    .and_then(|player| outputs.get(&player).copied());
+                self.presenter
+                    .record(&mut graph, target.pipeline, image, source)?;
+            }
+
+            let mut encoder = frame.encoder::<Graphics>("frame")?;
             graph.execute(&frame, &mut encoder, &mut self.transients)?;
-            frame.submit(encoder)?;
-            for player in &shown {
+            let images = targets.into_iter().map(|target| target.image);
+            for presentable in frame.submit_with(encoder, images)? {
+                frame.present(presentable)?;
+            }
+            for player in outputs.keys() {
                 if let Some(viewport) = self.viewports.get_mut(player) {
                     viewport.mark_rendered();
                 }
             }
-        }
-
-        for target in targets {
-            let mut graph = RenderGraph::new();
-            let image = target.image.image();
-            #[cfg(feature = "editor")]
-            let extent = (image.info().extent.width, image.info().extent.height);
-            let image = graph.import_image(image, ImageAccess::Present, ImageAccess::Present)?;
-            #[cfg(feature = "editor")]
-            let source = if Some(target.window) == self.egui_window {
-                Some(self.egui.record(&mut graph, &frame, extent)?)
-            } else {
-                None
-            };
-            #[cfg(not(feature = "editor"))]
-            let source = self
-                .presentation_assignments
-                .player_for_window(target.window)
-                .and_then(|player| self.viewports.get(&player))
-                .filter(|viewport| viewport.has_rendered())
-                .map(|viewport| {
-                    let shown = viewport::SHOWN;
-                    graph.import_image(viewport.output(), shown, shown)
-                })
-                .transpose()?;
-            self.presenter
-                .record(&mut graph, target.pipeline, image, source)?;
-            let mut encoder = frame.encoder::<Graphics>("window")?;
-            graph.execute(&frame, &mut encoder, &mut self.transients)?;
-            let presentable = frame.submit_with(encoder, target.image)?;
-            frame.present(presentable)?;
         }
 
         #[cfg(feature = "editor")]

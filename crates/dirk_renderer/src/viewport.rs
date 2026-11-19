@@ -1,4 +1,4 @@
-use dirk_render_utils::RenderGraph;
+use dirk_render_utils::{Handle, RenderGraph};
 use dirk_rhi::{
     Extent3d, Frame, Image, ImageAccess, ImageDesc, ImageDimension, ImageUsage, LoadOp, Rhi,
     SampleCount, ShaderStages, TextureIndex,
@@ -73,17 +73,25 @@ impl Viewport {
     pub fn extent(&self) -> (u32, u32) {
         self.settings.extent
     }
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(dead_code, reason = "the editor tells which viewports are ready")
+    )]
     pub fn is_renderable(&self) -> bool {
         self.world.is_some() && self.camera.is_some()
     }
     /// Whether the output holds a rendered image.
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(dead_code, reason = "the editor tells which viewports are ready")
+    )]
     pub fn has_rendered(&self) -> bool {
         self.images.rendered
     }
     /// The output, to show once it [`has_rendered`](Self::has_rendered).
     #[cfg_attr(
-        all(feature = "editor", not(test)),
-        expect(dead_code, reason = "the editor shows outputs by index")
+        not(test),
+        expect(dead_code, reason = "the renderer shows outputs it records")
     )]
     pub fn output(&self) -> &Image {
         &self.images.output
@@ -110,7 +118,9 @@ impl Viewport {
     }
 
     /// Adds the pass rendering the camera's view of its world to `graph`,
-    /// leaving the output for fragment shaders to sample. Call
+    /// leaving the output for fragment shaders to sample, and returns the
+    /// output to show. Without a world and camera, the output shows what it
+    /// rendered last, if anything. Call
     /// [`mark_rendered`](Self::mark_rendered) once it is submitted.
     pub fn record<'a>(
         &'a self,
@@ -118,9 +128,13 @@ impl Viewport {
         frame: &Frame<'_>,
         scene: &'a SceneManager,
         models: &'a ModelRegistry,
-    ) -> Result<()> {
+    ) -> Result<Option<Handle<Image>>> {
+        let images = &self.images;
         let (Some(world), Some(camera)) = (self.world, self.camera) else {
-            return Ok(());
+            let shown = images
+                .rendered
+                .then(|| graph.import_image(&images.output, SHOWN, SHOWN));
+            return Ok(shown.transpose()?);
         };
         let (width, height) = self.settings.extent;
         // Extents are far below 2^24, where `f32` loses integers.
@@ -129,7 +143,6 @@ impl Viewport {
         let view = scene.view(world, camera, aspect, self.settings.projection)?;
         let objects = scene.objects(frame);
 
-        let images = &self.images;
         let before = |access| {
             if images.rendered {
                 access
@@ -156,7 +169,7 @@ impl Viewport {
         };
         pass.depth(depth, LoadOp::Clear(1.0))
             .record(move |pass| scene.draw(pass, objects, models, &view))?;
-        Ok(())
+        Ok(Some(output))
     }
 
     /// Records that a frame rendered to the images and was submitted.
