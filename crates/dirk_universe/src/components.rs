@@ -193,3 +193,66 @@ impl Components {
             .is_some_and(|storage| storage.contains_key(&entity))
     }
 }
+
+/// Component removals by type and entity, kept until every system has
+/// observed them.
+#[derive(Default)]
+pub(crate) struct Removals(HashMap<TypeId, HashMap<Entity, Vec<Removal>>>);
+
+/// One removal of a component.
+struct Removal {
+    /// When the removed component was added, so additions and removals that
+    /// cancel out between two runs are not reported.
+    added: u64,
+    tick: u64,
+}
+
+impl Removal {
+    /// Whether a system that last ran at `last_run` has yet to see this
+    /// removal of a component it saw.
+    fn unseen_by(&self, last_run: u64) -> bool {
+        self.added <= last_run && self.tick > last_run
+    }
+}
+
+impl Removals {
+    /// Records that `entity` lost a component of type `type_id`, added at
+    /// `added`, at `tick`.
+    pub fn record(&mut self, type_id: TypeId, entity: Entity, added: u64, tick: u64) {
+        self.0
+            .entry(type_id)
+            .or_default()
+            .entry(entity)
+            .or_default()
+            .push(Removal { added, tick });
+    }
+
+    /// Forgets removals made at or before `tick`.
+    pub fn forget_until(&mut self, tick: u64) {
+        self.0.retain(|_, entities| {
+            entities.retain(|_, removals| {
+                removals.retain(|removal| removal.tick > tick);
+                !removals.is_empty()
+            });
+            !entities.is_empty()
+        });
+    }
+
+    /// Entities whose `C` was removed after `last_run`, having existed then.
+    pub fn since<C: Component>(&self, last_run: u64) -> impl Iterator<Item = Entity> + '_ {
+        self.0
+            .get(&TypeId::of::<C>())
+            .into_iter()
+            .flatten()
+            .filter(move |(_, removals)| removals.iter().any(|removal| removal.unseen_by(last_run)))
+            .map(|(&entity, _)| entity)
+    }
+
+    /// Whether `entity`'s `C` was removed after `last_run`, having existed then.
+    pub fn contains<C: Component>(&self, entity: Entity, last_run: u64) -> bool {
+        self.0
+            .get(&TypeId::of::<C>())
+            .and_then(|entities| entities.get(&entity))
+            .is_some_and(|removals| removals.iter().any(|removal| removal.unseen_by(last_run)))
+    }
+}
