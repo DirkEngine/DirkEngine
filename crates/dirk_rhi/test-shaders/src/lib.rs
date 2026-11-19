@@ -12,6 +12,7 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 }
 
+pub use dirk_rhi_test_shaders_gpu::Instanced;
 pub use generated::*;
 
 pub mod support;

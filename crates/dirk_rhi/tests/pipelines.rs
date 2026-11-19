@@ -740,6 +740,55 @@ fn desc_of(image: &Image) -> ImageDesc<'static> {
 }
 
 #[test]
+fn shaders_read_storage_buffers_of_different_types_through_the_heap() -> Result<()> {
+    use dirk_rhi_test_shaders::{ColorFs, Instanced, InstancedVs};
+
+    with_rhi(|rhi| {
+        let storage = |label, data: &[u8]| {
+            let mut buffer = rhi.create_buffer(&BufferDesc {
+                label,
+                size: data.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: Memory::Upload,
+            })?;
+            // SAFETY: the buffer was never submitted.
+            unsafe { buffer.write(0, data)? };
+            Ok::<_, Error>(buffer)
+        };
+        // One triangle covering the target, and colors of 4 bytes, not the
+        // 16 of a vertex, so each array is read with its own stride.
+        let triangle = [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)].map(|(x, y)| Vertex {
+            position: [x, y],
+            uv: [0.0; 2],
+        });
+        let colors = [RED, GREEN, BLUE].map(|color| u32::from_le_bytes(unorm(color)));
+        let vertices = storage("triangle", bytemuck::cast_slice(&triangle))?;
+        let colors = storage("colors", bytemuck::cast_slice(&colors))?;
+        let push = Instanced {
+            vertices: vertices.index().expect("storage buffers have an index"),
+            colors: colors.index().expect("storage buffers have an index"),
+        };
+        let pipeline = graphics_pipeline::<InstancedVs, ColorFs, Instanced>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "instanced triangle",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            pass.draw(&pipeline, &push, 0..3, 2..3)
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(BLUE)));
+        Ok(())
+    })
+}
+
+#[test]
 fn draws_pull_vertices_and_sample_textures_through_the_heap() -> Result<()> {
     with_rhi(|rhi| {
         // A 2x2 texture, red and green above blue and white.
