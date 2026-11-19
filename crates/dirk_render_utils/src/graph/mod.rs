@@ -133,6 +133,28 @@ impl<'a> RenderGraph<'a> {
         self.images.import(image, image.label(), all, before, after)
     }
 
+    /// Imports `image` like [`import_image`](Self::import_image), but its
+    /// contents are not needed once the graph ends, such as a depth buffer
+    /// cleared every frame: like a transient's, what passes render to it
+    /// last is discarded. The graph still leaves it in `after`, from which
+    /// later work imports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`import_image`](Self::import_image).
+    pub fn import_scratch_image(
+        &mut self,
+        image: &'a Image,
+        before: ImageAccess,
+        after: ImageAccess,
+    ) -> Result<Handle<Image>> {
+        let handle = self.import_image(image, before, after)?;
+        if let Source::Imported { scratch, .. } = &mut self.images.list[handle.index].source {
+            *scratch = true;
+        }
+        Ok(handle)
+    }
+
     /// Imports `buffer`, owned elsewhere, in `before`: how it was accessed
     /// since its last barrier. The graph leaves it in `after`. Importing it
     /// again with the same accesses returns the same handle.
@@ -303,10 +325,13 @@ impl Resources<'_, Image> {
     }
 
     /// What pass `pass` does with what it renders to attachment `image`:
-    /// stores it unless the image is a transient no later pass accesses.
+    /// stores it unless the image is a transient or scratch import no later
+    /// pass accesses.
     fn store(&self, image: usize, pass: usize) -> StoreOp {
         let tracked = &self.list[image];
-        if matches!(tracked.source, Source::Imported { .. }) || tracked.last_pass > Some(pass) {
+        if matches!(tracked.source, Source::Imported { scratch: false, .. })
+            || tracked.last_pass > Some(pass)
+        {
             StoreOp::Store
         } else {
             StoreOp::Discard

@@ -418,7 +418,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
   wait and submission cover them.
 - Transients take their usage from their declarations (none: never created), so
   transfer-only images get no view. Attachment stores are inferred: a transient nothing
-  reads later is discarded.
+  reads later is discarded, as is a scratch import (`import_scratch_image`), whose
+  contents are not needed after the graph, such as a depth buffer cleared every frame.
 - `Transients` pools them across frames: a transient used in frame F is reused, by one of
   the same description and usage, from frame F + `FRAMES_IN_FLIGHT` on, so it starts
   undefined with no barrier against earlier work; one that frame does not reuse is

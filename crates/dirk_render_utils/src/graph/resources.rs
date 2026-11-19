@@ -202,8 +202,13 @@ pub(crate) struct Tracked<'a, R: Resource> {
 
 /// Where a graph's resource comes from.
 pub(crate) enum Source<'a, R: Resource> {
-    /// Owned elsewhere, and left in `after` once the graph ends.
-    Imported { object: &'a R, after: R::Access },
+    /// Owned elsewhere, and left in `after` once the graph ends. `scratch`
+    /// imports hold nothing needed after the graph.
+    Imported {
+        object: &'a R,
+        after: R::Access,
+        scratch: bool,
+    },
     /// Taken from the transient pool, or created, when the graph executes.
     Transient(R::Desc<'a>),
 }
@@ -251,7 +256,11 @@ impl<'a, R: Resource> Resources<'a, R> {
         }
         let tracked = Tracked {
             label,
-            source: Source::Imported { object, after },
+            source: Source::Imported {
+                object,
+                after,
+                scratch: false,
+            },
             usage: R::Usage::default(),
             states: States::new(subresources.clone(), before),
             subresources,
