@@ -121,6 +121,9 @@ pub struct Limits {
     pub max_color_targets: u32,
     /// Largest push data, in bytes.
     pub max_push_data_size: u32,
+    /// Largest buffer with [`BufferUsage::STORAGE`](crate::BufferUsage::STORAGE),
+    /// in bytes.
+    pub max_storage_buffer_size: u64,
 }
 
 bitflags! {

@@ -181,6 +181,13 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         }
     }
 
+    /// The frame the encoder records in, to [allocate](Frame::alloc) what
+    /// its commands read while recording them.
+    #[must_use]
+    pub fn frame(&self) -> &'f Frame<'f> {
+        self.frame
+    }
+
     /// Makes the GPU wait for `completion` before running these commands,
     /// making its writes visible to them.
     ///

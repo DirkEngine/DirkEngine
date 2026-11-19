@@ -9,8 +9,8 @@ use bytemuck::NoUninit;
 use tracing::error;
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, CommandEncoder, Completion, Error, Graphics, Memory,
-    QueueKind, QueueType, Result, Rhi, native,
+    Buffer, BufferDesc, BufferSlice, BufferUsage, CommandEncoder, Completion, Error, Graphics,
+    Memory, QueueKind, QueueType, Result, Rhi, native,
 };
 
 /// What every frame allocation starts at and reserves a multiple of, in
@@ -68,7 +68,8 @@ pub struct Frame<'r> {
 /// `len` elements of `T` a frame copied into host-visible memory that only
 /// its own work reads. The memory has [`BufferUsage::COPY_SRC`],
 /// [`BufferUsage::INDEX`] and [`BufferUsage::STORAGE`], so the elements can
-/// be copied from, drawn as indices or read by shaders.
+/// be copied from, drawn as indices or read by shaders through
+/// [`index`](Self::index).
 ///
 /// It borrows its frame: the memory is reused once the frame's slot comes
 /// round again, after the frame's work completed.
@@ -364,6 +365,21 @@ impl<'f, T> FrameSlice<'f, T> {
     #[must_use]
     pub fn size(&self) -> u64 {
         u64::from(self.len) * Self::ELEMENT_SIZE
+    }
+
+    /// Where shaders read the elements: the slice of the heap's storage
+    /// buffer holding them.
+    ///
+    /// # Panics
+    ///
+    /// Never: frame memory is a storage buffer, which has a heap slot.
+    #[must_use]
+    pub fn index(&self) -> BufferSlice<T> {
+        let buffer = self
+            .buffer
+            .index()
+            .expect("frame memory is a storage buffer, which has an index");
+        BufferSlice::new(buffer, self.first, self.len)
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     Capabilities, Error, Features, Format, ImageAccess, ImageUsage, Limits, Result, Rhi,
-    SampleCounts, command::Transition, native,
+    SampleCounts, StorageImageIndex, TextureIndex, command::Transition, native,
 };
 
 /// Width, height and depth of an image, in texels.
@@ -264,12 +264,9 @@ pub struct Image {
 /// attachment. The image owns its view, so a view never outlives the memory
 /// it reads.
 pub struct ImageView {
-    #[expect(
-        dead_code,
-        reason = "read when render passes and the bindless heap use views"
-    )]
-    raw: native::ImageView,
     view_type: ViewType,
+    texture: Option<TextureIndex>,
+    storage: Option<StorageImageIndex>,
 }
 
 impl Rhi {
@@ -285,10 +282,13 @@ impl Rhi {
     pub fn create_image(&self, desc: &ImageDesc<'_>) -> Result<Image> {
         let (view_type, rest) = desc.check(self.capabilities())?;
         let raw = native::Image::new(&self.device, desc, view_type)?;
+        let [texture, storage] = raw.slots();
         let image = Image {
-            view: view_type
-                .zip(raw.view())
-                .map(|(view_type, raw)| ImageView { raw, view_type }),
+            view: view_type.map(|view_type| ImageView {
+                view_type,
+                texture: texture.map(TextureIndex::new),
+                storage: storage.map(StorageImageIndex::new),
+            }),
             raw,
             info: ImageInfo {
                 dimension: desc.dimension,
@@ -586,5 +586,22 @@ impl ImageView {
     #[must_use]
     pub fn view_type(&self) -> ViewType {
         self.view_type
+    }
+
+    /// The view's index in the heap's texture array of its view type, if
+    /// the image has [`ImageUsage::SAMPLED`].
+    #[must_use]
+    pub fn index(&self) -> Option<TextureIndex> {
+        self.texture
+    }
+
+    /// The view's index in the heap's storage image array of its view type,
+    /// if the image has [`ImageUsage::STORAGE`] and is not a cube. Storage
+    /// image arrays declare no format, so shaders accessing them need the
+    /// `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat`
+    /// capabilities.
+    #[must_use]
+    pub fn storage_index(&self) -> Option<StorageImageIndex> {
+        self.storage
     }
 }

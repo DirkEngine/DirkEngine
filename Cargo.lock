@@ -721,6 +721,7 @@ dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
  "dirk_rhi_test_shaders",
+ "dirk_shaders",
  "gpu-allocator",
  "parking_lot",
  "thiserror 2.0.18",
@@ -742,6 +743,7 @@ name = "dirk_rhi_test_shaders_gpu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "dirk_shaders",
  "glam",
  "spirv-std",
 ]
@@ -750,7 +752,9 @@ dependencies = [
 name = "dirk_shaders"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glam",
+ "spirv-std",
 ]
 
 [[package]]
