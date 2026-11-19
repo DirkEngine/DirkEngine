@@ -28,6 +28,11 @@ Follow `docs/dev/rust-conventions.md`. It applies the shared
 [engineering standard](https://gist.github.com/PiquelChips/04330e52c03efbe9ce4c889c88673a27)
 to DirkEngine. Keep changes focused and follow the style of neighbouring code.
 
+## Skills
+
+Skills live in `.agents/skills`, linked from `.claude/skills`.
+`dirk-cleanup` audits the repository and runs a cleanup pass across it.
+
 ## Validation
 
 `just validate` (or `just` alone) formats the sources and runs every check CI
