@@ -586,8 +586,10 @@ dependencies = [
  "cargo-gpu-install",
  "cargo_metadata",
  "dirk_shaders",
+ "quote",
  "rspirv",
  "spirv-cross2",
+ "syn 2.0.118",
 ]
 
 [[package]]

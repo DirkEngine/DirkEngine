@@ -12,6 +12,7 @@
 mod blit;
 mod buffer;
 mod command;
+mod compute;
 mod convert;
 mod device;
 mod heap;
@@ -25,6 +26,7 @@ mod timestamp;
 
 pub(crate) use buffer::{Buffer, BufferId};
 pub(crate) use command::{CommandBuffer, CommandPool};
+pub(crate) use compute::ComputePipeline;
 pub(crate) use device::Device;
 pub(crate) use image::{Image, ImageId};
 pub(crate) use pipeline::{GraphicsPipeline, PipelineId, ShaderModule};
@@ -72,7 +74,14 @@ impl<P: ?Sized> From<Retained<ProtocolObject<P>>> for Object<P> {
     }
 }
 
-device_children!(Buffer, Image, ShaderModule, GraphicsPipeline, Swapchain);
+device_children!(
+    Buffer,
+    Image,
+    ShaderModule,
+    GraphicsPipeline,
+    ComputePipeline,
+    Swapchain
+);
 
 /// `value` as a `usize`, which is 64 bits wide on every Apple target.
 #[expect(clippy::cast_possible_truncation, reason = "Apple targets are 64-bit")]

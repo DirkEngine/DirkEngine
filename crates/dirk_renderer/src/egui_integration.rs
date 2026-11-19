@@ -240,8 +240,8 @@ struct EguiDraw<'f> {
 
 impl EguiRenderer {
     pub fn new(rhi: &Rhi) -> Result<Self> {
-        let vertex = rhi.create_shader::<EguiVs, EguiPush>()?;
-        let fragment = rhi.create_shader::<EguiFs, EguiPush>()?;
+        let vertex = rhi.create_shader::<EguiVs>()?;
+        let fragment = rhi.create_shader::<EguiFs>()?;
         let pipeline = rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
             label: "egui",
             vertex: &vertex,

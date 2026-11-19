@@ -364,13 +364,13 @@ impl Device {
         slots.free[slot.binding as usize].push_back(slot.index);
     }
 
-    /// Binds the heap for graphics work recorded in `commands`.
-    pub(super) fn bind_heap(&self, commands: vk::CommandBuffer) {
+    /// Binds the heap for work at `bind_point` recorded in `commands`.
+    pub(super) fn bind_heap(&self, commands: vk::CommandBuffer, bind_point: vk::PipelineBindPoint) {
         // SAFETY: `commands` is recording and the set outlives its work.
         unsafe {
             self.raw.cmd_bind_descriptor_sets(
                 commands,
-                vk::PipelineBindPoint::GRAPHICS,
+                bind_point,
                 self.heap.pipeline_layout,
                 0,
                 &[self.heap.set],
