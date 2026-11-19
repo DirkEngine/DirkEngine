@@ -183,7 +183,7 @@ impl FrontFace {
 
 impl CompareOp {
     /// The equivalent Metal compare function.
-    const fn mtl(self) -> MTLCompareFunction {
+    pub(super) const fn mtl(self) -> MTLCompareFunction {
         match self {
             Self::Never => MTLCompareFunction::Never,
             Self::Less => MTLCompareFunction::Less,

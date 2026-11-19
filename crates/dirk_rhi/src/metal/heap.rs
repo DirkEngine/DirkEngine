@@ -210,16 +210,32 @@ impl Heap {
         binding: u32,
     ) -> Result<Option<Object<dyn MTLTexture>>> {
         let texture_type = match binding {
-            heap::TEXTURES_2D | heap::STORAGE_IMAGES_2D => MTLTextureType::Type2D,
-            heap::TEXTURES_2D_ARRAY | heap::STORAGE_IMAGES_2D_ARRAY => MTLTextureType::Type2DArray,
-            heap::TEXTURES_CUBE => MTLTextureType::TypeCube,
-            heap::TEXTURES_CUBE_ARRAY => MTLTextureType::TypeCubeArray,
+            heap::TEXTURES_2D | heap::STORAGE_IMAGES_2D | heap::DEPTH_TEXTURES_2D => {
+                MTLTextureType::Type2D
+            }
+            heap::TEXTURES_2D_ARRAY
+            | heap::STORAGE_IMAGES_2D_ARRAY
+            | heap::DEPTH_TEXTURES_2D_ARRAY => MTLTextureType::Type2DArray,
+            heap::TEXTURES_CUBE | heap::DEPTH_TEXTURES_CUBE => MTLTextureType::TypeCube,
+            heap::TEXTURES_CUBE_ARRAY | heap::DEPTH_TEXTURES_CUBE_ARRAY => {
+                MTLTextureType::TypeCubeArray
+            }
             heap::TEXTURES_3D | heap::STORAGE_IMAGES_3D => MTLTextureType::Type3D,
             _ => return Ok(None),
         };
         let desc = MTLTextureDescriptor::new();
         desc.setTextureType(texture_type);
-        desc.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        // Depth arrays are declared as depth textures, which need a depth
+        // format.
+        let depth = matches!(
+            binding,
+            heap::DEPTH_TEXTURES_2D..=heap::DEPTH_TEXTURES_CUBE_ARRAY
+        );
+        desc.setPixelFormat(if depth {
+            MTLPixelFormat::Depth32Float
+        } else {
+            MTLPixelFormat::RGBA8Unorm
+        });
         desc.setUsage(if is_storage(binding) {
             MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite
         } else {
