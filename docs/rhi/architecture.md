@@ -139,7 +139,7 @@ frame.finish();                               // closes the frame (also on Drop)
     next graphics submission records first. A copy-queue barrier from `Undefined` takes it
     over (uploads), since the copy queue cannot reach graphics accesses.
   - Safe commands (`copy_buffer_to_image`, `copy_image_to_buffer`, `copy_image`,
-    `blit_image`) move the subresources they touch from rest into their access and back,
+    `blit_image`, `generate_mips`) move the subresources they touch from rest into their access and back,
     with no barrier where the access is the resting one and only read.
   - Raw `unsafe barrier()` is the only way to leave rest. The encoder remembers where its
     barriers left each range (per mip and layer, the last barrier covering it), and safe
@@ -153,6 +153,11 @@ frame.finish();                               // closes the frame (also on Drop)
     the caller's job, through barriers or the render graph. Host data the GPU reads each
     frame comes from frame memory, which needs no ordering.
 - Dynamic state defaults: viewport and scissor default to the render area.
+- `encoder.generate_mips(&image)` (graphics queue) filters mip 0 down into every other
+  mip of every layer, moving the image from rest and back with the transitions in
+  between, so mip chains need neither raw barriers nor per-mip graph passes. Vulkan blits
+  level by level, requiring the format's blit and linear filtering support; Metal uses
+  `generateMipmapsForTexture`.
 - Render passes use dynamic rendering. Attachments are whole single-mip, single-layer 2D
   images (`&Image`, using the view it owns) of one extent; color attachments may resolve
   into a single-sample image. Like other safe commands, a pass moves its attachments from
@@ -311,9 +316,9 @@ format capabilities follow Apple's feature tables, conservatively.
     between two barriers overlap freely. Barriers' accesses only matter for validation:
     Metal textures have no layouts and queues need no ownership transfers.
   - Implicit transitions are barriers too: the safe commands' moves from rest and back,
-    a render pass's attachments and `end_pass` closing a leaked pass. Reads in the
-    resting access need none, since whatever wrote the image moved it back to rest with
-    a barrier.
+    a render pass's attachments, `end_pass` closing a leaked pass, and `generate_mips`,
+    which records its blit between two barriers. Reads in the resting access need none,
+    since whatever wrote the image moved it back to rest with a barrier.
   - Each queue has a join fence. A command buffer's first encoders wait for it, and
     submitting ends the command buffer with a join encoder (a 4-byte fill of a scratch
     buffer, so Metal keeps it) waiting for its last encoders and updating it. Metal
@@ -424,7 +429,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 - `Uploads::new(&mut frame)` opens a batch.
   `uploads.buffer(.., access, data)` and `uploads.image(&desc, mips)` return the new
   resource at once, buffers in the graphics access given and images in their resting
-  access, and `uploads.submit()` precedes the
+  access (`uploads.mipmapped_image(&desc, texels)` also generates its mips on the
+  graphics queue), and `uploads.submit()` precedes the
   graphics work using them, which then needs no wait: the batch borrows the frame mutably,
   so no other encoder exists until it is submitted (`uploads.rhi()` creates objects
   meanwhile).
@@ -459,8 +465,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
   marks an additive color), on the CPU for textures and in the vertex shader for vertex
   colors, so the UI composites in linear space. Presentation draws the composited image
   into the window, encoding once: in hardware on sRGB surfaces, in the shader otherwise.
-- Model textures get their mips on the CPU, averaged in linear space, until GPU mip
-  generation lands.
+- Model textures upload mip 0 and generate their other mips on the GPU
+  (`Uploads::mipmapped_image`); sRGB formats are filtered in linear space.
 
 ## Later, each as its own small PR
 
