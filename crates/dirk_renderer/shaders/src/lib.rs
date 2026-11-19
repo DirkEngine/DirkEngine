@@ -42,6 +42,7 @@ pub fn mesh_vs(
     #[spirv(position)] position: &mut Vec4,
     uv: &mut Vec2,
     normal: &mut Vec3,
+    color: &mut Vec4,
 ) {
     let vertex = push.vertices.get(vertices)[vertex_index as usize];
     let object = *push.objects.get(objects, instance_index as u32);
@@ -50,10 +51,11 @@ pub fn mesh_vs(
     *position = view_projection * model * Vec3::from_array(vertex.position).extend(1.0);
     *uv = Vec2::from_array(vertex.uv);
     *normal = Vec3::from_array(vertex.normal);
+    *color = Vec4::from_array(vertex.color);
 }
 
-/// Samples the base color texture, shaded by how much the model-space
-/// normal faces the viewer's axis.
+/// Samples the base color texture, multiplied by the vertex color and
+/// shaded by how much the model-space normal faces the viewer's axis.
 #[spirv(fragment)]
 pub fn mesh_fs(
     #[spirv(push_constant)] push: &MeshPush,
@@ -61,14 +63,15 @@ pub fn mesh_fs(
     #[spirv(descriptor_set = 0, binding = 8)] samplers: &RuntimeArray<Sampler>,
     uv: Vec2,
     normal: Vec3,
-    color: &mut Vec4,
+    color: Vec4,
+    output: &mut Vec4,
 ) {
     let diffuse = 0.35 + 0.65 * normal.z.abs();
     let base: Vec4 = push
         .texture
         .get(textures)
         .sample(*push.sampler.get(samplers), uv);
-    *color = base * vec4(diffuse, diffuse, diffuse, 1.0);
+    *output = base * color * vec4(diffuse, diffuse, diffuse, 1.0);
 }
 
 /// Places vertex `vertex_index` of `push.vertices`, given in points, and
