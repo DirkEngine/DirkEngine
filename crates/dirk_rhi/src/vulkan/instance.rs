@@ -115,6 +115,12 @@ impl Instance {
         Ok(instance)
     }
 
+    /// Whether debug utilities, which name objects for debugging tools, are
+    /// enabled.
+    pub(super) fn debug_utils(&self) -> bool {
+        self.messenger.is_some()
+    }
+
     /// Number of errors validation reported.
     pub(super) fn validation_errors(&self) -> usize {
         self.validation_errors.load(Ordering::Relaxed)

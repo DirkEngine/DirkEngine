@@ -27,6 +27,17 @@ impl Format {
     }
 }
 
+impl Format {
+    /// Every aspect the format stores.
+    pub(super) fn vk_aspects(self) -> vk::ImageAspectFlags {
+        match (self.is_depth_stencil(), self.has_stencil()) {
+            (false, _) => vk::ImageAspectFlags::COLOR,
+            (true, false) => vk::ImageAspectFlags::DEPTH,
+            (true, true) => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+        }
+    }
+}
+
 impl SampleCounts {
     /// The counts in `flags` the RHI exposes; higher counts are dropped.
     pub(super) fn from_vk(flags: vk::SampleCountFlags) -> Self {
