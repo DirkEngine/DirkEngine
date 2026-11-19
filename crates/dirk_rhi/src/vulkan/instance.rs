@@ -118,6 +118,12 @@ impl Instance {
         Ok(instance)
     }
 
+    /// Whether debug utilities, which name objects for debugging tools, are
+    /// enabled.
+    pub(super) fn debug_utils(&self) -> bool {
+        self.messenger.is_some()
+    }
+
     /// Number of errors validation reported, or `None` if it does not run.
     pub(super) fn validation_errors(&self) -> Option<usize> {
         self.validating

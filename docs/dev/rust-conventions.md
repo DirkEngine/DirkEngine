@@ -20,10 +20,9 @@ no engine crate but `dirk_shaders` and the bottom ones. Never add a dependency
 that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
-`deny.toml` bans them elsewhere: `ash` in `dirk_renderer` and `dirk_rhi`,
-`gpu-allocator` in `dirk_renderer`, `winit` in `dirk_platform`, and `egui` in
-the editor and the crates that feed it. Add a new library of that kind to its
-ban list.
+`deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
+and `dirk_rhi`, `winit` in `dirk_platform`, and `egui` in the editor and the
+crates that feed it. Add a new library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor

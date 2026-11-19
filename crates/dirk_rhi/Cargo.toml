@@ -12,12 +12,14 @@ documentation.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 # Every target uses Vulkan until the Metal backend lands; Apple targets go
 # through MoltenVK's portability subset.
 ash.workspace = true
+gpu-allocator.workspace = true
 
 # The workspace lints (../../Cargo.toml), except `unsafe_code`: the RHI calls
 # the native graphics API, and every unsafe block says why its call is sound.

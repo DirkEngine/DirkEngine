@@ -714,6 +714,8 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "bitflags 2.13.2",
+ "gpu-allocator",
+ "parking_lot",
  "thiserror 2.0.18",
  "tracing",
 ]
