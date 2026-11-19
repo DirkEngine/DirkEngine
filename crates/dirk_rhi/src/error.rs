@@ -34,6 +34,10 @@ pub enum Error {
         /// How long the wait lasted.
         timeout: Duration,
     },
+    /// The swapchain cannot present right now, such as to a minimized
+    /// window. Skip presenting and acquire again next frame.
+    #[error("the swapchain is out of date and cannot be recreated yet")]
+    SwapchainOutOfDate,
     /// A request was rejected before reaching the native API.
     #[error("invalid {object} `{label}`: {reason}")]
     Invalid {

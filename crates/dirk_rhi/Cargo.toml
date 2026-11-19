@@ -21,10 +21,16 @@ tracing.workspace = true
 # Every target uses Vulkan until the Metal backend lands; Apple targets go
 # through MoltenVK's portability subset.
 ash.workspace = true
+ash-window.workspace = true
 gpu-allocator.workspace = true
+raw-window-handle = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 dirk_rhi_test_shaders = { version = "0.1.0", path = "test-shaders" }
+raw-window-handle.workspace = true
+# The presentation example opens a window and logs validation messages.
+tracing-subscriber.workspace = true
+winit.workspace = true
 
 # The workspace lints (../../Cargo.toml), except `unsafe_code`: the RHI calls
 # the native graphics API, and every unsafe block says why its call is sound.

@@ -63,6 +63,9 @@ pub struct Frame<'r> {
     /// once the frame's work completes. Only ever added to while the frame
     /// is open, so the buffers stay where they are.
     oversized: RefCell<Vec<Arc<Buffer>>>,
+    /// Signaled when the images acquired since the last graphics submission
+    /// are, which the next one waits for.
+    acquisitions: RefCell<Vec<native::Semaphore>>,
 }
 
 /// `len` elements of `T` a frame copied into host-visible memory that only
@@ -117,6 +120,7 @@ impl Rhi {
             pools: RefCell::new(pools),
             allocated: Cell::new(0),
             oversized: RefCell::default(),
+            acquisitions: RefCell::default(),
         })
     }
 
@@ -199,7 +203,50 @@ impl Frame<'_> {
     /// is a copy queue encoder leaving an image range outside a resting
     /// access the copy queue cannot reach, without releasing it to the
     /// graphics queue; or a native error such as [`Error::DeviceLost`].
-    pub fn submit<Q: QueueKind>(&self, mut encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+    pub fn submit<Q: QueueKind>(&self, encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+        let (raw, waits) = self.take(encoder)?;
+        self.submit_commands(Q::TYPE, Some(raw), waits, &[])
+    }
+
+    /// Submits `commands` to `queue` after `waits`, signaling `rendered`
+    /// for presentation. Graphics submissions first move the images created
+    /// since the last one to rest, and wait for the images acquired since.
+    pub(crate) fn submit_commands(
+        &self,
+        queue: QueueType,
+        commands: Option<native::CommandBuffer>,
+        waits: [u64; QueueType::COUNT],
+        rendered: &[native::Semaphore],
+    ) -> Result<Completion> {
+        let (initializations, acquired) = if queue == QueueType::Graphics {
+            (self.initializations()?, self.acquisitions.take())
+        } else {
+            (None, Vec::new())
+        };
+        let presentation = native::Presentation {
+            acquired: &acquired,
+            rendered,
+        };
+        let commands = initializations.into_iter().chain(commands);
+        let value = self
+            .rhi
+            .device
+            .submit(queue, commands, waits, presentation)?;
+        Ok(self.rhi.completion(queue, value))
+    }
+
+    /// Makes the frame's next graphics submission wait for an image's
+    /// acquisition, which signals `semaphore`, if it does.
+    pub(crate) fn wait_for_acquisition(&self, semaphore: Option<native::Semaphore>) {
+        self.acquisitions.borrow_mut().extend(semaphore);
+    }
+
+    /// The commands and waits of `encoder`, checking it belongs to this
+    /// frame.
+    pub(crate) fn take<Q: QueueKind>(
+        &self,
+        mut encoder: CommandEncoder<'_, Q>,
+    ) -> Result<(native::CommandBuffer, [u64; QueueType::COUNT])> {
         encoder.end_pass();
         if !std::ptr::eq(encoder.frame, self) {
             return Err(Error::invalid(
@@ -211,16 +258,7 @@ impl Frame<'_> {
         encoder.restore()?;
         encoder.take_over_initializations();
         let CommandEncoder { raw, waits, .. } = encoder;
-        let initializations = if Q::TYPE == QueueType::Graphics {
-            self.initializations()?
-        } else {
-            None
-        };
-        let value =
-            self.rhi
-                .device
-                .submit(Q::TYPE, initializations.into_iter().chain([raw]), waits)?;
-        Ok(self.rhi.completion(Q::TYPE, value))
+        Ok((raw, waits))
     }
 
     /// Records the first transition of each image created since the last
@@ -325,13 +363,22 @@ impl Frame<'_> {
     pub fn finish(self) {}
 
     /// The slot this frame uses.
-    fn slot(&self) -> usize {
+    pub(crate) fn slot(&self) -> usize {
         Rhi::slot(self.number)
     }
 }
 
 impl Drop for Frame<'_> {
     fn drop(&mut self) {
+        // Acquisitions no submission waited for are waited for now, with the
+        // first transitions of their images, so their semaphores can be
+        // signaled again once the slot is reused.
+        if !self.acquisitions.get_mut().is_empty()
+            && let Err(error) =
+                self.submit_commands(QueueType::Graphics, None, [0; QueueType::COUNT], &[])
+        {
+            error!(%error, "failed to wait for images acquired and never used");
+        }
         let slot = self.slot();
         self.rhi.slots[slot].pools = std::mem::take(self.pools.get_mut());
     }

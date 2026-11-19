@@ -21,8 +21,9 @@ that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
 `deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
-and `dirk_rhi`, `winit` in `dirk_platform`, and `egui` in the editor and the
-crates that feed it. Add a new library of that kind to its ban list.
+and `dirk_rhi`, `winit` in `dirk_platform` (and `dirk_rhi`'s presentation
+example), and `egui` in the editor and the crates that feed it. Add a new
+library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor
