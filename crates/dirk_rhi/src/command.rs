@@ -22,8 +22,8 @@ pub struct BufferCopy {
 /// depth slices `rows_per_image` rows apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferImageCopy {
-    /// Offset of the first texel in the buffer; a multiple of four and of the
-    /// texel size.
+    /// Offset of the first texel in the buffer; a multiple of the format's
+    /// [`copy_offset_alignment`](Format::copy_offset_alignment).
     pub buffer_offset: u64,
     /// Bytes from one row to the next; a multiple of the texel size.
     pub bytes_per_row: u32,
@@ -502,6 +502,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             return invalid("no regions".to_owned());
         }
         let texel = u64::from(info.format.bytes_per_texel());
+        let alignment = info.format.copy_offset_alignment();
         for region in regions {
             if let Err(reason) = info.check_region(&region.image) {
                 return invalid(reason);
@@ -512,12 +513,11 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             if row < u64::from(extent.width) * texel
                 || !row.is_multiple_of(texel)
                 || rows < u64::from(extent.height)
-                || !region.buffer_offset.is_multiple_of(texel.max(4))
+                || !region.buffer_offset.is_multiple_of(alignment)
             {
                 return invalid(format!(
                     "{region:?} has rows shorter than the region, a row pitch that is not a \
-                     multiple of {texel} bytes or an offset that is not a multiple of {}",
-                    texel.max(4)
+                     multiple of {texel} bytes or an offset that is not a multiple of {alignment}"
                 ));
             }
             // Rows before the last one, then the last row's texels.
