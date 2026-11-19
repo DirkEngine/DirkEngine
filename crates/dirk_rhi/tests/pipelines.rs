@@ -1,4 +1,5 @@
-//! Shaders, graphics pipelines, render passes and draws.
+//! Shaders, graphics pipelines, render passes, and draws reading the
+//! bindless heap.
 
 mod support;
 
@@ -7,11 +8,12 @@ use std::time::Duration;
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ColorAttachment,
     ColorTarget, CommandEncoder, CompareOp, CullMode, DepthAttachment, DepthBias, DepthState,
-    Error, Extent3d, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, Image,
-    ImageDesc, ImageDimension, ImageUsage, IndexFormat, Indices, LoadOp, Memory, Rect,
-    RenderPassDesc, Result, Rhi, SampleCount, StoreOp, Topology,
+    Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format, FrontFace, Graphics, GraphicsPipeline,
+    GraphicsPipelineDesc, Image, ImageDesc, ImageDimension, ImageUsage, ImageView, IndexFormat,
+    Indices, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi, SampleCount, SamplerDesc,
+    Shader, StoreOp, Topology,
 };
-use dirk_rhi_test_shaders::{Fill, FillFs, FillVs};
+use dirk_rhi_test_shaders::{Fill, FillFs, FillVs, Textured, TexturedFs, TexturedVs, Vertex};
 use support::with_rhi;
 
 const SIZE: u32 = 8;
@@ -34,17 +36,17 @@ fn attachment(rhi: &Rhi, format: Format, usage: ImageUsage, samples: SampleCount
     })
 }
 
-/// A pipeline filling `color_targets` with the fill shaders.
-fn fill_pipeline(
+/// A pipeline rendering to `color_targets` with shaders `V` and `F`.
+fn graphics_pipeline<V: Shader, F: Shader, P: PushData>(
     rhi: &Rhi,
     color_targets: &[ColorTarget],
     depth: Option<DepthState>,
     samples: SampleCount,
-) -> Result<GraphicsPipeline<Fill>> {
-    let vertex = rhi.create_shader::<FillVs, Fill>()?;
-    let fragment = rhi.create_shader::<FillFs, Fill>()?;
+) -> Result<GraphicsPipeline<P>> {
+    let vertex = rhi.create_shader::<V, P>()?;
+    let fragment = rhi.create_shader::<F, P>()?;
     rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
-        label: "fill",
+        label: F::ENTRY_POINT,
         vertex: &vertex,
         fragment: Some(&fragment),
         topology: Topology::default(),
@@ -137,7 +139,7 @@ fn assert_invalid<T>(result: Result<T>, reason: &str) {
 #[test]
 fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
     with_rhi(|rhi| {
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
@@ -205,7 +207,7 @@ fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
 fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
     with_rhi(|rhi| {
         let format = Format::Depth32Float;
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             Some(DepthState {
@@ -253,7 +255,12 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
 fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
     with_rhi(|rhi| {
         let samples = SampleCount::X4;
-        let pipeline = fill_pipeline(rhi, &[ColorTarget::new(Format::Rgba8Unorm)], None, samples)?;
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            samples,
+        )?;
         let multisampled = attachment(
             rhi,
             Format::Rgba8Unorm,
@@ -356,7 +363,7 @@ fn pipelines_are_validated_at_creation() -> Result<()> {
 #[test]
 fn draws_and_passes_are_validated() -> Result<()> {
     with_rhi(|rhi| {
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba16Float)],
             None,
@@ -415,7 +422,7 @@ fn draws_and_passes_are_validated() -> Result<()> {
             depth: None,
         })?;
         assert_invalid(pass.draw(&pipeline, &fill, 0..3, 0..1), "not this pass's");
-        let rgba8 = fill_pipeline(
+        let rgba8 = graphics_pipeline::<FillVs, FillFs, Fill>(
             frame.rhi(),
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
@@ -485,4 +492,161 @@ fn desc_of(image: &Image) -> ImageDesc<'static> {
         samples: info.samples,
         rest: None,
     }
+}
+
+#[test]
+fn draws_pull_vertices_and_sample_textures_through_the_heap() -> Result<()> {
+    with_rhi(|rhi| {
+        // A 2x2 texture, red and green above blue and white.
+        let texels = [RED, GREEN, BLUE, [1.0; 4]].map(unorm);
+        let texture = rhi.create_image(&ImageDesc {
+            label: "checker",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(2, 2),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED | ImageUsage::COPY_DST,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let mut staging = rhi.create_buffer(&BufferDesc {
+            label: "texels",
+            size: 16,
+            usage: BufferUsage::COPY_SRC,
+            memory: Memory::Upload,
+        })?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { staging.write(0, texels.as_flattened())? };
+        let sampler = rhi.create_sampler(&SamplerDesc {
+            label: "nearest",
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            mipmap_filter: Filter::Nearest,
+            ..SamplerDesc::default()
+        })?;
+        // Two triangles covering the target; clip-space y points down.
+        let corner = |x: f32, y: f32| Vertex {
+            position: [x * 2.0 - 1.0, y * 2.0 - 1.0],
+            uv: [x, y],
+        };
+        let quad = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+        ]
+        .map(|(x, y)| corner(x, y));
+        let mut vertices = rhi.create_buffer(&BufferDesc {
+            label: "quad",
+            size: size_of_val(&quad) as u64,
+            usage: BufferUsage::STORAGE,
+            memory: Memory::Upload,
+        })?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { vertices.write(0, bytemuck::cast_slice(&quad))? };
+        let push = Textured {
+            vertices: vertices.index().expect("storage buffers have an index"),
+            texture: texture
+                .view()
+                .and_then(ImageView::index)
+                .expect("sampled images have an index"),
+            sampler: sampler.index(),
+        };
+        let pipeline = graphics_pipeline::<TexturedVs, TexturedFs, Textured>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+
+        let pixels = render(rhi, |encoder, target| {
+            encoder.copy_buffer_to_image(
+                &staging,
+                &texture,
+                &[BufferImageCopy::packed(
+                    Format::Rgba8Unorm,
+                    0,
+                    texture.info().mip_region(0),
+                )],
+            )?;
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "textured quad",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            pass.draw(&pipeline, &push, 0..6, 0..1)
+        })?;
+        for (index, pixel) in pixels.iter().enumerate() {
+            let (x, y) = (index % SIZE as usize, index / SIZE as usize);
+            let texel =
+                usize::from(x >= SIZE as usize / 2) + 2 * usize::from(y >= SIZE as usize / 2);
+            assert_eq!(*pixel, texels[texel], "pixel ({x}, {y})");
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn heap_slots_are_reused_once_the_gpu_is_done() -> Result<()> {
+    with_rhi(|rhi| {
+        let frame = rhi.begin_frame()?;
+        let first = frame.rhi().create_sampler(&SamplerDesc::default())?;
+        let slot = first.index();
+        // The frame's work may still read the dropped sampler's slot.
+        drop(first);
+        let second = frame.rhi().create_sampler(&SamplerDesc::default())?;
+        assert_ne!(second.index(), slot);
+        frame.finish();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            rhi.begin_frame()?.finish();
+        }
+        assert_eq!(rhi.create_sampler(&SamplerDesc::default())?.index(), slot);
+        Ok(())
+    })
+}
+
+#[test]
+fn only_shader_visible_resources_have_indices() -> Result<()> {
+    with_rhi(|rhi| {
+        let buffer = |usage| {
+            rhi.create_buffer(&BufferDesc {
+                label: "buffer",
+                size: 16,
+                usage,
+                memory: Memory::Device,
+            })
+        };
+        assert!(buffer(BufferUsage::COPY_DST)?.index::<u32>().is_none());
+        assert!(buffer(BufferUsage::STORAGE)?.index::<u32>().is_some());
+
+        let image = |dimension, array_layers, usage| {
+            rhi.create_image(&ImageDesc {
+                label: "image",
+                dimension,
+                extent: Extent3d::new_2d(4, 4),
+                format: Format::Rgba8Unorm,
+                usage,
+                mip_levels: 1,
+                array_layers,
+                samples: SampleCount::X1,
+                rest: None,
+            })
+        };
+        let indices = |image: &Image| {
+            let view = image.view().expect("these images have a view");
+            (view.index().is_some(), view.storage_index().is_some())
+        };
+        let both = ImageUsage::SAMPLED | ImageUsage::STORAGE;
+        let flat = image(ImageDimension::D2, 1, both)?;
+        assert_eq!(indices(&flat), (true, true));
+        let target = image(ImageDimension::D2, 1, ImageUsage::COLOR_ATTACHMENT)?;
+        assert_eq!(indices(&target), (false, false));
+        // Cubes are only sampled through the heap.
+        let cube = image(ImageDimension::Cube, 6, both)?;
+        assert_eq!(indices(&cube), (true, false));
+        Ok(())
+    })
 }

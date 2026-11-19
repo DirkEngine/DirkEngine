@@ -3,7 +3,13 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 
-use super::{Check, Device, device::Garbage};
+use dirk_shaders::bindless::heap;
+
+use super::{
+    Check, Device,
+    device::Garbage,
+    heap::{Descriptor, Slot},
+};
 use crate::{BufferDesc, BufferUsage, Memory, Result};
 
 /// Identifies a buffer while it is alive, to skip rebinding it.
@@ -14,6 +20,8 @@ pub(crate) struct Buffer {
     pub(super) device: Arc<Device>,
     pub(super) raw: vk::Buffer,
     allocation: Allocation,
+    /// The buffer's slot in the heap, with storage usage.
+    slot: Option<Slot>,
 }
 
 impl Buffer {
@@ -39,6 +47,7 @@ impl Buffer {
             device: device.clone(),
             raw,
             allocation: Allocation::default(),
+            slot: None,
         };
         // SAFETY: `raw` was created from this device.
         let mut requirements = unsafe { device.raw.get_buffer_memory_requirements(raw) };
@@ -57,7 +66,15 @@ impl Buffer {
         }
         .check("vkBindBufferMemory")?;
         device.name(raw, desc.label);
+        if desc.usage.contains(BufferUsage::STORAGE) {
+            buffer.slot = Some(device.add_to_heap(heap::BUFFERS, Descriptor::Buffer(raw))?);
+        }
         Ok(buffer)
+    }
+
+    /// The buffer's slot in the heap, if it has storage usage.
+    pub(crate) fn slot(&self) -> Option<u32> {
+        self.slot.map(|slot| slot.index)
     }
 
     /// Identifies the buffer while it is alive.
@@ -164,10 +181,11 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.device.bury(Garbage::Buffer(
-            self.raw,
-            std::mem::take(&mut self.allocation),
-        ));
+        self.device.bury(Garbage::Buffer {
+            raw: self.raw,
+            allocation: std::mem::take(&mut self.allocation),
+            slot: self.slot,
+        });
     }
 }
 

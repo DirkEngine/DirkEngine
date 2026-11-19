@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, anyhow, bail, ensure};
 use cargo_gpu_install::{
     install::{Install, InstalledBackend},
-    spirv_builder::{ModuleResult, SpirvMetadata},
+    spirv_builder::{Capability, ModuleResult, SpirvMetadata},
 };
 use rspirv::{
     dr::{Instruction, Module, Operand},
@@ -41,6 +41,15 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
     builder.build_script.env_shader_spv_path = Some(false);
     builder.multimodule = true;
     builder.spirv_metadata = SpirvMetadata::None;
+    // Shaders read the bindless heap's runtime arrays with non-uniform
+    // indices; `dirk_rhi` enables these features on every device.
+    builder.capabilities.extend([
+        Capability::RuntimeDescriptorArray,
+        Capability::ShaderNonUniform,
+        Capability::SampledImageArrayNonUniformIndexing,
+        Capability::StorageImageArrayNonUniformIndexing,
+        Capability::StorageBufferArrayNonUniformIndexing,
+    ]);
     let ModuleResult::MultiModule(modules) = builder
         .build()
         .with_context(|| format!("compiling the shaders in {}", shader_crate.display()))?
