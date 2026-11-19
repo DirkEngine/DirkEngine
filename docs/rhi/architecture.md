@@ -329,6 +329,18 @@ format capabilities follow Apple's feature tables, conservatively.
   straight into it (no intermediate `Vec`).
 - Copies are padded to the 4-byte rule internally; callers can upload any byte length.
 - Uses the copy queue with ownership transfer when a dedicated one exists.
+- `Uploader` owns the staging buffers; `uploader.begin(&mut frame)` opens a batch.
+  `uploads.buffer(.., access, data)` and `uploads.image(&desc, mips)` return the new
+  resource at once, buffers in the graphics access given and images in their resting
+  access, and `uploads.submit()` precedes the
+  graphics work using them, which then needs no wait: the batch borrows the frame mutably,
+  so no other encoder exists until it is submitted (`uploads.rhi()` creates objects
+  meanwhile).
+- Uploads own their images' first transition: on the copy queue, a barrier from
+  `Undefined` takes it over from the graphics queue's first submission, and the
+  ownership transfer back to graphics ends in the resting access.
+  `uploads.write_image(&image, region, texels)` writes a region of any image through the
+  graphics queue's safe copy, which moves the region from rest and back.
 
 ## Renderer
 

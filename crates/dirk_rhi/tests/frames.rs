@@ -1,7 +1,5 @@
 //! Frames, queues, completions, copies and deferred destruction.
 
-mod support;
-
 use std::time::Duration;
 
 use dirk_rhi::{
@@ -10,7 +8,7 @@ use dirk_rhi::{
     ImageBarrier, ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageUsage, Memory, PerFrame,
     QueueTransfer, QueueType, Result, Rhi, RhiCreateInfo, SampleCount, ShaderStages,
 };
-use support::with_rhi;
+use dirk_rhi_test_shaders::support::{self, with_rhi};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
