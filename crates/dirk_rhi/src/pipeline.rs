@@ -50,7 +50,9 @@ pub enum FrontFace {
     Clockwise,
 }
 
-/// How a new value compares against the stored one to pass a test.
+/// How a new value compares against the stored one to pass a test: a
+/// fragment's depth against the depth attachment's, or a comparison
+/// sampler's reference against a depth texel.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CompareOp {
     /// Never passes.
