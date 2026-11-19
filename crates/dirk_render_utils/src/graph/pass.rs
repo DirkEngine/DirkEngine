@@ -7,12 +7,12 @@ use std::{
 
 use dirk_rhi::{
     Buffer, BufferAccess, ColorAttachment, CommandEncoder, DepthAttachment, Error, Graphics, Image,
-    ImageAccess, LoadOp, RenderPass, RenderPassDesc, Result, ShaderStages,
+    ImageAccess, ImageRange, LoadOp, RenderPass, RenderPassDesc, Result, ShaderStages, Subresource,
 };
 
 use super::{
     Objects, RenderGraph,
-    resources::{Handle, Resource, Resources, Table, Use},
+    resources::{Handle, ImageSlice, Resource, Resources, Table, Use},
 };
 
 /// Marks a pass without attachments, which records into the frame's
@@ -70,6 +70,7 @@ pub(crate) struct Declared {
 /// A color attachment, by image index.
 struct Color {
     image: usize,
+    target: Target,
     load: LoadOp<[f32; 4]>,
     resolve: Option<usize>,
 }
@@ -77,7 +78,25 @@ struct Color {
 /// A depth attachment, by image index.
 struct Depth {
     image: usize,
+    target: Target,
     load: LoadOp<f32>,
+}
+
+/// The subresource an attachment renders to.
+struct Target {
+    /// The range declared.
+    range: ImageRange,
+    /// The one subresource it covers, resolved once the pass is added.
+    subresource: Subresource,
+}
+
+impl From<ImageRange> for Target {
+    fn from(range: ImageRange) -> Self {
+        Self {
+            range,
+            subresource: Subresource::default(),
+        }
+    }
 }
 
 /// A pass added to a graph.
@@ -112,14 +131,15 @@ impl<'a> RenderGraph<'a> {
 }
 
 impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
-    /// Samples `image` in `stages`.
-    pub fn sampled(self, image: Handle<Image>, stages: ShaderStages) -> Self {
+    /// Samples `image`, or a slice of it, in `stages`.
+    pub fn sampled(self, image: impl Into<ImageSlice>, stages: ShaderStages) -> Self {
         self.image(image, ImageAccess::Sampled(stages))
     }
 
-    /// Accesses `image` through `access`. Attachments are declared with
-    /// [`color`](Self::color) and [`depth`](Self::depth) instead.
-    pub fn image(mut self, image: Handle<Image>, access: ImageAccess) -> Self {
+    /// Accesses `image`, or a slice of it, through `access`. Attachments are
+    /// declared with [`color`](Self::color) and [`depth`](Self::depth)
+    /// instead.
+    pub fn image(mut self, image: impl Into<ImageSlice>, access: ImageAccess) -> Self {
         if matches!(
             access,
             ImageAccess::ColorAttachment | ImageAccess::DepthStencilAttachment
@@ -130,7 +150,7 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
             )));
             return self;
         }
-        self.use_image(image, access, !access.writes())
+        self.use_image(image.into(), access, !access.writes())
     }
 
     /// Accesses `buffer` through `access`.
@@ -142,6 +162,7 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
         let result = self.graph.buffers.declare(
             &mut self.declared.buffers,
             buffer,
+            ImageRange::ALL,
             access,
             !access.writes(),
         );
@@ -149,15 +170,16 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
         self
     }
 
-    /// Renders to `image` as a color attachment, after `load`. Colors are
-    /// in the order the pass's pipelines declare their targets. The graph
-    /// stores what the pass renders unless nothing reads it later.
+    /// Renders to `image`, or one mip of one layer of it, as a color
+    /// attachment, after `load`. Colors are in the order the pass's
+    /// pipelines declare their targets. The graph stores what the pass
+    /// renders unless nothing reads it later.
     pub fn color(
         self,
-        image: Handle<Image>,
+        image: impl Into<ImageSlice>,
         load: LoadOp<[f32; 4]>,
     ) -> PassBuilder<'g, 'a, Rendering> {
-        self.attach_color(image, load, None)
+        self.attach_color(image.into(), load, None)
     }
 
     /// Renders to the multisampled `image` as a color attachment, after
@@ -169,25 +191,25 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
         load: LoadOp<[f32; 4]>,
         resolve: Handle<Image>,
     ) -> PassBuilder<'g, 'a, Rendering> {
-        self.attach_color(image, load, Some(resolve)).use_image(
-            resolve,
-            ImageAccess::ColorAttachment,
-            false,
-        )
+        self.attach_color(image.into(), load, Some(resolve))
+            .use_image(resolve.into(), ImageAccess::ColorAttachment, false)
     }
 
-    /// Renders to `image` as the depth attachment, after `load`. The graph
-    /// stores what the pass renders unless nothing reads it later.
+    /// Renders to `image`, or one mip of one layer of it, as the depth
+    /// attachment, after `load`. The graph stores what the pass renders
+    /// unless nothing reads it later.
     pub fn depth(
         mut self,
-        image: Handle<Image>,
+        image: impl Into<ImageSlice>,
         load: LoadOp<f32>,
     ) -> PassBuilder<'g, 'a, Rendering> {
+        let image = image.into();
         if !self.declared.depth.is_empty() {
             self.fail(Err("declares more than one depth attachment".to_owned()));
         }
         self.declared.depth.push(Depth {
-            image: image.index,
+            image: image.image.index,
+            target: image.range.into(),
             load,
         });
         self.use_image(
@@ -201,12 +223,13 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
     /// Declares a color attachment.
     fn attach_color(
         mut self,
-        image: Handle<Image>,
+        image: ImageSlice,
         load: LoadOp<[f32; 4]>,
         resolve: Option<Handle<Image>>,
     ) -> PassBuilder<'g, 'a, Rendering> {
         self.declared.colors.push(Color {
-            image: image.index,
+            image: image.image.index,
+            target: image.range.into(),
             load,
             resolve: resolve.map(|resolve| resolve.index),
         });
@@ -219,11 +242,14 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
     }
 
     /// Declares an access of `image`.
-    fn use_image(mut self, image: Handle<Image>, access: ImageAccess, reads: bool) -> Self {
-        let result = self
-            .graph
-            .images
-            .declare(&mut self.declared.images, image, access, reads);
+    fn use_image(mut self, image: ImageSlice, access: ImageAccess, reads: bool) -> Self {
+        let result = self.graph.images.declare(
+            &mut self.declared.images,
+            image.image,
+            image.range,
+            access,
+            reads,
+        );
         self.fail(result);
         self
     }
@@ -261,6 +287,22 @@ impl<'g, 'a, K> PassBuilder<'g, 'a, K> {
         };
         if let Some(reason) = error {
             return Err(invalid(reason));
+        }
+        let targets = declared
+            .colors
+            .iter_mut()
+            .map(|color| (color.image, &mut color.target))
+            .chain(
+                declared
+                    .depth
+                    .iter_mut()
+                    .map(|depth| (depth.image, &mut depth.target)),
+            );
+        for (image, target) in targets {
+            target.subresource = graph
+                .images
+                .attachment(image, target.range)
+                .map_err(invalid)?;
         }
         let images = graph
             .images
@@ -406,6 +448,7 @@ impl Pass<'_> {
             .iter()
             .map(|color| ColorAttachment {
                 image: image(color.image),
+                subresource: color.target.subresource,
                 load: color.load,
                 store: images.store(color.image, index),
                 resolve: color.resolve.map(image),
@@ -413,6 +456,7 @@ impl Pass<'_> {
             .collect();
         let depth = declared.depth.first().map(|depth| DepthAttachment {
             image: image(depth.image),
+            subresource: depth.target.subresource,
             load: depth.load,
             store: images.store(depth.image, index),
         });

@@ -5,10 +5,10 @@ use std::{collections::HashMap, fmt::Debug, marker::PhantomData, ops::BitOrAssig
 
 use dirk_rhi::{
     Buffer, BufferAccess, BufferDesc, BufferInfo, BufferUsage, Error, FRAMES_IN_FLIGHT, Frame,
-    Image, ImageAccess, ImageDesc, ImageInfo, ImageUsage, Result, Rhi,
+    Image, ImageAccess, ImageDesc, ImageInfo, ImageRange, ImageUsage, Result, Rhi, Subresource,
 };
 
-use super::access::{Access, Barrier, States};
+use super::access::{Access, Barrier, States, Subresources};
 
 /// A kind of resource the graph tracks: [`Image`] or [`Buffer`].
 pub(crate) trait Resource: Sized {
@@ -136,11 +136,43 @@ impl<R> Debug for Handle<R> {
     }
 }
 
+/// Some mips and layers of an image of a
+/// [`RenderGraph`](super::RenderGraph), which passes declare instead of the
+/// whole image, such as a cube face, a shadow cascade or a mip. A
+/// [`Handle`] converts into a slice of the whole image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageSlice {
+    pub(crate) image: Handle<Image>,
+    pub(crate) range: ImageRange,
+}
+
+impl Handle<Image> {
+    /// The mips and layers of `range` of this image.
+    #[must_use]
+    pub fn slice(self, range: ImageRange) -> ImageSlice {
+        ImageSlice { image: self, range }
+    }
+
+    /// One mip of one layer of this image, which passes can render to.
+    #[must_use]
+    pub fn subresource(self, subresource: Subresource) -> ImageSlice {
+        self.slice(subresource.into())
+    }
+}
+
+impl From<Handle<Image>> for ImageSlice {
+    fn from(image: Handle<Image>) -> Self {
+        image.slice(ImageRange::ALL)
+    }
+}
+
 /// An access a pass declared.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Use<A> {
     /// Index of the resource in the graph.
     pub(crate) resource: usize,
+    /// The mips and layers accessed.
+    pub(crate) subresources: Subresources,
     pub(crate) access: A,
     /// Whether the pass reads the contents, such as an attachment it loads.
     pub(crate) reads: bool,
@@ -159,12 +191,13 @@ pub(crate) struct Resources<'a, R: Resource> {
 
 /// A resource and what the graph knows of it.
 pub(crate) struct Tracked<'a, R: Resource> {
-    label: &'a str,
+    pub(crate) label: &'a str,
     pub(crate) source: Source<'a, R>,
     /// What the declared accesses need.
     pub(crate) usage: R::Usage,
     states: States<R::Access>,
-    mips: u32,
+    /// Every mip and layer; one of each for buffers.
+    subresources: Subresources,
     /// The last pass declaring it.
     pub(crate) last_pass: Option<usize>,
 }
@@ -193,14 +226,14 @@ impl<'a, R: Resource> Resources<'a, R> {
         }
     }
 
-    /// Imports `object`, of `mips` levels, in `before` and leaves it in
+    /// Imports `object`, of `subresources`, in `before` and leaves it in
     /// `after` once the graph ends. Importing it again returns the same
     /// handle.
     pub(crate) fn import(
         &mut self,
         object: &'a R,
         label: &'a str,
-        mips: u32,
+        subresources: Subresources,
         before: R::Access,
         after: R::Access,
     ) -> Result<Handle<R>> {
@@ -231,8 +264,8 @@ impl<'a, R: Resource> Resources<'a, R> {
                 scratch: false,
             },
             usage: R::Usage::default(),
-            states: States::new(mips, before),
-            mips,
+            states: States::new(subresources.clone(), before),
+            subresources,
             last_pass: None,
         };
         tracked
@@ -245,14 +278,19 @@ impl<'a, R: Resource> Resources<'a, R> {
         Ok(self.handle(index))
     }
 
-    /// Adds a transient described by `desc`, of `mips` levels.
-    pub(crate) fn create(&mut self, desc: R::Desc<'a>, label: &'a str, mips: u32) -> Handle<R> {
+    /// Adds a transient described by `desc`, of `subresources`.
+    pub(crate) fn create(
+        &mut self,
+        desc: R::Desc<'a>,
+        label: &'a str,
+        subresources: Subresources,
+    ) -> Handle<R> {
         self.list.push(Tracked {
             label,
             source: Source::Transient(desc),
             usage: R::Usage::default(),
-            states: States::new(mips, R::Access::DISCARDED),
-            mips,
+            states: States::new(subresources.clone(), R::Access::DISCARDED),
+            subresources,
             last_pass: None,
         });
         self.handle(self.list.len() - 1)
@@ -267,12 +305,14 @@ impl<'a, R: Resource> Resources<'a, R> {
         }
     }
 
-    /// Adds a pass's `access` of `handle` to `uses`, or says why the pass
-    /// cannot declare it.
+    /// Adds a pass's `access` of `range` of `handle` to `uses`, or says why
+    /// the pass cannot declare it. Buffers are declared whole, with
+    /// [`ImageRange::ALL`].
     pub(crate) fn declare(
         &self,
         uses: &mut Vec<Use<R::Access>>,
         handle: Handle<R>,
+        range: ImageRange,
         access: R::Access,
         reads: bool,
     ) -> Result<(), String> {
@@ -290,22 +330,33 @@ impl<'a, R: Resource> Resources<'a, R> {
         tracked.check(access)?;
         uses.push(Use {
             resource: handle.index,
+            subresources: tracked.resolve(range)?,
             access,
             reads,
         });
         Ok(())
     }
 
-    /// Merges a pass's uses of the same resource, and checks each against
-    /// the resource's state before the pass.
+    /// Merges a pass's uses of the same subresources, and checks each
+    /// against the resource's state before the pass. Uses of overlapping but
+    /// different subresources conflict.
     pub(crate) fn prepare(&self, uses: Vec<Use<R::Access>>) -> Result<Vec<Use<R::Access>>, String> {
         let mut merged: Vec<Use<R::Access>> = Vec::with_capacity(uses.len());
         for usage in uses {
             let tracked = &self.list[usage.resource];
-            match merged
-                .iter_mut()
-                .find(|other| other.resource == usage.resource)
-            {
+            let overlapping = |other: &&mut Use<R::Access>| {
+                other.resource == usage.resource && other.subresources.overlaps(&usage.subresources)
+            };
+            match merged.iter_mut().find(overlapping) {
+                Some(other) if other.subresources != usage.subresources => {
+                    return Err(format!(
+                        "{} `{}` is accessed in overlapping {:?} and {:?}",
+                        R::KIND,
+                        tracked.label,
+                        other.subresources,
+                        usage.subresources
+                    ));
+                }
                 Some(other) => {
                     other.access = other.access.merge(usage.access).ok_or_else(|| {
                         format!(
@@ -323,7 +374,7 @@ impl<'a, R: Resource> Resources<'a, R> {
         }
         for usage in &merged {
             let tracked = &self.list[usage.resource];
-            for previous in tracked.states.accesses() {
+            for previous in tracked.states.accesses(&usage.subresources) {
                 if usage.reads && !previous.holds_data() {
                     return Err(format!(
                         "{} `{}` is read before anything writes it",
@@ -350,7 +401,7 @@ impl<'a, R: Resource> Resources<'a, R> {
             tracked.states.transition(
                 usage.resource,
                 pass,
-                0..tracked.mips,
+                &usage.subresources,
                 usage.access,
                 false,
                 &mut self.barriers,
@@ -368,7 +419,7 @@ impl<'a, R: Resource> Resources<'a, R> {
     pub(crate) fn finish(&mut self, end: usize) -> Result<()> {
         for (index, tracked) in self.list.iter_mut().enumerate() {
             if let Source::Imported { after, .. } = tracked.source {
-                for previous in tracked.states.accesses() {
+                for previous in tracked.states.accesses(&tracked.subresources) {
                     after
                         .check_follows(previous)
                         .map_err(|reason| Error::Invalid {
@@ -377,10 +428,14 @@ impl<'a, R: Resource> Resources<'a, R> {
                             reason: reason.to_owned(),
                         })?;
                 }
-                let mips = 0..tracked.mips;
-                tracked
-                    .states
-                    .transition(index, end, mips, after, true, &mut self.barriers);
+                tracked.states.transition(
+                    index,
+                    end,
+                    &tracked.subresources,
+                    after,
+                    true,
+                    &mut self.barriers,
+                );
             }
         }
         Ok(())
@@ -431,6 +486,35 @@ impl<'a, R: Resource> Resources<'a, R> {
 }
 
 impl<R: Resource> Tracked<'_, R> {
+    /// The mips and layers `range` covers, with remaining counts resolved,
+    /// or why it is empty or outside the resource.
+    pub(crate) fn resolve(&self, range: ImageRange) -> Result<Subresources, String> {
+        let all = &self.subresources;
+        let resolve = |base: u32, count: u32, total: u32| {
+            let count = if count == ImageRange::REMAINING {
+                total.saturating_sub(base)
+            } else {
+                count
+            };
+            base.checked_add(count)
+                .filter(|&end| count > 0 && end <= total)
+                .map(|end| base..end)
+        };
+        match (
+            resolve(range.base_mip_level, range.mip_level_count, all.mips.end),
+            resolve(range.base_layer, range.layer_count, all.layers.end),
+        ) {
+            (Some(mips), Some(layers)) => Ok(Subresources { mips, layers }),
+            _ => Err(format!(
+                "{} `{}` has no subresources in {range:?}, outside its {} mips and {} layers",
+                R::KIND,
+                self.label,
+                all.mips.end,
+                all.layers.end
+            )),
+        }
+    }
+
     /// Checks that `access` names its shader stages and, for imports, that
     /// the resource has the usage it needs.
     fn check(&self, access: R::Access) -> Result<(), String> {
