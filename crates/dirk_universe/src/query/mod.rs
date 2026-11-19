@@ -182,7 +182,8 @@ impl<'u, C: Component> Changes<'u, C> {
             .changed_since::<C>(last_run)
             .filter_map(move |entity| Some((entity, Delta::Set(universe.component::<C>(entity)?))));
         let removed = universe
-            .removed_since::<C>(last_run)
+            .removals
+            .since::<C>(last_run)
             .filter(move |&entity| !universe.components.contains(entity, TypeId::of::<C>()))
             .map(|entity| (entity, Delta::Removed));
         set.chain(removed)
