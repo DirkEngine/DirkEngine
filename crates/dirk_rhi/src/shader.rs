@@ -53,7 +53,9 @@ impl ShaderStage {
 /// only that entry point, translated by the shader build. The entry point
 /// only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
-/// bytes (zero if it reads none), and uses only features the RHI enables.
+/// bytes (zero if it reads none), runs workgroups of
+/// [`WORKGROUP_SIZE`](Self::WORKGROUP_SIZE) if it is a compute shader, and
+/// uses only features the RHI enables.
 pub unsafe trait Shader {
     /// The push data the entry point reads; `()` if it reads none.
     type Push: PushData;
@@ -64,6 +66,9 @@ pub unsafe trait Shader {
     /// Size of the push data block the entry point reads, in bytes; zero if
     /// it reads none.
     const PUSH_SIZE: usize;
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    const WORKGROUP_SIZE: [u32; 3];
     /// The module: SPIR-V, or Metal Shading Language source on Apple
     /// targets.
     const CODE: &'static [u8];
@@ -84,6 +89,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
 ///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -106,6 +112,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
 ///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -117,6 +124,7 @@ pub unsafe trait Shader {
 pub struct ShaderModule<P: PushData> {
     pub(crate) raw: native::ShaderModule,
     stage: ShaderStage,
+    workgroup_size: [u32; 3],
     entry_point: &'static str,
     push: PhantomData<fn(&P)>,
 }
@@ -158,6 +166,7 @@ impl Rhi {
         Ok(ShaderModule {
             raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::CODE)?,
             stage: S::STAGE,
+            workgroup_size: S::WORKGROUP_SIZE,
             entry_point: S::ENTRY_POINT,
             push: PhantomData,
         })
@@ -172,6 +181,7 @@ impl ShaderModule<()> {
         ShaderModule {
             raw: self.raw,
             stage: self.stage,
+            workgroup_size: self.workgroup_size,
             entry_point: self.entry_point,
             push: PhantomData,
         }
@@ -189,5 +199,12 @@ impl<P: PushData> ShaderModule<P> {
     #[must_use]
     pub fn entry_point(&self) -> &'static str {
         self.entry_point
+    }
+
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    #[must_use]
+    pub fn workgroup_size(&self) -> [u32; 3] {
+        self.workgroup_size
     }
 }

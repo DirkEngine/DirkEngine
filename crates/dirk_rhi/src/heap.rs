@@ -96,7 +96,7 @@ const BUFFERS: usize = SAMPLERS + heap::SAMPLER_CAPACITY as usize;
 const SLOTS: usize = BUFFERS + heap::BUFFER_CAPACITY as usize;
 
 /// The last frame whose work may read each heap slot, recorded whenever the
-/// RHI sees an index: in the push data of draws, and in frame
+/// RHI sees an index: in push data drawn or dispatched with, and in frame
 /// allocations. Objects are freed, and their slots emptied, once that frame
 /// completed too (see [`Graveyard`](crate::graveyard::Graveyard)), and
 /// slots are reused only then.
