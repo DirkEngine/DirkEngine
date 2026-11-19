@@ -1,8 +1,5 @@
 //! Render graphs executed under validation, read back by the host.
 
-#[path = "../../dirk_rhi/tests/support/mod.rs"]
-mod support;
-
 use std::{cell::Cell, time::Duration};
 
 use dirk_render_utils::{Handle, RenderGraph, Transients, Uploader};
@@ -14,8 +11,8 @@ use dirk_rhi::{
     Memory, Origin3d, PushData, Result, Rhi, SampleCount, Sampler, SamplerDesc, Shader,
     ShaderStages, Subresource, TextureIndex, Topology,
 };
+use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{Fill, FillFs, FillVs, Textured, TexturedFs, TexturedVs, Vertex};
-use support::with_rhi;
 
 const SIZE: u32 = 8;
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
