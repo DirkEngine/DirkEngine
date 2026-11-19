@@ -19,7 +19,10 @@ pub struct Vertex {
 
 impl VertexInput for Vertex {
     // the offset is far from u32::MAX
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Vertex field offsets are far below u32::MAX."
+    )]
     const ATTRIBUTES: &'static [vk::VertexInputAttributeDescription] = &[
         vk::VertexInputAttributeDescription {
             location: 0,
@@ -67,7 +70,10 @@ impl Drop for Frame {
 
 pub struct RendererProperties {
     pub msaa_samples: vk::SampleCountFlags,
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "Not read until samplers enable anisotropy only where the device supports it."
+    )]
     pub anisotropy: bool,
     pub surface_format: vk::SurfaceFormatKHR,
     pub queue_family_indices: physical_device::QueueFamilyIndices,

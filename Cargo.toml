@@ -146,6 +146,9 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 pedantic = "warn"
 unwrap_used = "warn"
+# Every exception names its lint with `#[expect]` and says why.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 # Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
 self_named_module_files = "warn"
 

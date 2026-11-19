@@ -1,4 +1,4 @@
-//! Points the crate at the engine's asset and configuration paths.
+//! Sets the workspace paths the engine reads with `env!`.
 
 fn main() {
     dirk_build::setup_paths();

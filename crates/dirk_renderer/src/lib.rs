@@ -417,7 +417,10 @@ impl Renderer {
     }
 
     #[cfg(feature = "editor")]
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Window extents and pixel ratios fit in egui's f32 and u32 fields."
+    )]
     fn egui_frame_input(&mut self) -> EguiFrameInput {
         let window_id = self
             .primary_window_id()
@@ -724,9 +727,11 @@ impl Renderer {
         &mut self,
         frame_index: usize,
         targets: &[PresentationTarget],
-        #[cfg_attr(feature = "editor", allow(unused_variables))] viewport_submission: Option<
-            &ViewportRenderSubmission,
-        >,
+        #[cfg_attr(
+            feature = "editor",
+            expect(unused_variables, reason = "The editor tracks viewport frames itself.")
+        )]
+        viewport_submission: Option<&ViewportRenderSubmission>,
     ) -> Result<Option<resources::command_pool::CommandBuffer>> {
         if targets.is_empty() {
             return Ok(None);
@@ -1025,10 +1030,10 @@ impl Renderer {
         };
         let max_aniso = props.limits.max_sampler_anisotropy;
 
-        // the max_lod cast loses precision, as there are only a
-        // small number of mip_levels, there should be no real
-        // precision loss.
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "There are few mip levels, so max_lod loses no precision as an f32."
+        )]
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)

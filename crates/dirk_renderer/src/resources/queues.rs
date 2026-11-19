@@ -51,7 +51,13 @@ impl Queues {
 
     /// Returns the raw Vulkan queue for integrations that record their own
     /// short-lived uploads.
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(
+            dead_code,
+            reason = "Only the editor's egui renderer records its own commands."
+        )
+    )]
     pub fn raw(&self, queue_type: QueueType) -> vk::Queue {
         match queue_type {
             QueueType::Compute => self.compute,

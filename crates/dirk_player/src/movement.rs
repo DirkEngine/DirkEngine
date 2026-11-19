@@ -64,7 +64,10 @@ impl TickingSystem for PlayerMovementSystem {
             if input.movement != glam::Vec3::ZERO {
                 let movement = transform.movement_direction(input.movement);
                 if movement != glam::Vec3::ZERO {
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "A frame's movement distance only loses precision as an f32, the transforms' precision."
+                    )]
                     let distance = (self.speed * delta_time) as f32;
                     transform.location += movement * distance;
                 }

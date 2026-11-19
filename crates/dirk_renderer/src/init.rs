@@ -1,4 +1,7 @@
-#![allow(unsafe_code)]
+#![expect(
+    unsafe_code,
+    reason = "Creating the instance and device calls Vulkan through ash."
+)]
 
 use ash::{Device, Entry, khr::surface, vk};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

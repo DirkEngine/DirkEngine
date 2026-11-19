@@ -71,7 +71,7 @@ macro_rules! impl_descriptor_set_input_for_tuple {
             where
                 Self: 'a;
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case, reason = "The macro binds each set to its type parameter's name.")]
             fn raw_sets(sets: &Self::Refs<'_>) -> Vec<vk::DescriptorSet> {
                 let ($($name,)+) = sets;
                 vec![$($name.raw()),+]

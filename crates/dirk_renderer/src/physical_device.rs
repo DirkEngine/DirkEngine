@@ -42,8 +42,10 @@ pub struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    // the queue indices never get anywhere near u32::MAX.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Queue family indices never approach u32::MAX."
+    )]
     pub fn resolve(
         info: &PhysicalDeviceInfo,
         surface_loader: &surface::Instance,

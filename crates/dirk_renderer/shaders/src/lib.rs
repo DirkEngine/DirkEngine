@@ -1,6 +1,8 @@
 #![no_std]
-// shaders often have a lot of different inputs, we can't help it
-#![allow(clippy::too_many_arguments)]
+#![expect(
+    clippy::too_many_arguments,
+    reason = "Shader entry points take one argument per input, output and binding."
+)]
 
 use spirv_std::{
     glam::{Vec2, Vec3, Vec4},

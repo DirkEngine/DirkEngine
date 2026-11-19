@@ -194,7 +194,10 @@ enum NoAttrEnum {
 
 // can't really be tested as it doesn't have any fields.
 // just an easy feature to have when in development
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "Only checks that `#[derive(Event)]` compiles for an enum with no variants, which can't be constructed."
+)]
 #[derive(Debug, Clone, Event)]
 #[event("empty enum")]
 enum EmptyEnum {}

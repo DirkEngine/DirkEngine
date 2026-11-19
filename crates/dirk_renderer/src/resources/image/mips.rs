@@ -18,9 +18,15 @@ impl Image {
         mip_levels: u32,
     ) -> Result<()> {
         // heigh & width never get anywhere near i32::MAX, so no real problem
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "Vulkan limits image dimensions far below i32::MAX."
+        )]
         let mut mip_width = width as i32;
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "Vulkan limits image dimensions far below i32::MAX."
+        )]
         let mut mip_height = height as i32;
 
         for level in 1..mip_levels {

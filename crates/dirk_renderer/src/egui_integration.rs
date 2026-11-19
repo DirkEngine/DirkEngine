@@ -60,7 +60,10 @@ impl EguiState {
         })
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Window extents fit exactly in an f32."
+    )]
     pub fn run_frame(
         &mut self,
         input: &EguiFrameInput,

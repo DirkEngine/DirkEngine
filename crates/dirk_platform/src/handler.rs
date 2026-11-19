@@ -368,7 +368,10 @@ impl ApplicationHandler for PlatformHandler {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "A component normalized to 0..1 only loses precision as an f32."
+)]
 fn normalized_component(value: f64, extent: f64) -> f32 {
     (value / extent.max(f64::EPSILON)) as f32
 }

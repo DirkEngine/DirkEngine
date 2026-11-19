@@ -117,7 +117,10 @@ pub enum ScrollUnit {
 
 /// Keyboard modifiers active during an input event.
 #[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each modifier key is held or not, independently of the others."
+)]
 pub struct Modifiers {
     /// Alt/Option.
     pub alt: bool,

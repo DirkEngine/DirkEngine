@@ -141,7 +141,10 @@ impl SceneManager {
             // TODO: proper viewport & camera system
             let proj = {
                 // `width` & `height` aren't large enough for this to matter
-                #[allow(clippy::cast_precision_loss)]
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "Viewport extents fit exactly in an f32."
+                )]
                 let aspect = settings.extent.width as f32 / settings.extent.height.max(1) as f32;
                 glam::camera::rh::proj::vulkan::perspective(
                     settings.fov_y_radians,
@@ -162,7 +165,10 @@ impl SceneManager {
         let ctx = self.graphics_pipeline.bind(cmd);
 
         // the window size never gets anywhere near 2^23
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Viewport extents fit exactly in an f32."
+        )]
         let viewport = vk::Viewport::default()
             .width(settings.extent.width as f32)
             .height(settings.extent.height as f32)

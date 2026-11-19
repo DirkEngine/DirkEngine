@@ -108,7 +108,13 @@ impl AttachmentInfo {
 
     /// Load the existing contents, then store the result (e.g. for additive
     /// blending passes after an initial clear pass).
-    #[allow(unused)]
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(
+            dead_code,
+            reason = "Only the editor's overlay pass draws over earlier contents."
+        )
+    )]
     #[must_use]
     pub fn load_store() -> Self {
         Self {
@@ -119,7 +125,10 @@ impl AttachmentInfo {
     }
 
     /// Clear depth (and stencil) to the given values, then store.
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "No pass clears depth yet; kept for the first depth pass."
+    )]
     #[must_use]
     pub fn clear_depth(depth: f32, stencil: u32) -> Self {
         Self {
@@ -240,7 +249,10 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declare `handle` as sampled/read-only in a fragment shader.
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "No pass samples an earlier pass's output in a fragment shader yet."
+    )]
     pub fn read_texture_fragment(&mut self, handle: TextureHandle) -> &mut Self {
         self.pass.reads.push(TextureUsage {
             handle,
@@ -253,7 +265,7 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declare `handle` as sampled/read-only in a compute shader.
-    #[allow(unused)]
+    #[expect(dead_code, reason = "No compute pass exists yet.")]
     pub fn read_texture_compute(&mut self, handle: TextureHandle) -> &mut Self {
         self.pass.reads.push(TextureUsage {
             handle,
@@ -266,7 +278,13 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declare `handle` as a transfer source.
-    #[cfg_attr(feature = "editor", allow(unused))]
+    #[cfg_attr(
+        all(feature = "editor", not(test)),
+        expect(
+            dead_code,
+            reason = "The editor shows the viewport in egui instead of copying it to the swapchain."
+        )
+    )]
     pub fn read_transfer_src(&mut self, handle: TextureHandle) -> &mut Self {
         self.pass.reads.push(TextureUsage {
             handle,
@@ -279,7 +297,13 @@ impl<'a> PassBuilder<'_, 'a> {
     }
 
     /// Declare `handle` as a transfer destination.
-    #[cfg_attr(feature = "editor", allow(unused))]
+    #[cfg_attr(
+        all(feature = "editor", not(test)),
+        expect(
+            dead_code,
+            reason = "The editor shows the viewport in egui instead of copying it to the swapchain."
+        )
+    )]
     pub fn write_transfer_dst(&mut self, handle: TextureHandle) -> &mut Self {
         self.pass.writes.push(TextureUsage {
             handle,
@@ -540,8 +564,10 @@ struct ImageBarrier {
 /// Compiled representation of a single pass: barriers to emit before it and
 /// the attachment metadata needed to call `vkCmdBeginRendering`.
 struct CompiledPass<'a> {
-    // TODO: should be read when building graph metadata for renderer
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "Not read until the renderer builds graph metadata from pass names."
+    )]
     name: String,
     /// Barriers to record immediately before this pass.
     pre_barriers: Vec<ImageBarrier>,
@@ -803,7 +829,10 @@ fn subresource_range_for(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRa
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The assert above checks that the index fits in a u32."
+)]
 fn texture_handle(index: usize) -> TextureHandle {
     assert!(u32::try_from(index).is_ok());
     TextureHandle(index as u32)

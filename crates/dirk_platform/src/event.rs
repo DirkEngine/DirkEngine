@@ -6,7 +6,10 @@ use winit::window::WindowId;
 /// specific events are listed here.
 /// The only exeptions are window closing and creating events.
 #[derive(Debug, Clone, Event)]
-#[allow(missing_docs)]
+#[expect(
+    missing_docs,
+    reason = "Each variant's field is the id of the window it is about."
+)]
 pub enum PlatformEvent {
     /// Window created event.
     WindowCreated { id: WindowId },
@@ -21,7 +24,10 @@ pub enum PlatformEvent {
 
 /// All window specific events.
 #[derive(Debug, Clone, Event)]
-#[allow(missing_docs)]
+#[expect(
+    missing_docs,
+    reason = "Variant fields are the window's id and its new state, named after the variant."
+)]
 pub enum WindowEvent {
     Resized {
         id: WindowId,
