@@ -48,7 +48,9 @@ pub use command::{
     BufferBarrier, BufferCopy, BufferImageCopy, CommandEncoder, ImageBarrier, ImageCopy,
 };
 pub use device::{Capabilities, Features, Limits, Rhi, RhiCreateInfo};
-pub use dirk_shaders::bindless::{BufferIndex, SamplerIndex, StorageImageIndex, TextureIndex};
+pub use dirk_shaders::bindless::{
+    BufferIndex, DepthTextureIndex, SamplerIndex, StorageImageIndex, TextureIndex,
+};
 pub use error::{Error, Result};
 pub use format::{Format, FormatCapabilities, FormatFeatures, ImageUsage, SampleCounts};
 pub use frame::{FRAMES_IN_FLIGHT, Frame, PerFrame};
