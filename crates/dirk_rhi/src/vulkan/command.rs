@@ -24,6 +24,9 @@ pub(crate) struct CommandPool {
 #[derive(Clone, Copy)]
 pub(crate) struct CommandBuffer {
     pub(crate) raw: vk::CommandBuffer,
+    /// The bound compute pipeline; null until the first dispatch, which
+    /// also binds the heap for compute work.
+    pub(super) compute: vk::Pipeline,
 }
 
 impl CommandPool {
@@ -79,7 +82,10 @@ impl CommandPool {
             .check("vkBeginCommandBuffer")?;
         self.used += 1;
         self.device.name(raw, label);
-        Ok(CommandBuffer { raw })
+        Ok(CommandBuffer {
+            raw,
+            compute: vk::Pipeline::null(),
+        })
     }
 }
 

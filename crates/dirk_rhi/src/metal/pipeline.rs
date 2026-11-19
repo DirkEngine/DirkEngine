@@ -21,7 +21,7 @@ pub(crate) type PipelineId = *const ProtocolObject<dyn MTLRenderPipelineState>;
 /// The entry point of a Metal library compiled from the shader build's MSL.
 pub(crate) struct ShaderModule {
     pub(super) device: Arc<Device>,
-    function: Object<dyn MTLFunction>,
+    pub(super) function: Object<dyn MTLFunction>,
 }
 
 impl ShaderModule {
