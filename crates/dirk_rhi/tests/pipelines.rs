@@ -1,7 +1,7 @@
 //! Shaders, graphics pipelines, render passes, and draws reading the
 //! bindless heap.
 
-mod support;
+use dirk_rhi_test_shaders::support;
 
 use std::time::Duration;
 
