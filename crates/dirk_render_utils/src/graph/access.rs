@@ -45,9 +45,6 @@ impl Access for ImageAccess {
         match (self, other) {
             (Self::Sampled(a), Self::Sampled(b)) => Some(Self::Sampled(a | b)),
             (Self::StorageRead(a), Self::StorageRead(b)) => Some(Self::StorageRead(a | b)),
-            (Self::DepthStencilRead(a), Self::DepthStencilRead(b)) => {
-                Some(Self::DepthStencilRead(a | b))
-            }
             (Self::CopySource, Self::CopySource) => Some(self),
             _ => None,
         }
@@ -67,10 +64,7 @@ impl Access for ImageAccess {
     }
 
     fn in_pass(self) -> bool {
-        !matches!(
-            self,
-            Self::Undefined | Self::Present | Self::DepthStencilRead(_)
-        )
+        !matches!(self, Self::Undefined | Self::Present)
     }
 
     fn check_follows(self, previous: Self) -> Result<(), &'static str> {
