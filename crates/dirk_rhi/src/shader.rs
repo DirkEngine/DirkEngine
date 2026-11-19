@@ -41,7 +41,8 @@ impl ShaderStage {
 
 /// A shader entry point compiled by the engine's shader build, which
 /// generates one type implementing this trait per entry point, with the
-/// stage and push data size it reflected.
+/// stage and push data size it reflected and the push data type its source
+/// reads.
 ///
 /// # Safety
 ///
@@ -49,10 +50,14 @@ impl ShaderStage {
 /// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE): SPIR-V for
 /// Vulkan 1.3, or, on Apple targets, Metal Shading Language source holding
 /// only that entry point, translated by the shader build. The entry point
-/// only binds the bindless heap, reads a push data block of exactly
-/// [`PUSH_SIZE`](Self::PUSH_SIZE) bytes (zero if it reads none), and uses
-/// only features the RHI enables.
+/// only binds the bindless heap, reads its push data block as
+/// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
+/// bytes (zero if it reads none), runs workgroups of
+/// [`WORKGROUP_SIZE`](Self::WORKGROUP_SIZE) if it is a compute shader, and
+/// uses only features the RHI enables.
 pub unsafe trait Shader {
+    /// The push data the entry point reads; `()` if it reads none.
+    type Push: PushData;
     /// Name of the entry point in the module.
     const ENTRY_POINT: &'static str;
     /// The stage the entry point runs in.
@@ -60,80 +65,125 @@ pub unsafe trait Shader {
     /// Size of the push data block the entry point reads, in bytes; zero if
     /// it reads none.
     const PUSH_SIZE: usize;
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    const WORKGROUP_SIZE: [u32; 3];
     /// The module: SPIR-V, or Metal Shading Language source on Apple
     /// targets.
     const CODE: &'static [u8];
 }
 
-/// A shader entry point ready for pipelines whose push data is `P`.
-/// Destroyed when dropped; pipelines created from it stay valid.
+/// A shader entry point ready for pipelines whose push data is `P`, the
+/// push data type of its [`Shader`]. Destroyed when dropped; pipelines
+/// created from it stay valid.
 ///
-/// Its push data block must match `P`. The check happens at compile time, so
-/// a shader reading a block of another size fails to build. Like every
-/// post-monomorphization error, `cargo check` and `cargo clippy` do not report
-/// it; `cargo build` and `cargo test` do:
+/// Pipelines take shaders of one push data type, so a shader reading
+/// another type does not compile:
 /// ```compile_fail
 /// use dirk_rhi::{Result, Rhi, Shader, ShaderModule, ShaderStage};
 /// struct Reads16Bytes;
 /// // SAFETY: never created; this only shows the check.
 /// unsafe impl Shader for Reads16Bytes {
+///     type Push = [u32; 4];
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
 ///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
 ///     let rhi = Rhi::new(&Default::default())?;
-///     let module: ShaderModule<[u32; 2]> = rhi.create_shader::<Reads16Bytes, _>()?;
+///     let module: ShaderModule<[u32; 2]> = rhi.create_shader::<Reads16Bytes>()?;
+///     Ok(())
+/// }
+/// ```
+///
+/// The push data block the shader build reflected must also fit
+/// [`Shader::Push`]. That check happens after monomorphization, so like every
+/// such error, `cargo check` and `cargo clippy` do not report it; `cargo
+/// build` and `cargo test` do:
+/// ```compile_fail
+/// use dirk_rhi::{Result, Rhi, Shader, ShaderStage};
+/// struct Reads16Bytes;
+/// // SAFETY: never created; this only shows the check.
+/// unsafe impl Shader for Reads16Bytes {
+///     type Push = [u32; 2];
+///     const ENTRY_POINT: &'static str = "main";
+///     const STAGE: ShaderStage = ShaderStage::Vertex;
+///     const PUSH_SIZE: usize = 16;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
+///     const CODE: &'static [u8] = &[];
+/// }
+/// fn main() -> Result<()> {
+///     let rhi = Rhi::new(&Default::default())?;
+///     rhi.create_shader::<Reads16Bytes>()?;
 ///     Ok(())
 /// }
 /// ```
 pub struct ShaderModule<P: PushData> {
     pub(crate) raw: native::ShaderModule,
     stage: ShaderStage,
+    workgroup_size: [u32; 3],
     entry_point: &'static str,
     push: PhantomData<fn(&P)>,
 }
 
 impl Rhi {
-    /// Creates a module for shader `S`, used with push data `P`.
+    /// Creates a module for shader `S`, used with its push data type.
     ///
-    /// Fails to build if `S` reads a push data block other than `P`, or if
-    /// `P` is larger than [`MAX_PUSH_DATA_SIZE`] or not a multiple of four
-    /// bytes; see [`ShaderModule`].
+    /// Fails to build if `S` reads a push data block of another size than
+    /// [`Shader::Push`], or if that type is larger than
+    /// [`MAX_PUSH_DATA_SIZE`] or not a multiple of four bytes; see
+    /// [`ShaderModule`].
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Invalid`] if `P` exceeds the device's push data
-    /// limit, or a native error if the module cannot be created.
-    pub fn create_shader<S: Shader, P: PushData>(&self) -> Result<ShaderModule<P>> {
+    /// Returns [`Error::Invalid`] if the push data exceeds the device's push
+    /// data limit, or a native error if the module cannot be created.
+    pub fn create_shader<S: Shader>(&self) -> Result<ShaderModule<S::Push>> {
+        let size = size_of::<S::Push>();
         const {
+            // A shader that never reads its push data has no block.
             assert!(
-                S::PUSH_SIZE == 0 || S::PUSH_SIZE == size_of::<P>(),
-                "the shader's push data block differs in size from the push data type"
+                S::PUSH_SIZE == 0 || S::PUSH_SIZE == size_of::<S::Push>(),
+                "the shader's push data block differs in size from its push data type"
             );
             assert!(
-                size_of::<P>() <= MAX_PUSH_DATA_SIZE as usize && size_of::<P>().is_multiple_of(4),
+                size_of::<S::Push>() <= MAX_PUSH_DATA_SIZE as usize
+                    && size_of::<S::Push>().is_multiple_of(4),
                 "push data is at most 128 bytes and a multiple of four bytes"
             );
         }
         let limit = self.capabilities().limits.max_push_data_size;
-        if size_of::<P>() > limit as usize {
+        if size > limit as usize {
             return Err(Error::invalid(
                 "shader",
                 S::ENTRY_POINT,
-                format!(
-                    "{} bytes of push data exceed the device limit of {limit}",
-                    size_of::<P>()
-                ),
+                format!("{size} bytes of push data exceed the device limit of {limit}"),
             ));
         }
         Ok(ShaderModule {
             raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::CODE)?,
             stage: S::STAGE,
+            workgroup_size: S::WORKGROUP_SIZE,
             entry_point: S::ENTRY_POINT,
             push: PhantomData,
         })
+    }
+}
+
+impl ShaderModule<()> {
+    /// This module, whose shader reads no push data, for pipelines whose
+    /// other shaders read `P`.
+    #[must_use]
+    pub fn with_push<P: PushData>(self) -> ShaderModule<P> {
+        ShaderModule {
+            raw: self.raw,
+            stage: self.stage,
+            workgroup_size: self.workgroup_size,
+            entry_point: self.entry_point,
+            push: PhantomData,
+        }
     }
 }
 
@@ -148,5 +198,12 @@ impl<P: PushData> ShaderModule<P> {
     #[must_use]
     pub fn entry_point(&self) -> &'static str {
         self.entry_point
+    }
+
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    #[must_use]
+    pub fn workgroup_size(&self) -> [u32; 3] {
+        self.workgroup_size
     }
 }

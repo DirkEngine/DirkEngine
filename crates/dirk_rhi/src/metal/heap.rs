@@ -11,9 +11,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLDevice, MTLOrigin, MTLPixelFormat, MTLRenderCommandEncoder, MTLRenderStages, MTLResource,
-    MTLResourceID, MTLResourceOptions, MTLResourceUsage, MTLSamplerState, MTLSize, MTLStorageMode,
-    MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    MTLComputeCommandEncoder, MTLDevice, MTLOrigin, MTLPixelFormat, MTLRenderCommandEncoder,
+    MTLRenderStages, MTLResource, MTLResourceID, MTLResourceOptions, MTLResourceUsage,
+    MTLSamplerState, MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureType,
+    MTLTextureUsage,
 };
 use parking_lot::Mutex;
 
@@ -320,18 +321,48 @@ impl Heap {
     /// Makes every resource in the heap resident for `encoder`'s pass, and
     /// declares how its shaders access them so Metal tracks their hazards.
     pub(super) fn use_resources(&self, encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
-        let slots = self.slots.lock();
-        for (resident, usage) in slots.resident.iter().zip(USAGES) {
-            // SAFETY: the resources are alive while their slots are filled,
-            // which the lock keeps them until the call returns.
+        self.declare(|resources, count, usage| {
+            // SAFETY: `declare` passes live resources.
             unsafe {
                 encoder.useResources_count_usage_stages(
-                    NonNull::from(resident.resources.as_slice()).cast(),
-                    resident.resources.len(),
+                    resources,
+                    count,
                     usage,
                     MTLRenderStages::Vertex | MTLRenderStages::Fragment,
                 );
             }
+        });
+    }
+
+    /// Makes every resource in the heap resident for `encoder`'s
+    /// dispatches, like [`Heap::use_resources`].
+    pub(super) fn use_resources_for_compute(
+        &self,
+        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    ) {
+        self.declare(|resources, count, usage| {
+            // SAFETY: `declare` passes live resources.
+            unsafe { encoder.useResources_count_usage(resources, count, usage) };
+        });
+    }
+
+    /// Passes the heap's resources to `declare`, `count` at `resources`
+    /// with each usage, while the slot lock keeps them alive.
+    fn declare(
+        &self,
+        mut declare: impl FnMut(
+            NonNull<NonNull<ProtocolObject<dyn MTLResource>>>,
+            usize,
+            MTLResourceUsage,
+        ),
+    ) {
+        let slots = self.slots.lock();
+        for (resident, usage) in slots.resident.iter().zip(USAGES) {
+            declare(
+                NonNull::from(resident.resources.as_slice()).cast(),
+                resident.resources.len(),
+                usage,
+            );
         }
     }
 }
