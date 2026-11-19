@@ -39,6 +39,7 @@ pub(super) enum Garbage {
     },
     Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
+    QueryPool(vk::QueryPool),
     /// A retired swapchain and the semaphores of its presentation.
     Swapchain(vk::SwapchainKHR, Vec<vk::Semaphore>),
     /// A surface and the window it presents to, kept alive until now.
@@ -51,7 +52,9 @@ impl Buried for Garbage {
             Self::Buffer { slot, .. } => [*slot, None],
             Self::Image { slots, .. } => *slots,
             Self::Sampler(_, slot) => [Some(*slot), None],
-            Self::Pipeline(_) | Self::Swapchain(..) | Self::Surface(..) => [None; 2],
+            Self::Pipeline(_) | Self::QueryPool(_) | Self::Swapchain(..) | Self::Surface(..) => {
+                [None; 2]
+            }
         };
         slots.into_iter().flatten()
     }
@@ -68,6 +71,10 @@ pub(crate) struct Device {
     pub(super) heap: Heap,
     /// Size non-coherent host memory is flushed and invalidated in.
     pub(super) non_coherent_atom_size: u64,
+    /// Nanoseconds per timestamp tick.
+    pub(super) timestamp_period: f32,
+    /// The bits of timestamps the graphics queue writes.
+    pub(super) timestamp_mask: u64,
     /// Locked only to allocate and free memory, which `gpu-allocator` needs
     /// exclusive access for. Dropped by `Drop` before the device.
     allocator: Mutex<ManuallyDrop<Allocator>>,
@@ -121,6 +128,8 @@ impl Device {
             .independent_blend(optional.contains(Features::INDEPENDENT_BLEND))
             .depth_bias_clamp(optional.contains(Features::DEPTH_BIAS_CLAMP));
         let mut required = RequiredFeatures::enabled();
+        // Timestamps are reset from the host.
+        required.vulkan12.host_query_reset = optional.contains(Features::TIMESTAMPS).into();
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&adapter.extensions)
@@ -176,6 +185,8 @@ impl Device {
             physical: adapter.raw,
             heap,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
+            timestamp_period: adapter.timestamp_period,
+            timestamp_mask: adapter.timestamp_mask,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
             queues,
             vk_queues,
@@ -299,6 +310,7 @@ impl Device {
                     self.raw.destroy_sampler(raw, None);
                 }
                 Garbage::Pipeline(raw) => self.raw.destroy_pipeline(raw, None),
+                Garbage::QueryPool(raw) => self.raw.destroy_query_pool(raw, None),
                 Garbage::Swapchain(raw, semaphores) => {
                     // Presentation signals no timeline, so only an idle queue
                     // proves it is done with the swapchain and semaphores.
