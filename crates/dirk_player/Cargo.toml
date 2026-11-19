@@ -20,7 +20,6 @@ dirk_input.workspace = true
 dirk_universe.workspace = true
 dirk_platform.workspace = true
 dirk_world.workspace = true
-dirk_utils.workspace = true
 
 glam.workspace = true
 
