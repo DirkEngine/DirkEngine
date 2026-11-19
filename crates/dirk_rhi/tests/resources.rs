@@ -271,7 +271,7 @@ fn images_are_validated_at_creation() -> Result<()> {
 #[test]
 fn multisampled_attachments_are_created() -> Result<()> {
     with_rhi(|rhi| {
-        // Vulkan guarantees four samples for color attachments.
+        // Vulkan and Metal guarantee four samples for color attachments.
         let image = rhi.create_image(&ImageDesc {
             samples: SampleCount::X4,
             rest: None,
