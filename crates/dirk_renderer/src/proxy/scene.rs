@@ -1,197 +1,192 @@
 use std::collections::{HashMap, HashSet};
 
-use ash::vk;
-use dirk_shaders::types::{ProxyUbo, SceneUbo};
+use dirk_rhi::{
+    Buffer, BufferDesc, BufferUsage, Capabilities, ColorTarget, CompareOp, CullMode, DepthBias,
+    DepthState, Format, Frame, FrontFace, GraphicsPipeline, GraphicsPipelineDesc, ImageUsage,
+    IndexFormat, Indices, Memory, PerFrame, RenderPass, Rhi, SampleCount, Topology,
+};
+use dirk_shaders::types::{MeshPush, ObjectData};
 use dirk_universe::{Entity, WorldId};
-use gpu_allocator::MemoryLocation;
 
 use crate::{
-    Error, MAX_FRAMES_IN_FLIGHT, Result,
-    frame_graph::{AttachmentInfo, RenderGraph, TextureDesc, TextureHandle},
+    COLOR_FORMAT, Error, Result, StorageBuffer,
     models::ModelRegistry,
-    pipeline::{MainPipelineSpec, graphics::GraphicsPipeline},
-    resources::{
-        buffer::UniformBuffer,
-        command_pool::CommandBuffer,
-        descriptors::{
-            DescriptorAllocator, DescriptorSet, DescriptorWriter,
-            sets::{ObjectSet, SceneSet},
-        },
-        device::RenderDevice,
-    },
+    shaders::{MeshFs, MeshVs},
 };
 
-pub(crate) struct SceneRenderSettings {
-    pub extent: vk::Extent2D,
-    pub format: vk::Format,
-    pub clear_color: [f32; 4],
-    pub fov_y_radians: f32,
-    pub near: f32,
-    pub far: f32,
-}
+/// Objects the per-frame object buffers hold at first.
+const INITIAL_OBJECTS: u64 = 64;
 
-/// This is the renderer proxy for the [`Universe`]. It also has
-/// most of the rendering state needed to render each scene.
+/// The renderer's proxy of the universe: its worlds, the entities in them,
+/// and what renders them.
 pub struct SceneManager {
-    device: RenderDevice,
-
-    scenes: HashMap<WorldId, Scene>,
+    /// The entities of each world.
+    scenes: HashMap<WorldId, HashSet<Entity>>,
     entities: HashMap<Entity, WorldId>,
     proxies: HashMap<Entity, SceneProxy>,
 
-    // TODO: see about centralising the different pipelines
-    graphics_pipeline: GraphicsPipeline<MainPipelineSpec>,
+    targets: SceneTargets,
+    pipeline: GraphicsPipeline<MeshPush>,
+    /// Each frame's [`ObjectData`], indexed by the proxies' `object`.
+    objects: PerFrame<Buffer>,
+}
 
-    scene_alloc: DescriptorAllocator<SceneSet>,
-    proxy_alloc: DescriptorAllocator<ObjectSet>,
+/// The attachments scenes render to besides their color image, which has
+/// [`COLOR_FORMAT`]: a depth image, and the sample count of both.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneTargets {
+    pub depth: Format,
+    /// Above one, a multisampled color image is rendered to and resolved.
+    pub samples: SampleCount,
+}
+
+/// What a viewport sees of a scene this frame.
+pub struct SceneView<'a> {
+    entities: &'a HashSet<Entity>,
+    view_projection: glam::Mat4,
 }
 
 impl SceneManager {
-    pub fn init(device: &RenderDevice) -> Result<Self> {
-        let scene_alloc = DescriptorAllocator::<SceneSet>::new(device, 16)?;
-        let proxy_alloc = DescriptorAllocator::<ObjectSet>::new(device, 256)?;
-        let graphics_pipeline = GraphicsPipeline::build(device)?;
-
+    /// Creates an empty scene manager and its mesh pipeline.
+    pub fn new(rhi: &Rhi) -> Result<Self> {
+        let targets = SceneTargets::select(rhi.capabilities())?;
+        let vertex = rhi.create_shader::<MeshVs, MeshPush>()?;
+        let fragment = rhi.create_shader::<MeshFs, MeshPush>()?;
+        let pipeline = rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: "mesh",
+            vertex: &vertex,
+            fragment: Some(&fragment),
+            topology: Topology::TriangleList,
+            cull_mode: CullMode::Back,
+            front_face: FrontFace::CounterClockwise,
+            color_targets: &[ColorTarget::new(COLOR_FORMAT)],
+            depth: Some(DepthState {
+                format: targets.depth,
+                write: true,
+                compare: CompareOp::Less,
+                bias: DepthBias::default(),
+            }),
+            samples: targets.samples,
+        })?;
+        let objects = PerFrame::try_new(rhi, |_| {
+            Self::create_objects(rhi, INITIAL_OBJECTS * size_of::<ObjectData>() as u64)
+        })?;
         Ok(Self {
-            device: device.clone(),
-            entities: HashMap::new(),
             scenes: HashMap::new(),
+            entities: HashMap::new(),
             proxies: HashMap::new(),
-            graphics_pipeline,
-            scene_alloc,
-            proxy_alloc,
+            targets,
+            pipeline,
+            objects,
         })
     }
-    pub fn render<'a>(
-        &'a self,
-        graph: &mut RenderGraph<'a>,
-        models: &'a ModelRegistry,
-        world: WorldId,
-        camera: Entity,
-        settings: SceneRenderSettings,
-        target: TextureHandle,
-    ) {
-        let depth = graph.create_texture(TextureDesc {
-            width: settings.extent.width,
-            height: settings.extent.height,
-            format: self.device.properties.depth_format,
-            usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            samples: self.device.properties.msaa_samples,
-            imported: None,
-        });
 
-        let msaa_color = (self.device.properties.msaa_samples != vk::SampleCountFlags::TYPE_1)
-            .then(|| {
-                graph.create_texture(TextureDesc {
-                    width: settings.extent.width,
-                    height: settings.extent.height,
-                    format: settings.format,
-                    usage: vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    samples: self.device.properties.msaa_samples,
-                    imported: None,
-                })
-            });
-
-        let mut pass = graph.add_pass("scene");
-        let [r, g, b, a] = settings.clear_color;
-        if let Some(msaa_color) = msaa_color {
-            pass.write_color_attachment_with_resolve(
-                msaa_color,
-                target,
-                AttachmentInfo::clear_color(r, g, b, a),
-            );
-        } else {
-            pass.write_color_attachment(target, AttachmentInfo::clear_color(r, g, b, a));
-        }
-        pass.write_depth_attachment(depth, AttachmentInfo::clear_discard_depth(1., 0));
-        pass.execute(Box::new(move |_, cmd, _| {
-            self.record_scene_draws(models, cmd, world, &settings, camera)
-        }));
+    /// The attachments scenes render to.
+    pub fn targets(&self) -> SceneTargets {
+        self.targets
     }
-    fn record_scene_draws(
+
+    /// Writes the data of every drawable object to `frame`'s object buffer,
+    /// growing it if needed, and gives each its index for this frame.
+    pub fn write_objects(&mut self, frame: &Frame<'_>) -> Result<()> {
+        let mut data = Vec::with_capacity(self.proxies.len());
+        for proxy in self.proxies.values_mut() {
+            proxy.object = match (&proxy.model, proxy.model_matrix) {
+                (Some(_), Some(model)) => {
+                    data.push(ObjectData {
+                        model: model.to_cols_array_2d(),
+                    });
+                    u32::try_from(data.len() - 1).ok()
+                }
+                _ => None,
+            };
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(&data);
+        let size = bytes.len() as u64;
+        let buffer = self.objects.get_mut(frame);
+        if size > buffer.info().size {
+            *buffer = Self::create_objects(frame.rhi(), size.next_power_of_two())?;
+        }
+        if !bytes.is_empty() {
+            self.objects.write(frame, 0, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// What `camera` sees of `world`, projected onto an image of `aspect`
+    /// width per height.
+    pub fn view(
         &self,
-        models: &ModelRegistry,
-        cmd: &CommandBuffer,
         world: WorldId,
-        settings: &SceneRenderSettings,
         camera: Entity,
-    ) -> Result<()> {
-        let frame = self.device.current_frame();
-        let scene = self
+        aspect: f32,
+        projection: Projection,
+    ) -> Result<SceneView<'_>> {
+        let entities = self
             .scenes
             .get(&world)
             .ok_or(Error::WorldDoesNotExist(world))?;
+        let view = self
+            .proxies
+            .get(&camera)
+            .and_then(|proxy| proxy.view)
+            .ok_or(Error::CameraDoesNotExist(camera))?;
+        let projection = glam::camera::rh::proj::vulkan::perspective(
+            projection.fov_y_radians,
+            aspect,
+            projection.near,
+            projection.far,
+        );
+        Ok(SceneView {
+            entities,
+            view_projection: projection * view,
+        })
+    }
 
-        let proxies = scene
-            .entities
-            .iter()
-            .filter_map(|e| self.proxies.get(e))
-            .collect::<Vec<_>>();
-
-        // CAMERA
-        {
-            let proxy = &self
-                .proxies
-                .get(&camera)
-                .ok_or(Error::CameraDoesNotExist(camera))?;
-
-            let view = proxy.view.ok_or(Error::CameraDoesNotExist(camera))?;
-
-            // TODO: proper viewport & camera system
-            let proj = {
-                // `width` & `height` aren't large enough for this to matter
-                #[allow(clippy::cast_precision_loss)]
-                let aspect = settings.extent.width as f32 / settings.extent.height.max(1) as f32;
-                glam::camera::rh::proj::vulkan::perspective(
-                    settings.fov_y_radians,
-                    aspect,
-                    settings.near,
-                    settings.far,
-                )
-            };
-
-            let scene_ubo = SceneUbo { view, proj };
-            unsafe { scene.ubo[frame].write(&scene_ubo) };
-        };
-
-        for proxy in &proxies {
-            proxy.write_ubo(frame);
-        }
-
-        let ctx = self.graphics_pipeline.bind(cmd);
-
-        // the window size never gets anywhere near 2^23
-        #[allow(clippy::cast_precision_loss)]
-        let viewport = vk::Viewport::default()
-            .width(settings.extent.width as f32)
-            .height(settings.extent.height as f32)
-            .min_depth(0.)
-            .max_depth(1.);
-        cmd.set_viewport(0, &[viewport]);
-
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D::default())
-            .extent(settings.extent);
-        cmd.set_scissor(0, &[scissor]);
-
-        for proxy in &proxies {
-            let Some(ref model) = proxy.model else {
+    /// Draws every object `view` sees with the data
+    /// [`write_objects`](Self::write_objects) wrote to `frame`'s buffer, in
+    /// a pass with [`targets`](Self::targets).
+    pub fn draw(
+        &self,
+        pass: &mut RenderPass<'_, '_>,
+        objects: &Buffer,
+        models: &ModelRegistry,
+        view: &SceneView<'_>,
+    ) -> dirk_rhi::Result<()> {
+        let objects = objects.storage()?;
+        let view_projection = view.view_projection.to_cols_array_2d();
+        for proxy in view.entities.iter().filter_map(|e| self.proxies.get(e)) {
+            let (Some(model), Some(object)) = (&proxy.model, proxy.object) else {
                 continue;
             };
-
-            match models.render_model(model, cmd, &scene.sets[frame], &proxy.sets[frame], &ctx) {
-                Ok(()) | Err(dirk_assets::Error::NotFound(_)) => (),
-                Err(err) => return Err(err.into()),
+            for primitive in models.primitives(model).unwrap_or_default() {
+                let push = MeshPush {
+                    view_projection,
+                    objects,
+                    vertices: primitive.vertices.storage()?,
+                    texture: primitive.texture,
+                    sampler: models.sampler(),
+                };
+                let indices = Indices {
+                    buffer: &primitive.indices,
+                    format: IndexFormat::U32,
+                    offset: 0,
+                    range: 0..primitive.index_count,
+                    base_vertex: 0,
+                };
+                pass.draw_indexed(&self.pipeline, &push, indices, object..object + 1)?;
             }
         }
-
         Ok(())
     }
-    pub fn create_scene(&mut self, world: WorldId) -> Result<()> {
-        let scene = Scene::build(self)?;
-        self.scenes.insert(world, scene);
-        Ok(())
+
+    /// `frame`'s object buffer.
+    pub fn objects(&self, frame: &Frame<'_>) -> &Buffer {
+        self.objects.get(frame)
+    }
+
+    pub fn create_scene(&mut self, world: WorldId) {
+        self.scenes.insert(world, HashSet::new());
     }
     pub fn destroy_scene(&mut self, world: WorldId) {
         self.scenes.remove(&world);
@@ -200,15 +195,12 @@ impl SceneManager {
         self.entities.get(&entity).copied()
     }
     pub fn create_proxy(&mut self, entity: Entity, world: WorldId) -> Result<()> {
-        let proxy = SceneProxy::build(self)?;
-        self.proxies.insert(entity, proxy);
-
-        self.entities.insert(entity, world);
         self.scenes
             .get_mut(&world)
             .ok_or(Error::WorldDoesNotExist(world))?
-            .entities
             .insert(entity);
+        self.proxies.insert(entity, SceneProxy::default());
+        self.entities.insert(entity, world);
         Ok(())
     }
     pub fn get_proxy_mut(&mut self, entity: Entity) -> Option<&mut SceneProxy> {
@@ -220,154 +212,100 @@ impl SceneManager {
             .get(&entity)
             .copied()
             .ok_or(Error::EntityDoesNotExist(entity))?;
-
         if !self.scenes.contains_key(&to) {
             return Err(Error::WorldDoesNotExist(to));
         }
-
-        let old = self
-            .scenes
+        self.scenes
             .get_mut(&world)
-            .ok_or(Error::WorldDoesNotExist(world))?;
-
-        old.entities.remove(&entity);
-
-        let new = self
-            .scenes
+            .ok_or(Error::WorldDoesNotExist(world))?
+            .remove(&entity);
+        self.scenes
             .get_mut(&to)
-            .ok_or(Error::WorldDoesNotExist(to))?;
-        new.entities.insert(entity);
-
+            .ok_or(Error::WorldDoesNotExist(to))?
+            .insert(entity);
         self.entities.insert(entity, to);
         Ok(())
     }
     pub fn destroy_proxy(&mut self, entity: Entity) -> Result<()> {
         let world = self
             .entities
-            .get(&entity)
+            .remove(&entity)
             .ok_or(Error::EntityDoesNotExist(entity))?;
-
         self.scenes
-            .get_mut(world)
-            .ok_or(Error::WorldDoesNotExist(*world))?
-            .entities
+            .get_mut(&world)
+            .ok_or(Error::WorldDoesNotExist(world))?
             .remove(&entity);
         self.proxies.remove(&entity);
-        self.entities.remove(&entity);
         Ok(())
     }
-}
 
-impl Drop for SceneManager {
-    fn drop(&mut self) {
-        // Clear collections before allocators are dropped. Scene and
-        // SceneProxy hold DescriptorSet values whose Drop impls enqueue descriptor
-        // set frees; the allocators enqueue descriptor pool destroys.
-        self.scenes.clear();
-        self.entities.clear();
-        self.proxies.clear();
-    }
-}
-
-/// Renderer representation of a [`World`].
-struct Scene {
-    entities: HashSet<Entity>,
-
-    ubo: [UniformBuffer; MAX_FRAMES_IN_FLIGHT],
-    sets: [DescriptorSet<SceneSet>; MAX_FRAMES_IN_FLIGHT],
-}
-
-impl Scene {
-    /// Builds a [Scene].
-    /// Constructs the renderer stuff like command pools, descriptor sets, ... from
-    /// the [Renderer].
-    pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .scene_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let ubo_size = size_of::<SceneUbo>() as u64;
-        let build_ubo =
-            || UniformBuffer::create(&manager.device, ubo_size, MemoryLocation::CpuToGpu);
-        let ubo = [build_ubo()?, build_ubo()?];
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), ubo_size);
-        }
-        writer.flush();
-
-        Ok(Self {
-            entities: HashSet::new(),
-            ubo,
-            sets,
+    /// Creates an object buffer of `size` bytes.
+    fn create_objects(rhi: &Rhi, size: u64) -> dirk_rhi::Result<Buffer> {
+        rhi.create_buffer(&BufferDesc {
+            label: "objects",
+            size,
+            usage: BufferUsage::STORAGE,
+            memory: Memory::Upload,
         })
     }
 }
 
-pub struct SceneProxy {
-    /// The model matrix used for rendering. Constructed from the
-    /// [`world::components::Transform`] of the entity.
-    model_matrix: Option<glam::Mat4>,
-    /// The view matrix used for rendering as camera
-    view: Option<glam::Mat4>,
-    /// The name of the model. Used to request a [`crate::model::Model`] from the
-    /// renderer at render time.
-    model: Option<dirk_assets::AssetHandle>,
+impl SceneTargets {
+    /// The most precise depth format the device renders to, and the most
+    /// samples it supports for it and [`COLOR_FORMAT`], up to eight.
+    fn select(capabilities: &Capabilities) -> Result<Self> {
+        let depth = [
+            Format::Depth32Float,
+            Format::Depth32FloatStencil8,
+            Format::Depth24UnormStencil8,
+        ]
+        .into_iter()
+        .find(|&format| {
+            capabilities
+                .format(format)
+                .usage
+                .contains(ImageUsage::DEPTH_STENCIL_ATTACHMENT)
+        })
+        .ok_or(Error::NoDepthFormat)?;
+        let supported = capabilities.format(depth).sample_counts
+            & capabilities.format(COLOR_FORMAT).sample_counts;
+        let samples = [SampleCount::X8, SampleCount::X4, SampleCount::X2]
+            .into_iter()
+            .find(|samples| supported.contains(samples.flag()))
+            .unwrap_or(SampleCount::X1);
+        Ok(Self { depth, samples })
+    }
+}
 
-    // Per frame render stuff
-    ubo: [UniformBuffer; MAX_FRAMES_IN_FLIGHT],
-    sets: [DescriptorSet<ObjectSet>; MAX_FRAMES_IN_FLIGHT],
+/// How a viewport projects what its camera sees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+    pub fov_y_radians: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// The renderer's copy of an entity's rendered components.
+#[derive(Default)]
+pub struct SceneProxy {
+    /// Transforms model space to world space, from the entity's transform.
+    model_matrix: Option<glam::Mat4>,
+    /// Transforms world space to view space, for cameras.
+    view: Option<glam::Mat4>,
+    /// The model drawn.
+    model: Option<dirk_assets::AssetHandle>,
+    /// The entity's index in this frame's object buffer, if drawn.
+    object: Option<u32>,
 }
 
 impl SceneProxy {
-    pub fn build(manager: &mut SceneManager) -> Result<Self> {
-        let size = size_of::<ProxyUbo>() as u64;
-        let build_ubo = || UniformBuffer::create(&manager.device, size, MemoryLocation::CpuToGpu);
-        let ubo = [build_ubo()?, build_ubo()?];
-
-        // Allocate scene-level sets (one per frame)
-        let sets = manager
-            .proxy_alloc
-            .allocate_array::<MAX_FRAMES_IN_FLIGHT>()?;
-
-        let mut writer = DescriptorWriter::new(&manager.device.device);
-        for (set, ubo) in sets.iter().zip(&ubo) {
-            writer = writer.uniform_buffer(set, 0, ubo.buffer(), size);
-        }
-        writer.flush();
-
-        Ok(Self {
-            model: None,
-            model_matrix: None,
-            view: None,
-            ubo,
-            sets,
-        })
-    }
     pub fn set_model(&mut self, model: Option<dirk_assets::AssetHandle>) {
         self.model = model;
     }
-    pub fn set_model_matrix(&mut self, mat: Option<glam::Mat4>) {
-        self.model_matrix = mat;
-
-        if let Some(mat) = mat {
-            let proxy_ubo = ProxyUbo { model: mat };
-            for ubo in &self.ubo {
-                unsafe { ubo.write(&proxy_ubo) };
-            }
-        }
+    pub fn set_model_matrix(&mut self, matrix: Option<glam::Mat4>) {
+        self.model_matrix = matrix;
     }
     pub fn set_view(&mut self, view: Option<glam::Mat4>) {
         self.view = view;
-    }
-    pub fn write_ubo(&self, frame: usize) {
-        let Some(model) = self.model_matrix else {
-            return;
-        };
-
-        let data = ProxyUbo { model };
-        unsafe { self.ubo[frame].write(&data) };
     }
 }

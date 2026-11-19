@@ -98,7 +98,7 @@ impl System for RendererSystem {
                 Delta::Set(world) => {
                     let world = world.id();
                     self.sender.enqueue_command(move |renderer| {
-                        renderer.scene_manager.create_scene(world)?;
+                        renderer.scene_manager.create_scene(world);
                         Ok(())
                     });
                 }

@@ -1,69 +1,99 @@
-use std::time::Instant;
+//! The editor's immediate-mode UI: egui's input, frames, and rendering on
+//! the RHI.
+//!
+//! egui's colors are sRGB-encoded with premultiplied alpha. The renderer
+//! turns them into linear, premultiplied colors (unpremultiplying before
+//! decoding, as `ecolor` does) and composites the UI in linear space, into
+//! an image the window's presentation encodes once.
 
-use ash::vk;
+use std::{collections::HashMap, ops::Range, time::Instant};
+
 use dirk_engine::editor::{EditorRenderContext, EditorServices};
 use dirk_input::{ButtonState, InputEvent};
 use dirk_platform::{CursorIcon, ImeArea, Theme, UiState, WindowId, WindowInputEvent};
+use dirk_render_utils::{Handle, RenderGraph, Uploads};
+use dirk_rhi::{
+    AddressMode, BlendState, Buffer, BufferDesc, BufferUsage, ColorTarget, CullMode, Extent3d,
+    Filter, Frame, FrontFace, GraphicsPipeline, GraphicsPipelineDesc, Image, ImageAccess,
+    ImageDesc, ImageDimension, ImageRegion, ImageUsage, IndexFormat, Indices, LoadOp, Memory,
+    Origin3d, PerFrame, Rect, Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, ShaderStages,
+    TextureIndex, Topology,
+};
+use dirk_shaders::types::{EguiPush, EguiVertex};
 use dirk_universe::Universe;
-use egui::{ClippedPrimitive, Context, TextureId, TexturesDelta, ViewportId, ViewportInfo};
-use egui_ash_renderer::{DynamicRendering, Options, RenderMode, allocator::DefaultAllocator};
-
-use crate::{
-    MAX_FRAMES_IN_FLIGHT, Result,
-    resources::{command_pool::CommandBuffer, device::RenderDevice, queues::QueueType},
+use egui::{
+    ClippedPrimitive, Color32, Context, Rgba, TextureFilter, TextureId, TextureOptions,
+    TextureWrapMode, TexturesDelta, ViewportId, ViewportInfo,
+    epaint::{ImageData, ImageDelta, Primitive, Vertex},
 };
 
+use crate::{
+    COLOR_FORMAT, Error, Result, Sampled, StorageBuffer,
+    shaders::{EguiFs, EguiVs},
+};
+
+// egui's vertices are uploaded as they are, so their layout must be the one
+// the shaders read.
+const _: () = assert!(
+    size_of::<Vertex>() == size_of::<EguiVertex>()
+        && std::mem::offset_of!(Vertex, pos) == std::mem::offset_of!(EguiVertex, position)
+        && std::mem::offset_of!(Vertex, uv) == std::mem::offset_of!(EguiVertex, uv)
+        && std::mem::offset_of!(Vertex, color) == std::mem::offset_of!(EguiVertex, color)
+);
+
+/// Bytes the per-frame vertex and index buffers hold at first.
+const INITIAL_BUFFER_SIZE: u64 = 1 << 16;
+
+/// How the UI's passes leave egui's textures between frames.
+const SAMPLED: ImageAccess = ImageAccess::Sampled(ShaderStages::FRAGMENT);
+
+/// The editor UI: egui's context, the input it is fed, and its rendering.
 pub struct EguiState {
     ctx: Context,
-    renderer: egui_ash_renderer::Renderer<DefaultAllocator>,
     start_time: Instant,
+    /// What the last frame painted, until rendered.
     pending: Option<EguiPaintData>,
-    textures_to_free: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
     input: EguiInputState,
+    renderer: EguiRenderer,
 }
 
 pub struct EguiFrameInput {
     pub window_id: WindowId,
-    pub extent: vk::Extent2D,
+    /// Size of the window in pixels.
+    pub extent: (u32, u32),
     pub native_pixels_per_point: f32,
     pub focused: bool,
     pub theme: Option<Theme>,
     pub events: Vec<WindowInputEvent>,
 }
 
-impl EguiState {
-    pub fn new(device: &RenderDevice) -> Result<Self> {
-        let surface_format = device.properties.surface_format.format;
-        let renderer = egui_ash_renderer::Renderer::with_default_allocator(
-            &device.instance,
-            device.physical_device,
-            device.device.clone(),
-            RenderMode::DynamicRendering(DynamicRendering {
-                color_attachment_format: surface_format,
-                depth_attachment_format: None,
-                stencil_attachment_format: None,
-            }),
-            Options {
-                in_flight_frames: MAX_FRAMES_IN_FLIGHT,
-                srgb_framebuffer: is_srgb_format(surface_format),
-                ..Options::default()
-            },
-        )?;
+/// What an egui frame painted.
+struct EguiPaintData {
+    textures_delta: TexturesDelta,
+    primitives: Vec<ClippedPrimitive>,
+    pixels_per_point: f32,
+    /// Size of the window it painted, in pixels.
+    extent: (u32, u32),
+}
 
+impl EguiState {
+    pub fn new(rhi: &Rhi) -> Result<Self> {
         Ok(Self {
             ctx: Context::default(),
-            renderer,
             start_time: Instant::now(),
             pending: None,
-            textures_to_free: std::array::from_fn(|_| Vec::new()),
             input: EguiInputState::default(),
+            renderer: EguiRenderer::new(rhi)?,
         })
     }
 
     /// Runs the editor UI for one frame, keeping its paint data for
-    /// [`Self::render`], and returns the cursor and input method state the UI
+    /// rendering, and returns the cursor and input method state the UI
     /// requests from its window.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "window sizes are far below 2^24"
+    )]
     pub fn run_frame(
         &mut self,
         input: &EguiFrameInput,
@@ -72,19 +102,17 @@ impl EguiState {
         universe: &Universe,
     ) -> anyhow::Result<UiState> {
         let native_pixels_per_point = input.native_pixels_per_point.max(f32::EPSILON);
+        let (width, height) = input.extent;
         let screen_rect = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(
-                input.extent.width as f32 / native_pixels_per_point,
-                input.extent.height as f32 / native_pixels_per_point,
+                width as f32 / native_pixels_per_point,
+                height as f32 / native_pixels_per_point,
             ),
         );
         let events = self.input.translate_events(
             input.window_id,
-            glam::UVec2 {
-                x: input.extent.width,
-                y: input.extent.height,
-            },
+            glam::uvec2(width, height),
             native_pixels_per_point,
             input.events.as_slice(),
         );
@@ -112,11 +140,17 @@ impl EguiState {
 
         let output = editor.render_ui(&self.ctx, raw_input, context, universe)?;
         let pixels_per_point = output.pixels_per_point;
-        let primitives = self.ctx.tessellate(output.shapes, pixels_per_point);
+        // Texture changes of a frame that was never rendered still apply.
+        let mut textures_delta = self
+            .pending
+            .take()
+            .map_or_default(|pending| pending.textures_delta);
+        textures_delta.append(output.textures_delta);
         self.pending = Some(EguiPaintData {
-            textures_delta: output.textures_delta,
-            primitives,
+            textures_delta,
+            primitives: self.ctx.tessellate(output.shapes, pixels_per_point),
             pixels_per_point,
+            extent: input.extent,
         });
 
         let platform = output.platform_output;
@@ -134,67 +168,454 @@ impl EguiState {
         })
     }
 
-    pub fn free_textures_for_frame(&mut self, frame: usize) -> Result<()> {
-        let textures = std::mem::take(&mut self.textures_to_free[frame]);
-        for texture in textures {
-            self.renderer.free_texture(texture)?;
+    /// Uploads the textures the last frame set, with `uploads`. Done every
+    /// frame, even when the UI is not shown, so no change is lost.
+    pub fn update_textures(&mut self, rhi: &Rhi, uploads: &mut Uploads<'_>) -> Result<()> {
+        match &mut self.pending {
+            Some(pending) => self
+                .renderer
+                .set_textures(rhi, uploads, &mut pending.textures_delta),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    pub fn add_user_texture(&mut self, set: vk::DescriptorSet) -> TextureId {
-        self.renderer.add_user_texture(set)
-    }
-
-    pub fn remove_user_texture(&mut self, id: TextureId) {
-        self.renderer.remove_user_texture(id);
-    }
-
-    pub fn render(
-        &mut self,
-        device: &RenderDevice,
-        cmd: &CommandBuffer,
-        extent: vk::Extent2D,
-        frame: usize,
-    ) -> Result<()> {
-        let Some(mut pending) = self.pending.take() else {
-            return Ok(());
+    /// Adds the pass drawing the last frame's UI to `graph`, onto a new
+    /// image of `extent` in linear colors, which it returns. `viewports`
+    /// are the outputs `graph` renders, which the UI may show.
+    pub fn record<'a>(
+        &'a mut self,
+        graph: &mut RenderGraph<'a>,
+        frame: &Frame<'_>,
+        extent: (u32, u32),
+        viewports: impl IntoIterator<Item = Handle<Image>>,
+    ) -> Result<Handle<Image>> {
+        let (primitives, pixels_per_point, painted) = match &mut self.pending {
+            Some(pending) => (
+                std::mem::take(&mut pending.primitives),
+                pending.pixels_per_point,
+                pending.extent,
+            ),
+            None => (Vec::new(), 1.0, extent),
         };
+        self.renderer
+            .prepare(frame, &primitives, pixels_per_point, painted, extent)?;
+        self.renderer.record(graph, frame, extent, viewports)
+    }
 
-        for (id, deltas) in pending.textures_delta.set.drain() {
-            for delta in deltas {
-                self.renderer.set_texture(
-                    device.queues.raw(QueueType::Graphics),
-                    device.graphics_pool.raw(),
-                    id,
-                    &delta,
-                )?;
+    /// Frees the textures the last frame no longer uses, once its UI is
+    /// recorded or skipped.
+    pub fn finish_frame(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.renderer.free_textures(&pending.textures_delta);
+        }
+    }
+}
+
+/// Draws egui's meshes with the bindless heap.
+pub struct EguiRenderer {
+    pipeline: GraphicsPipeline<EguiPush>,
+    textures: HashMap<TextureId, EguiTexture>,
+    /// One sampler per texture options in use.
+    samplers: HashMap<TextureOptions, Sampler>,
+    /// Each frame's vertices and indices, every mesh after the other.
+    vertices: PerFrame<Buffer>,
+    indices: PerFrame<Buffer>,
+    /// The draws [`prepare`](Self::prepare) set up for its frame.
+    draws: Vec<EguiDraw>,
+    /// Size of the screen in points, for the draws.
+    screen_size: [f32; 2],
+}
+
+/// A texture egui manages.
+struct EguiTexture {
+    image: Image,
+    sampler: SamplerIndex,
+}
+
+/// A mesh, drawn from the frame's vertex and index buffers.
+struct EguiDraw {
+    scissor: Rect,
+    texture: TextureIndex,
+    sampler: SamplerIndex,
+    indices: Range<u32>,
+    base_vertex: i32,
+}
+
+impl EguiRenderer {
+    pub fn new(rhi: &Rhi) -> Result<Self> {
+        let vertex = rhi.create_shader::<EguiVs, EguiPush>()?;
+        let fragment = rhi.create_shader::<EguiFs, EguiPush>()?;
+        let pipeline = rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: "egui",
+            vertex: &vertex,
+            fragment: Some(&fragment),
+            topology: Topology::TriangleList,
+            cull_mode: CullMode::None,
+            front_face: FrontFace::CounterClockwise,
+            color_targets: &[ColorTarget {
+                blend: Some(BlendState::PREMULTIPLIED_ALPHA),
+                ..ColorTarget::new(COLOR_FORMAT)
+            }],
+            depth: None,
+            samples: SampleCount::X1,
+        })?;
+        let buffers = |label, usage| {
+            PerFrame::try_new(rhi, |_| {
+                Self::create_buffer(rhi, label, usage, INITIAL_BUFFER_SIZE)
+            })
+        };
+        let mut renderer = Self {
+            pipeline,
+            textures: HashMap::new(),
+            samplers: HashMap::new(),
+            vertices: buffers("egui vertices", BufferUsage::STORAGE)?,
+            indices: buffers("egui indices", BufferUsage::INDEX)?,
+            draws: Vec::new(),
+            screen_size: [1.0; 2],
+        };
+        // User textures, such as viewports, use linear filtering.
+        renderer.sampler(rhi, TextureOptions::LINEAR)?;
+        Ok(renderer)
+    }
+
+    /// Applies the texture changes in `delta` with `uploads`, creating new
+    /// textures and writing updated parts into existing ones, and leaves no
+    /// changes in it.
+    pub fn set_textures(
+        &mut self,
+        rhi: &Rhi,
+        uploads: &mut Uploads<'_>,
+        delta: &mut TexturesDelta,
+    ) -> Result<()> {
+        for (id, changes) in std::mem::take(&mut delta.set) {
+            for ImageDelta {
+                image: ImageData::Color(image),
+                options,
+                pos,
+            } in changes
+            {
+                let texels = EguiTexture::texels(&image.pixels);
+                let sampler = self.sampler(rhi, options)?;
+                let Some([x, y]) = pos else {
+                    let texture = EguiTexture {
+                        image: EguiTexture::upload(uploads, image.size, &texels)?,
+                        sampler,
+                    };
+                    // The replaced image is freed once the GPU is done with it.
+                    self.textures.insert(id, texture);
+                    continue;
+                };
+                let texture = self
+                    .textures
+                    .get_mut(&id)
+                    .ok_or(Error::UnknownEguiTexture(id))?;
+                texture.sampler = sampler;
+                let [width, height] = image.size.map(EguiTexture::texel_count);
+                let region = ImageRegion {
+                    mip_level: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                    origin: Origin3d {
+                        x: EguiTexture::texel_count(x),
+                        y: EguiTexture::texel_count(y),
+                        z: 0,
+                    },
+                    extent: Extent3d::new_2d(width, height),
+                };
+                uploads.write_image(&texture.image, SAMPLED, region, &texels)?;
             }
         }
+        Ok(())
+    }
 
-        self.textures_to_free[frame].extend(pending.textures_delta.free.drain());
+    /// Drops the textures `delta` frees.
+    pub fn free_textures(&mut self, delta: &TexturesDelta) {
+        for id in &delta.free {
+            self.textures.remove(id);
+        }
+    }
 
-        self.renderer.cmd_draw(
-            **cmd,
-            extent,
-            pending.pixels_per_point,
-            pending.primitives.as_slice(),
+    /// Writes `primitives`, painted at `pixels_per_point` for a window of
+    /// `painted` pixels, to `frame`'s buffers and sets up their draws onto
+    /// a target of `extent` pixels.
+    pub fn prepare(
+        &mut self,
+        frame: &Frame<'_>,
+        primitives: &[ClippedPrimitive],
+        pixels_per_point: f32,
+        painted: (u32, u32),
+        extent: (u32, u32),
+    ) -> Result<()> {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "window sizes are far below 2^24"
+        )]
+        let screen_size = [painted.0 as f32, painted.1 as f32].map(|size| size / pixels_per_point);
+        self.screen_size = screen_size;
+        self.draws.clear();
+        let meshes = primitives
+            .iter()
+            .filter_map(|primitive| match &primitive.primitive {
+                Primitive::Mesh(mesh) => Some((primitive.clip_rect, mesh)),
+                Primitive::Callback(_) => None,
+            });
+        let vertex_bytes: usize = meshes
+            .clone()
+            .map(|(_, mesh)| size_of_val(mesh.vertices.as_slice()))
+            .sum();
+        let index_bytes: usize = meshes
+            .clone()
+            .map(|(_, mesh)| size_of_val(mesh.indices.as_slice()))
+            .sum();
+        Self::reserve(
+            frame,
+            &mut self.vertices,
+            "egui vertices",
+            BufferUsage::STORAGE,
+            vertex_bytes,
+        )?;
+        Self::reserve(
+            frame,
+            &mut self.indices,
+            "egui indices",
+            BufferUsage::INDEX,
+            index_bytes,
         )?;
 
+        let (mut vertex_offset, mut index_offset) = (0_u32, 0_u32);
+        for (clip, mesh) in meshes {
+            let vertex_count = u32::try_from(mesh.vertices.len()).unwrap_or(u32::MAX);
+            let index_count = u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX);
+            self.vertices.write(
+                frame,
+                u64::from(vertex_offset) * size_of::<Vertex>() as u64,
+                bytemuck::cast_slice(&mesh.vertices),
+            )?;
+            self.indices.write(
+                frame,
+                u64::from(index_offset) * size_of::<u32>() as u64,
+                bytemuck::cast_slice(&mesh.indices),
+            )?;
+            let texture = match mesh.texture_id {
+                TextureId::Managed(_) => self
+                    .textures
+                    .get(&mesh.texture_id)
+                    .map(|texture| {
+                        texture
+                            .image
+                            .texture()
+                            .map(|index| (index, texture.sampler))
+                    })
+                    .transpose()?,
+                // User textures are the bindless indices of views.
+                TextureId::User(slot) => u32::try_from(slot).ok().map(|slot| {
+                    (
+                        TextureIndex::new(slot),
+                        self.samplers[&TextureOptions::LINEAR].index(),
+                    )
+                }),
+            };
+            if let (Some((texture, sampler)), Some(scissor)) =
+                (texture, Self::scissor(clip, pixels_per_point, extent))
+            {
+                self.draws.push(EguiDraw {
+                    scissor,
+                    texture,
+                    sampler,
+                    indices: index_offset..index_offset + index_count,
+                    base_vertex: i32::try_from(vertex_offset).unwrap_or(i32::MAX),
+                });
+            }
+            vertex_offset += vertex_count;
+            index_offset += index_count;
+        }
         Ok(())
+    }
+
+    /// Adds the pass drawing what [`prepare`](Self::prepare) set up for
+    /// `frame` to `graph`, onto a new image of `extent` cleared to black,
+    /// which it returns. The pass samples `viewports`, outputs `graph`
+    /// renders that user textures may show.
+    pub fn record<'a>(
+        &'a self,
+        graph: &mut RenderGraph<'a>,
+        frame: &Frame<'_>,
+        (width, height): (u32, u32),
+        viewports: impl IntoIterator<Item = Handle<Image>>,
+    ) -> Result<Handle<Image>> {
+        let target = graph.create_image(&ImageDesc {
+            label: "ui",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(width, height),
+            format: COLOR_FORMAT,
+            usage: ImageUsage::empty(),
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+        });
+        let vertices = self.vertices.get(frame);
+        let indices = self.indices.get(frame);
+        viewports
+            .into_iter()
+            .fold(graph.pass("egui"), |pass, viewport| {
+                pass.sampled(viewport, ShaderStages::FRAGMENT)
+            })
+            .color(target, LoadOp::Clear([0.0, 0.0, 0.0, 1.0]))
+            .record(move |pass| {
+                let vertices = vertices.storage()?;
+                for draw in &self.draws {
+                    pass.set_scissor(draw.scissor)?;
+                    let push = EguiPush {
+                        screen_size: self.screen_size,
+                        vertices,
+                        texture: draw.texture,
+                        sampler: draw.sampler,
+                    };
+                    let indices = Indices {
+                        buffer: indices,
+                        format: IndexFormat::U32,
+                        offset: 0,
+                        range: draw.indices.clone(),
+                        base_vertex: draw.base_vertex,
+                    };
+                    pass.draw_indexed(&self.pipeline, &push, indices, 0..1)?;
+                }
+                Ok(())
+            })?;
+        Ok(target)
+    }
+
+    /// The sampler for textures with `options`, created on first use.
+    fn sampler(&mut self, rhi: &Rhi, options: TextureOptions) -> Result<SamplerIndex> {
+        if let Some(sampler) = self.samplers.get(&options) {
+            return Ok(sampler.index());
+        }
+        let filter = |filter| match filter {
+            TextureFilter::Nearest => Filter::Nearest,
+            TextureFilter::Linear => Filter::Linear,
+        };
+        let address = match options.wrap_mode {
+            TextureWrapMode::ClampToEdge => AddressMode::ClampToEdge,
+            TextureWrapMode::Repeat => AddressMode::Repeat,
+            TextureWrapMode::MirroredRepeat => AddressMode::MirrorRepeat,
+        };
+        let sampler = rhi.create_sampler(&SamplerDesc {
+            label: "egui",
+            mag_filter: filter(options.magnification),
+            min_filter: filter(options.minification),
+            mipmap_filter: filter(options.mipmap_mode.unwrap_or(TextureFilter::Nearest)),
+            address_modes: [address; 3],
+            ..SamplerDesc::default()
+        })?;
+        let index = sampler.index();
+        self.samplers.insert(options, sampler);
+        Ok(index)
+    }
+
+    /// The pixel rectangle of `clip`, in points at `pixels_per_point`,
+    /// inside a target of `extent`, or `None` if empty.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the corners are rounded and clamped to the target's size"
+    )]
+    fn scissor(
+        clip: egui::Rect,
+        pixels_per_point: f32,
+        (width, height): (u32, u32),
+    ) -> Option<Rect> {
+        let corner = |point: egui::Pos2| {
+            let x = (point.x * pixels_per_point)
+                .round()
+                .clamp(0.0, width as f32) as u32;
+            let y = (point.y * pixels_per_point)
+                .round()
+                .clamp(0.0, height as f32) as u32;
+            (x, y)
+        };
+        let (min, max) = (corner(clip.min), corner(clip.max));
+        (max.0 > min.0 && max.1 > min.1).then(|| Rect {
+            x: min.0,
+            y: min.1,
+            width: max.0 - min.0,
+            height: max.1 - min.1,
+        })
+    }
+
+    /// Makes `frame`'s buffer in `buffers` hold at least `size` bytes.
+    fn reserve(
+        frame: &Frame<'_>,
+        buffers: &mut PerFrame<Buffer>,
+        label: &str,
+        usage: BufferUsage,
+        size: usize,
+    ) -> Result<()> {
+        let size = size as u64;
+        let buffer = buffers.get_mut(frame);
+        if size > buffer.info().size {
+            *buffer = Self::create_buffer(frame.rhi(), label, usage, size.next_power_of_two())?;
+        }
+        Ok(())
+    }
+
+    /// Creates a host-written buffer of `size` bytes.
+    fn create_buffer(
+        rhi: &Rhi,
+        label: &str,
+        usage: BufferUsage,
+        size: u64,
+    ) -> dirk_rhi::Result<Buffer> {
+        rhi.create_buffer(&BufferDesc {
+            label,
+            size,
+            usage,
+            memory: Memory::Upload,
+        })
     }
 }
 
-struct EguiPaintData {
-    textures_delta: TexturesDelta,
-    primitives: Vec<ClippedPrimitive>,
-    pixels_per_point: f32,
-}
+impl EguiTexture {
+    /// Linear, premultiplied, sRGB-encoded texels of egui's `colors`.
+    fn texels(colors: &[Color32]) -> Vec<u8> {
+        colors
+            .iter()
+            .flat_map(|&color| {
+                let [r, g, b, a] = Rgba::from(color).to_array();
+                [
+                    egui::ecolor::gamma_u8_from_linear_f32(r),
+                    egui::ecolor::gamma_u8_from_linear_f32(g),
+                    egui::ecolor::gamma_u8_from_linear_f32(b),
+                    egui::ecolor::linear_u8_from_linear_f32(a),
+                ]
+            })
+            .collect()
+    }
 
-impl Drop for EguiPaintData {
-    fn drop(&mut self) {
-        // A skipped frame or rendering error can leave deltas unapplied.
-        self.textures_delta.clear();
+    /// A count or position of egui's texels as the RHI's. Ones too large
+    /// for it are rejected when uploading.
+    fn texel_count(count: usize) -> u32 {
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// Uploads `texels`, `size` texels, as a texture fragment shaders
+    /// sample.
+    fn upload(uploads: &mut Uploads<'_>, size: [usize; 2], texels: &[u8]) -> Result<Image> {
+        let [width, height] = size.map(Self::texel_count);
+        Ok(uploads.image(
+            &ImageDesc {
+                label: "egui texture",
+                dimension: ImageDimension::D2,
+                extent: Extent3d::new_2d(width, height),
+                format: COLOR_FORMAT,
+                usage: ImageUsage::SAMPLED,
+                mip_levels: 1,
+                array_layers: 1,
+                samples: SampleCount::X1,
+            },
+            SAMPLED,
+            &[texels],
+        )?)
     }
 }
 
@@ -238,13 +659,6 @@ fn platform_cursor(icon: egui::CursorIcon) -> Option<CursorIcon> {
         Ui::ZoomIn => CursorIcon::ZoomIn,
         Ui::ZoomOut => CursorIcon::ZoomOut,
     })
-}
-
-fn is_srgb_format(format: vk::Format) -> bool {
-    matches!(
-        format,
-        vk::Format::R8G8B8A8_SRGB | vk::Format::B8G8R8A8_SRGB | vk::Format::A8B8G8R8_SRGB_PACK32
-    )
 }
 
 /// Input state kept across frames so focus loss can cancel native button presses.
@@ -388,13 +802,6 @@ mod tests {
 
     fn window_id(raw: usize) -> WindowId {
         WindowId::from_raw(raw)
-    }
-
-    #[test]
-    fn detects_common_srgb_formats() {
-        assert!(is_srgb_format(vk::Format::R8G8B8A8_SRGB));
-        assert!(is_srgb_format(vk::Format::B8G8R8A8_SRGB));
-        assert!(is_srgb_format(vk::Format::A8B8G8R8_SRGB_PACK32));
     }
 
     #[test]

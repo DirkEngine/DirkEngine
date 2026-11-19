@@ -335,10 +335,27 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Renderer
 
-- Owns one `Rhi`. One graph per frame. One depth/MSAA attachment set per viewport (not per
-  frame slot). Per-object data lives in one per-slot storage buffer addressed by instance
-  index. Skip submission entirely when nothing is visible.
-- Compose UI in linear space and encode to the surface once.
+- Owns one `Rhi`. Each frame uploads new models and UI textures, then acquires an image of
+  every visible window (not occluded, not empty, presentable). When none is visible, it
+  submits nothing else.
+- The viewports some acquired window shows and every acquired window render in one graph
+  and one submission, which `Frame::submit_with` presents to every window; the passes
+  drawing windows and the UI sample the viewports' outputs.
+- One depth/MSAA attachment set per viewport (not per frame slot), imported into the graph
+  from undefined on its first frame and from its attachment access after that, so frames
+  in flight take turns with a barrier between them. They are scratch imports: their
+  contents are discarded once the output is resolved.
+- Per-object data lives in one per-slot storage buffer addressed by instance index. Meshes
+  and egui pull their vertices through `BufferIndex`es; textures and samplers are
+  `TextureIndex`es and `SamplerIndex`es in push data shared through `dirk_shaders::types`.
+- Colors are linear everywhere. The renderer's color images (viewport outputs, the UI,
+  textures) are `Rgba8Srgb`, encoded and decoded in hardware. egui's sRGB-encoded,
+  premultiplied colors are unpremultiplied, decoded and premultiplied again (alpha zero
+  marks an additive color), on the CPU for textures and in the vertex shader for vertex
+  colors, so the UI composites in linear space. Presentation draws the composited image
+  into the window, encoding once: in hardware on sRGB surfaces, in the shader otherwise.
+- Model textures get their mips on the CPU, averaged in linear space, until GPU mip
+  generation lands.
 
 ## Later, each as its own small PR
 
