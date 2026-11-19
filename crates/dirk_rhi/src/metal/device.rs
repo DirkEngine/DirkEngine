@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 
 use super::{
     ImageId, Object, allocator::Allocator, blit::Blitter, heap::Heap, heap::Slot, queue::Queue,
+    timestamp::Clock,
 };
 use crate::{
     Capabilities, Error, Features, Format, FormatCapabilities, Limits, MAX_COLOR_TARGETS, Memory,
@@ -81,6 +82,8 @@ pub(crate) struct Device {
     pub(super) scratch: Object<dyn MTLBuffer>,
     /// Scaling blits, which Metal draws.
     pub(super) blitter: Blitter,
+    /// How timestamps are sampled; `None` without support.
+    pub(super) clock: Option<Clock>,
     pub(super) health: Arc<Health>,
     /// Whether command buffers report which encoder failed.
     pub(super) validation: bool,
@@ -125,13 +128,15 @@ impl Device {
             Queue::new(&raw, QueueType::Graphics, info.application_name)?,
             Queue::new(&raw, QueueType::Copy, info.application_name)?,
         ];
+        let clock = Clock::new(&raw);
         let allocator = Allocator::new();
         Ok(Self {
-            capabilities: Self::capabilities(&raw, name),
+            capabilities: Self::capabilities(&raw, name, clock.is_some()),
             heap: Heap::new(&raw, &allocator, &queues[QueueType::Graphics as usize].raw)?,
             scratch: allocator.buffer(&raw, 4, Memory::Device)?.into(),
             allocator,
             blitter: Blitter::default(),
+            clock,
             health: Arc::default(),
             validation: info.validation,
             presentation: info.display.is_some(),
@@ -141,9 +146,10 @@ impl Device {
         })
     }
 
-    /// What `raw`, named `name`, supports. Metal has no per-format queries,
-    /// so formats follow Apple's feature tables; see `FormatCapabilities`.
-    fn capabilities(raw: &Object<dyn MTLDevice>, name: String) -> Capabilities {
+    /// What `raw`, named `name`, supports, with `timestamps` or not. Metal
+    /// has no per-format queries, so formats follow Apple's feature tables;
+    /// see `FormatCapabilities`.
+    fn capabilities(raw: &Object<dyn MTLDevice>, name: String, timestamps: bool) -> Capabilities {
         let max_buffer_size = raw.maxBufferLength() as u64;
         Capabilities {
             name,
@@ -161,7 +167,11 @@ impl Device {
                 // Shaders bound storage buffer reads with 32-bit lengths.
                 max_storage_buffer_size: max_buffer_size.min(u64::from(u32::MAX)),
             },
-            features: Features::all(),
+            features: Features::all().difference(if timestamps {
+                Features::empty()
+            } else {
+                Features::TIMESTAMPS
+            }),
             dedicated_copy_queue: true,
             formats: std::array::from_fn(|index| {
                 FormatCapabilities::metal(Format::ALL[index], raw)

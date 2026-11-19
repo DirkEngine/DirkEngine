@@ -168,5 +168,7 @@ bitflags! {
         const INDEPENDENT_BLEND = 1 << 2;
         /// Clamped depth bias.
         const DEPTH_BIAS_CLAMP = 1 << 3;
+        /// GPU timestamps, see [`Timestamps`](crate::Timestamps).
+        const TIMESTAMPS = 1 << 4;
     }
 }
