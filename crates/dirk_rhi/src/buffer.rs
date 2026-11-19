@@ -55,7 +55,7 @@ pub struct BufferInfo {
 
 /// A GPU buffer. Destroyed when dropped.
 pub struct Buffer {
-    raw: native::Buffer,
+    pub(crate) raw: native::Buffer,
     info: BufferInfo,
     label: Box<str>,
 }
