@@ -191,18 +191,6 @@ impl Swapchain {
         }))
     }
 
-    /// Submits `commands`, rendering to the acquired drawable, to the
-    /// graphics queue after the GPU reaches `waits`.
-    pub(crate) fn submit(
-        &self,
-        commands: CommandBuffer,
-        waits: [u64; QueueType::COUNT],
-        _slot: usize,
-        _index: u32,
-    ) -> Result<u64> {
-        self.device.submit(QueueType::Graphics, commands, waits)
-    }
-
     /// Releases the acquired drawable without presenting it.
     #[expect(
         clippy::unnecessary_wraps,
@@ -231,5 +219,20 @@ impl Swapchain {
         commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
         commands.commit();
         Ok(false)
+    }
+}
+
+impl Device {
+    /// Submits `commands` to the graphics queue after the GPU reaches
+    /// `waits`. They render to the drawables `images` acquired, which need
+    /// no synchronization: presenting commits after them on the same queue.
+    pub(crate) fn submit_presenting(
+        &self,
+        commands: CommandBuffer,
+        waits: [u64; QueueType::COUNT],
+        _slot: usize,
+        _images: &[(&Swapchain, u32)],
+    ) -> Result<u64> {
+        self.submit(QueueType::Graphics, commands, waits)
     }
 }
