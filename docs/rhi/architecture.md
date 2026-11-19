@@ -257,7 +257,7 @@ encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder
     (`VK_EXT_robustness2`'s `nullDescriptor`, now required) or, for samplers, a default
     sampler. Devices whose update-after-bind limits cannot hold the heap are rejected.
     Sampled descriptors use the `READ_ONLY_OPTIMAL` layout, which `ImageAccess::Sampled`
-    and `ImageAccess::DepthStencilRead` now map to; storage descriptors use `GENERAL`.
+    now maps to; storage descriptors use `GENERAL`.
   - Metal: one tier-2 argument buffer with the same arrays, laid out back to back in
     binding order, eight bytes per element (see [Metal](#metal)). Empty slots hold a
     zeroed 1x1 texture of the array's kind, the default sampler, or a buffer of zero
