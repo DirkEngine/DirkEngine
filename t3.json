@@ -3,43 +3,43 @@
   "scripts": [
     {
       "name": "Setup Worktree",
-      "command": "cargo build --workspace --locked",
+      "command": "just build",
       "icon": "configure",
       "runOnWorktreeCreate": true
     },
     {
       "name": "Run Engine",
-      "command": "cargo run",
+      "command": "just run",
       "icon": "play"
     },
     {
       "name": "Check Workspace",
-      "command": "cargo check --workspace",
+      "command": "cargo check --workspace --all-targets",
       "icon": "build"
     },
     {
       "name": "Format Workspace",
-      "command": "cargo fmt --all",
+      "command": "just fmt",
       "icon": "configure"
     },
     {
       "name": "Lint Workspace",
-      "command": "cargo clippy --workspace",
+      "command": "just lint",
       "icon": "lint"
     },
     {
       "name": "Audit Dependencies",
-      "command": "cargo deny check -D warnings",
+      "command": "just audit",
       "icon": "lint"
     },
     {
       "name": "Test Workspace",
-      "command": "cargo nextest run --workspace",
+      "command": "just test",
       "icon": "test"
     },
     {
       "name": "Validate Workspace",
-      "command": "cargo fmt --all && cargo clippy --workspace && cargo nextest run --workspace",
+      "command": "just validate",
       "icon": "test"
     }
   ]

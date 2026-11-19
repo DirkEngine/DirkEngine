@@ -7,6 +7,9 @@
 #             Linux and macOS (the platform layer differs); Linux also runs
 #             the doc tests and builds the docs with warnings denied
 #
+# Each step runs a `just` recipe, so `just validate` checks locally what CI
+# checks.
+#
 # Each job compiles once and reuses it for every step. Pull requests run only
 # when their changes can affect the result (see `changes`), and draft pull
 # requests skip macOS, the slowest runner, until they are marked ready. Pushes
@@ -80,18 +83,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - run: cargo fmt --all --check
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          tool: cargo-machete
-      # Dependencies a crate declares but never names.
-      - run: cargo machete
+          tool: just,cargo-machete,cargo-deny
+      - run: just fmt-check
+      - run: just unused
       - if: needs.changes.outputs.deny == 'true'
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
-        with:
-          tool: cargo-deny
-      - if: needs.changes.outputs.deny == 'true'
-        run: cargo deny check -D warnings
+        run: just audit
 
   # Clippy runs first so lint failures report early; the tests then reuse the
   # dependencies it compiled for build scripts and proc macros.
@@ -109,7 +107,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          tool: cargo-nextest
+          tool: just,cargo-nextest
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # dirk_renderer's build script compiles rust-gpu's codegen backend
@@ -117,19 +115,13 @@ jobs:
           # minutes; every job would otherwise repeat it.
           cache-directories: ${{ runner.os == 'macOS' && '~/Library/Caches/rust-gpu' || '~/.cache/rust-gpu' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # dirk_editor always enables the engine's editor support, so the
-      # no-default-features passes leave it out.
-      - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
-      - run: cargo clippy --workspace --exclude dirk_editor --all-targets --locked --no-default-features -- -D warnings
-      - run: cargo nextest run --workspace --locked --all-features
-      - run: cargo nextest run --workspace --exclude dirk_editor --locked --no-default-features
+      - run: just lint
+      - run: just test
+      - run: just test-minimal
       - if: runner.os == 'Linux'
-        run: cargo test --workspace --locked --doc --all-features
-      # Broken intra-doc links fail the build.
+        run: just doc-test
       - if: runner.os == 'Linux'
-        run: cargo doc --workspace --locked --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
+        run: just doc
       - name: Bundle debug build and runtime assets
         run: |
           cargo build --workspace --locked
