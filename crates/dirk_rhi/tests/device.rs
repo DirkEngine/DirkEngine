@@ -6,7 +6,7 @@ use dirk_rhi::{Error, Format, FormatFeatures, ImageUsage, Result, RhiCreateInfo,
 use support::{rhi, with_rhi};
 
 #[test]
-fn capabilities_report_what_vulkan_guarantees() -> Result<()> {
+fn capabilities_report_what_every_device_guarantees() -> Result<()> {
     with_rhi(|rhi| {
         let capabilities = rhi.capabilities();
         assert_ne!(capabilities.name, "");
