@@ -110,10 +110,12 @@ def lex_rust(src):
     return code, doc, com, braces
 
 
-def inline_tests(src, braces):
+def inline_tests(src, code, braces):
     """(first, last) line numbers of each #[cfg(test)] item in a file that isn't all test code."""
     blocks, offsets = [], [b[0] for b in braces]
     for m in re.finditer(r"#\[cfg\(test\)\]", src):
+        if not code[src.count("\n", 0, m.start())]:
+            continue  # In a comment, such as a doc example.
         semi = src.find(";", m.end())
         k = bisect.bisect_left(offsets, m.end())
         if k >= len(braces) or (semi >= 0 and semi < braces[k][0]):
@@ -171,7 +173,7 @@ for p in files:
         lines = src.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
-        blocks = [] if p in whole_tests else inline_tests(src, braces)
+        blocks = [] if p in whole_tests else inline_tests(src, code, braces)
         tl = set(range(len(lines))) if p in whole_tests else {l for a, b in blocks for l in range(a, b + 1)}
         for ln in range(len(lines)):
             t = ln in tl
@@ -225,7 +227,8 @@ def hist_cat(p):
 
 # Growth by category, one point per first-parent commit. Inline test modules
 # count as source here, so "test" is lower than in the summary.
-history, cur, running = [], None, defaultdict(int)
+history, cur = [], None
+running = dict.fromkeys(("source", "test", "docs", "generated", "lockfile", "asset"), 0)
 for l in git("log", "--reverse", "--first-parent", "--no-renames", "--numstat",
              "--format=@@%h %aI %s", "HEAD").split("\n"):
     if l.startswith("@@"):
@@ -260,7 +263,7 @@ doc, com = sum(r["doc"] for r in rust), sum(r["comment"] for r in rust)
 print(f"\nRust: {src:,} source, {tst:,} test ({tst / (src + tst):.0%}), "
       f"{doc:,} doc comment and {com:,} plain comment lines outside tests")
 
-print("\nBy area (source / test / test share):")
+print("\nBy crate (source / test / test share):")
 areas = defaultdict(lambda: [0, 0])
 for r in hand:
     if r["lang"] not in ("Markdown", "Other"):

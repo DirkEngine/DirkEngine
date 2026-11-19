@@ -54,22 +54,21 @@ cleanup pass starts or go into the area agents' tasks.
 ### Split
 
 Start from this split and adjust it to the code. Split an area over about
-10,000 lines of source and test code (`stats.py` by area) along a module
+10,000 lines of source and test code (`stats.py` by crate) along a module
 boundary, and merge small areas. Every file has exactly one owner.
 
 | Area | Paths |
 | --- | --- |
-| Renderer | `crates/dirk_renderer` (with its `shaders`), `crates/dirk_shaders` |
+| Renderer | the rendering crates, today `crates/dirk_renderer` (with its `shaders`) and `crates/dirk_shaders` |
 | Core | `crates/dirk_engine`, `crates/dirk_universe`, `crates/dirk_events`, `crates/dirk_threads`, `crates/dirk_utils`, `crates/dirk_proc`, `crates/dirk_build` |
-| Features and tooling | the other crates, `src`, `build.rs`, the dot-directories and root files |
+| Features and tooling | the other crates, `src`, `build.rs`, `.cargo`, `.config`, `.github` and the root files |
 
 Nobody edits `assets` or `.agents`. `docs/`, every README and the `AGENTS.md`
 files belong to the docs lane. Each area agent opens several focused PRs, on
 branches named `refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
 
 Open PRs hold their files too: list them all with
-`gh pr list --limit 200 --json number,title,files`. Ask the owner before
-cleaning code that an open PR rewrites.
+`gh pr list --limit 200 --json number,title,files`.
 
 Builds run in parallel on a machine with no swap. Pick one
 `CARGO_BUILD_JOBS` value for every agent that compiles, such as 4, and pass
@@ -79,8 +78,8 @@ it to each. Every worktree builds the whole workspace, shaders included: run
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
 `refactor: cleanup pass, November 2026`. Each PR says `Part of #<n>`. Tell
-the owner the split in one message, with the open PRs that overlap each area.
-Start the areas they leave free without waiting, and wait for the owner on
+the owner the split in one message, with the files open PRs hold in each area.
+Start an area no open PR touches without waiting, and wait for the owner on
 the rest.
 
 ### Start the agents
@@ -89,11 +88,12 @@ Call `orchestrator_capabilities` once. For each area, start a `delegate_task`
 on Claude Opus 5.5 with `isolation: "worktree"` and `role: "implementation"`.
 The task says to follow `.agents/skills/dirk-cleanup/references/agent-brief.md`.
 It names the area, paths, crates, branch prefix, issue, what the other areas
-own, and `CARGO_BUILD_JOBS`.
+own, the files open PRs hold, and `CARGO_BUILD_JOBS`.
 
-Start a docs lane the same way, with the docs lane's files as its area, on
-`docs/cleanup-pass-<YYYY-MM-DD>`. It fixes drift between the docs and the
-code, and reports stale doc comments: send each to the agent that owns it.
+Start a docs lane the same way, with the docs lane's files as its area and
+`docs/cleanup-<YYYY-MM-DD>-` as its branch prefix. It fixes drift between the
+docs and the code, and reports stale doc comments: send each to the agent that
+owns it.
 
 ### Review
 
@@ -114,8 +114,8 @@ test that could have changed behavior, and every moved `unsafe` block.
 - If Sol is over its limit, review with Opus instead and say so.
 
 When a PR's review is clean and it is rebased, mark it ready, which also runs
-CI on macOS. Follow its CI with `babysit-pr`, and update its `[!NOTE]` line to
-name who reviewed it. The owner merges.
+CI on macOS. Follow its CI with `babysit-pr`, sending fixes to its agent, and
+update its `[!NOTE]` line to name who reviewed it. The owner merges.
 
 When something lands on `main`, have each agent rebase and apply its cleanup
 to the new code, and start the boundary themes and fixes whose files are now
@@ -148,8 +148,7 @@ like the others.
 
 ### Bugs
 
-Every bug an agent or reviewer reports, except a vulnerability, gets an issue
-and a fix PR:
+Every bug an agent or reviewer reports gets an issue and a fix PR:
 
 1. Check it against current `main`, with a Sol delegate when there are many.
    Merge duplicate reports, and ask the owner about anything that might be
@@ -161,14 +160,14 @@ and a fix PR:
    is assigned or has a linked PR, note it in the ledger and start no fix.
 3. Once its files are free, start an Opus implementation delegate in a worktree,
    on `fix/<topic>` from a freshly fetched `origin/main`, with the issue and
-   `CARGO_BUILD_JOBS`. It writes a test that fails without the fix, makes the
-   smallest fix, runs the agent brief's checks, and opens a draft PR with
-   `file-pr` that says `Fixes #<n>`.
+   `CARGO_BUILD_JOBS`. It writes a test, or names the check, that fails
+   without the fix, makes the smallest fix, runs the agent brief's checks, and
+   opens a draft PR with `file-pr` that says `Fixes #<n>`.
 4. Review and ship it as in Review, but without the review brief, which treats
    any behavior change as a finding. The reviewer's task says to work at the
    head SHA without pushing or commenting, revert the fix locally to check the
-   test then fails, and check the fix is correct and minimal and nothing else
-   changed. It reports findings with severity and `file:line`.
+   test or check then fails, and check the fix is correct and minimal and
+   nothing else changed. It reports findings with severity and `file:line`.
 
 Run at most 3 fixes at a time.
 

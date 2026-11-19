@@ -2,7 +2,7 @@
 
 You own one area of DirkEngine in a parallel cleanup pass. Your task names the
 area, paths, crates, branch prefix, issue and `CARGO_BUILD_JOBS`, and lists
-what the other agents own.
+what the other agents and open PRs hold. Leave those files alone.
 
 Read every file in your area, and `docs/dev/rust-conventions.md`. Make real
 simplifications, not cosmetic churn, and bring the code you touch in line
@@ -45,9 +45,9 @@ run `just validate`, then what it and CI don't check:
   or a window, say in the PR that it needs a `just run`.
 
 Prove each "unchanged" claim against the PR's base, such as `--help` output
-or the rustdoc of a public item. Before you call a failing test unrelated,
-check that it fails on `main` too, and never change a test just to make it
-pass.
+or the rustdoc of a public item. Before you call a failing test or check
+unrelated, check that it fails on `main` too, and never change a test just to
+make it pass.
 
 ## Delivery
 
@@ -66,8 +66,8 @@ pass.
   `main`.
 - Open each PR as a **draft** with `file-pr`, despite its default, titled
   `refactor(<scope>): <what got simpler>`. The scope is the crate's name
-  without `dirk_`, or `dirkengine` for `src`. Tooling PRs are `ci:` or
-  `chore:`, and docs PRs `docs:`. The description fills in
+  without `dirk_`, or `dirkengine` for `src`. Tooling PRs are `ci:`,
+  `build:` or `chore:`, and docs PRs `docs:`. The description fills in
   `.github/pull_request_template.md` and says:
   - `Part of #<n>`
   - what was hard to read and how you fixed it
