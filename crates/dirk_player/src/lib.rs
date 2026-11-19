@@ -311,17 +311,7 @@ impl PlayerRegistry {
     /// which would indicate internal registry corruption.
     #[must_use]
     pub fn get_player(&self, id: PlayerId) -> Option<MappedRwLockReadGuard<'_, PlayerHandle>> {
-        let state = self.state.read();
-        if !state.players.contains_key(&id) {
-            return None;
-        }
-
-        Some(RwLockReadGuard::map(state, |state| {
-            state
-                .players
-                .get(&id)
-                .expect("player was checked before mapping guard")
-        }))
+        RwLockReadGuard::try_map(self.state.read(), |state| state.players.get(&id)).ok()
     }
 
     /// Returns a mutable guard for the player with `id`, or `None`.
@@ -332,17 +322,10 @@ impl PlayerRegistry {
     /// which would indicate internal registry corruption.
     #[must_use]
     pub fn get_player_mut(&self, id: PlayerId) -> Option<MappedRwLockWriteGuard<'_, PlayerHandle>> {
-        let state = self.state.write();
-        if !state.players.contains_key(&id) {
-            return None;
-        }
-
-        Some(parking_lot::RwLockWriteGuard::map(state, |state| {
-            state
-                .players
-                .get_mut(&id)
-                .expect("player was checked before mapping guard")
-        }))
+        parking_lot::RwLockWriteGuard::try_map(self.state.write(), |state| {
+            state.players.get_mut(&id)
+        })
+        .ok()
     }
 
     /// Returns the IDs of all live players.

@@ -100,6 +100,9 @@ pub enum Error {
     /// The requested window does not exist
     #[error("window {0:?} is not registered on renderer")]
     WindowDoesNotExist(dirk_platform::WindowId),
+    /// A glTF texture uses a pixel format the renderer can't upload.
+    #[error("unsupported glTF image format: {0:?}")]
+    UnsupportedImageFormat(gltf::image::Format),
 }
 
 impl From<HandleError> for Error {

@@ -33,12 +33,6 @@
 //!
 //! Registry tests use their own temporary asset roots and always run in CI.
 
-#![expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "Tests fail by panicking."
-)]
-
 // ── bring the entire crate into scope ────────────────────────────────────────
 use super::{
     // public
@@ -84,14 +78,16 @@ fn minimal_gltf_json() -> &'static str {
 /// Returns the path of the `.dirkasset` file.
 fn write_model_fixture(dir: &Path, name: &str) -> PathBuf {
     let gltf_name = format!("{name}.gltf");
-    fs::write(dir.join(&gltf_name), minimal_gltf_json()).unwrap();
+    fs::write(dir.join(&gltf_name), minimal_gltf_json())
+        .expect("the temporary asset file should be writable");
 
     let descriptor = serde_json::json!({
         "meta": { "asset_type": "Model" },
         "model": { "gltf": gltf_name }
     });
     let dirkasset = dir.join(format!("{name}.dirkasset"));
-    fs::write(&dirkasset, descriptor.to_string()).unwrap();
+    fs::write(&dirkasset, descriptor.to_string())
+        .expect("the temporary asset file should be writable");
     dirkasset
 }
 
@@ -115,7 +111,7 @@ fn next_event<E: Event>(consumer: &mut Consumer<E>) -> E {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
-        .unwrap()
+        .expect("a Tokio runtime should start")
         .block_on(async { tokio::time::timeout(Duration::from_secs(5), consumer.consume()).await })
         .expect("event was not delivered in time")
         .expect("event bus should remain open")
@@ -237,7 +233,12 @@ mod asset_handle {
     fn path_dir_relationship_is_consistent() {
         let h = AssetHandle::from_raw("a/b.dirkasset", AssetType::Model);
         // dir() must be the parent of path()
-        assert_eq!(h.dir(), h.path().parent().unwrap());
+        assert_eq!(
+            h.dir(),
+            h.path()
+                .parent()
+                .expect("an asset path should have a parent directory")
+        );
     }
 
     #[test]
@@ -287,8 +288,9 @@ mod asset_handle {
     #[test]
     fn serde_round_trip_preserves_path_and_type() {
         let original = AssetHandle::from_raw("textures/dirt.dirkasset", AssetType::Model);
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: AssetHandle = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&original).expect("the value should serialize to JSON");
+        let restored: AssetHandle =
+            serde_json::from_str(&json).expect("the JSON should deserialize");
         assert_eq!(original.raw(), restored.raw());
         assert_eq!(original.asset_type(), restored.asset_type());
     }
@@ -296,8 +298,9 @@ mod asset_handle {
     #[test]
     fn serde_round_trip_unknown_type() {
         let original = AssetHandle::from_raw("x.dirkasset", AssetType::Unknown);
-        let json = serde_json::to_string(&original).unwrap();
-        let restored: AssetHandle = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&original).expect("the value should serialize to JSON");
+        let restored: AssetHandle =
+            serde_json::from_str(&json).expect("the JSON should deserialize");
         assert_eq!(restored.asset_type(), AssetType::Unknown);
     }
 
@@ -331,7 +334,7 @@ mod asset_type {
     #[test]
     fn model_serialises_as_string_model() {
         assert_eq!(
-            serde_json::to_string(&AssetType::Model).unwrap(),
+            serde_json::to_string(&AssetType::Model).expect("the value should serialize to JSON"),
             r#""Model""#
         );
     }
@@ -339,20 +342,21 @@ mod asset_type {
     #[test]
     fn unknown_serialises_as_string_unknown() {
         assert_eq!(
-            serde_json::to_string(&AssetType::Unknown).unwrap(),
+            serde_json::to_string(&AssetType::Unknown).expect("the value should serialize to JSON"),
             r#""Unknown""#
         );
     }
 
     #[test]
     fn deserialise_model() {
-        let v: AssetType = serde_json::from_str(r#""Model""#).unwrap();
+        let v: AssetType = serde_json::from_str(r#""Model""#).expect("the JSON should deserialize");
         assert_eq!(v, AssetType::Model);
     }
 
     #[test]
     fn deserialise_unknown() {
-        let v: AssetType = serde_json::from_str(r#""Unknown""#).unwrap();
+        let v: AssetType =
+            serde_json::from_str(r#""Unknown""#).expect("the JSON should deserialize");
         assert_eq!(v, AssetType::Unknown);
     }
 
@@ -367,8 +371,9 @@ mod asset_type {
 
     #[test]
     fn serde_round_trip_model() {
-        let json = serde_json::to_string(&AssetType::Model).unwrap();
-        let back: AssetType = serde_json::from_str(&json).unwrap();
+        let json =
+            serde_json::to_string(&AssetType::Model).expect("the value should serialize to JSON");
+        let back: AssetType = serde_json::from_str(&json).expect("the JSON should deserialize");
         assert_eq!(back, AssetType::Model);
     }
 
@@ -405,9 +410,12 @@ mod model_config {
     #[test]
     fn serde_round_trip() {
         let json = r#"{"gltf":"meshes/hero.gltf"}"#;
-        let config: ModelConfig = serde_json::from_str(json).unwrap();
+        let config: ModelConfig = serde_json::from_str(json).expect("the JSON should deserialize");
         assert_eq!(config.gltf, "meshes/hero.gltf");
-        assert_eq!(serde_json::to_string(&config).unwrap(), json);
+        assert_eq!(
+            serde_json::to_string(&config).expect("the value should serialize to JSON"),
+            json
+        );
     }
 
     #[test]
@@ -422,9 +430,10 @@ mod model_config {
     fn validate_returns_true_when_gltf_file_exists() {
         // When the gltf path is absolute, handle.dir().join(abs) == abs path,
         // so we can test the success branch by writing a real temp file.
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("a temporary directory should be created");
         let gltf_path = dir.path().join("cube.gltf");
-        fs::write(&gltf_path, minimal_gltf_json()).unwrap();
+        fs::write(&gltf_path, minimal_gltf_json())
+            .expect("the temporary asset file should be writable");
 
         let config = ModelConfig {
             // Absolute path: join() returns the absolute path unchanged.
@@ -471,7 +480,8 @@ mod errors {
 
     #[test]
     fn serialisation_error_display_mentions_serialisation() {
-        let se: serde_json::Error = serde_json::from_str::<i32>("bad").unwrap_err();
+        let se: serde_json::Error =
+            serde_json::from_str::<i32>("bad").expect_err("\"bad\" is not an i32");
         assert!(
             Error::SerialisationError(se)
                 .to_string()
@@ -529,7 +539,8 @@ mod errors {
 
     #[test]
     fn from_serde_error_produces_serialisation_variant() {
-        let se: serde_json::Error = serde_json::from_str::<i32>("bad").unwrap_err();
+        let se: serde_json::Error =
+            serde_json::from_str::<i32>("bad").expect_err("\"bad\" is not an i32");
         let err: Error = se.into();
         assert!(matches!(err, Error::SerialisationError(_)));
     }
@@ -553,15 +564,18 @@ mod handle {
     #[test]
     fn get_returns_correct_value() {
         let h = fake_handle(42, "test.dirkasset");
-        assert_eq!(h.get().unwrap().value, 42);
+        assert_eq!(
+            h.get().expect("the asset should not be taken yet").value,
+            42
+        );
     }
 
     #[test]
     fn get_is_non_destructive_on_first_call() {
         let h = fake_handle(7, "test.dirkasset");
-        h.get().unwrap();
+        h.get().expect("the asset should not be taken yet");
         // Second call must still succeed.
-        assert_eq!(h.get().unwrap().value, 7);
+        assert_eq!(h.get().expect("the asset should not be taken yet").value, 7);
     }
 
     #[test]
@@ -575,8 +589,11 @@ mod handle {
     #[test]
     fn get_after_take_returns_already_taken() {
         let h = fake_handle(1, "test.dirkasset");
-        h.take().unwrap();
-        assert!(matches!(h.get().unwrap_err(), Error::AlreadyTaken));
+        h.take().expect("the asset should not be taken yet");
+        assert!(matches!(
+            h.get().expect_err("the asset should already be taken"),
+            Error::AlreadyTaken
+        ));
     }
 
     // ── take ─────────────────────────────────────────────────────────────────
@@ -584,14 +601,20 @@ mod handle {
     #[test]
     fn take_returns_correct_value() {
         let h = fake_handle(99, "test.dirkasset");
-        assert_eq!(h.take().unwrap().value, 99);
+        assert_eq!(
+            h.take().expect("the asset should not be taken yet").value,
+            99
+        );
     }
 
     #[test]
     fn take_second_call_returns_already_taken() {
         let h = fake_handle(1, "test.dirkasset");
-        h.take().unwrap();
-        assert!(matches!(h.take().unwrap_err(), Error::AlreadyTaken));
+        h.take().expect("the asset should not be taken yet");
+        assert!(matches!(
+            h.take().expect_err("the asset should already be taken"),
+            Error::AlreadyTaken
+        ));
     }
 
     #[test]
@@ -600,9 +623,12 @@ mod handle {
         // Taking via one should make the data unavailable via the other.
         let h = fake_handle(5, "test.dirkasset");
         let clone = h.clone();
-        clone.take().unwrap();
+        clone.take().expect("the asset should not be taken yet");
         assert!(
-            matches!(h.take().unwrap_err(), Error::AlreadyTaken),
+            matches!(
+                h.take().expect_err("the asset should already be taken"),
+                Error::AlreadyTaken
+            ),
             "Original should reflect the take performed via its clone"
         );
     }
@@ -611,9 +637,15 @@ mod handle {
     fn get_is_non_destructive_across_clones() {
         let h = fake_handle(3, "test.dirkasset");
         let clone = h.clone();
-        h.get().unwrap();
+        h.get().expect("the asset should not be taken yet");
         // Clone can still get the data.
-        assert_eq!(clone.get().unwrap().value, 3);
+        assert_eq!(
+            clone
+                .get()
+                .expect("the asset should not be taken yet")
+                .value,
+            3
+        );
     }
 
     // ── clone ────────────────────────────────────────────────────────────────
@@ -622,7 +654,10 @@ mod handle {
     fn clone_shares_inner_data() {
         let h = fake_handle(8, "test.dirkasset");
         let c = h.clone();
-        assert_eq!(h.get().unwrap().value, c.get().unwrap().value);
+        assert_eq!(
+            h.get().expect("the asset should not be taken yet").value,
+            c.get().expect("the asset should not be taken yet").value
+        );
     }
 
     #[test]
@@ -632,7 +667,13 @@ mod handle {
         let c2 = h.clone();
         let c3 = c1.clone();
         for handle in [&h, &c1, &c2, &c3] {
-            assert_eq!(handle.get().unwrap().value, 4);
+            assert_eq!(
+                handle
+                    .get()
+                    .expect("the asset should not be taken yet")
+                    .value,
+                4
+            );
         }
     }
 
@@ -802,9 +843,10 @@ mod dirk_asset_validation {
 
     #[test]
     fn model_with_existing_gltf_file_is_accepted() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("a temporary directory should be created");
         let gltf_path = dir.path().join("cube.gltf");
-        fs::write(&gltf_path, minimal_gltf_json()).unwrap();
+        fs::write(&gltf_path, minimal_gltf_json())
+            .expect("the temporary asset file should be writable");
 
         // Use the absolute path as the gltf value so that
         // handle.dir().join(abs_path) == abs_path regardless of ASSETS_PATH.
@@ -847,13 +889,14 @@ mod registry {
     fn registry_with_models(
         names: &[&str],
     ) -> (TempDir, EventManager, AssetRegistry, Vec<AssetHandle>) {
-        let root = TempDir::new().unwrap();
+        let root = TempDir::new().expect("a temporary directory should be created");
         for name in names {
             write_model_fixture(root.path(), name);
         }
         let workers = WorkerPool::new("asset-test");
         let events = EventManager::new(workers.clone());
-        let registry = AssetRegistry::init_at(&events, workers, root.path()).unwrap();
+        let registry = AssetRegistry::init_at(&events, workers, root.path())
+            .expect("the registry should open its asset root");
         let ids = names
             .iter()
             .map(|name| AssetHandle::from_raw(format!("{name}.dirkasset"), AssetType::Model))
@@ -888,32 +931,56 @@ mod registry {
     #[test]
     fn explicit_root_loads_model_and_resolves_source_paths() {
         let (_root, _events, registry, id) = registry_with_model("hero");
-        let handle = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
-        assert_eq!(handle.get().unwrap().gltf.scenes().count(), 1);
+        let handle =
+            wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
+        assert_eq!(
+            handle
+                .get()
+                .expect("the asset should not be taken yet")
+                .gltf
+                .scenes()
+                .count(),
+            1
+        );
         assert_eq!(
             handle.handle().dir(),
-            handle.handle().path().parent().unwrap()
+            handle
+                .handle()
+                .path()
+                .parent()
+                .expect("an asset path should have a parent directory")
         );
     }
 
     #[test]
     fn async_load_works_inside_runtime() {
         let (_root, _events, registry, id) = registry_with_model("async");
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let handle = runtime.block_on(registry.load_asset::<Model>(&id)).unwrap();
-        assert_eq!(handle.get().unwrap().gltf.scenes().count(), 1);
+        let runtime = tokio::runtime::Runtime::new().expect("a Tokio runtime should start");
+        let handle = runtime
+            .block_on(registry.load_asset::<Model>(&id))
+            .expect("the asset should load");
+        assert_eq!(
+            handle
+                .get()
+                .expect("the asset should not be taken yet")
+                .gltf
+                .scenes()
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn missing_root_type_mismatch_and_unknown_handle_report_errors() {
-        let root = TempDir::new().unwrap();
+        let root = TempDir::new().expect("a temporary directory should be created");
         let workers = WorkerPool::new("asset-test");
         let events = EventManager::new(workers.clone());
         assert!(matches!(
             AssetRegistry::init_at(&events, workers.clone(), root.path().join("missing")),
             Err(Error::IoError(_))
         ));
-        let registry = AssetRegistry::init_at(&events, workers, root.path()).unwrap();
+        let registry = AssetRegistry::init_at(&events, workers, root.path())
+            .expect("the registry should open its asset root");
         let wrong = AssetHandle::from_raw("wrong.dirkasset", AssetType::Unknown);
         assert!(matches!(
             wait_for_load(registry.load_asset::<Model>(&wrong)),
@@ -930,13 +997,20 @@ mod registry {
     #[test]
     fn resolve_binds_unresolved_handles_to_registry_root() {
         let (root, _events, registry, id) = registry_with_model("scene");
-        let stored: AssetHandle =
-            serde_json::from_str(&serde_json::to_string(&id).unwrap()).unwrap();
-        let resolved = registry.resolve(&stored).unwrap();
+        let stored: AssetHandle = serde_json::from_str(
+            &serde_json::to_string(&id).expect("the value should serialize to JSON"),
+        )
+        .expect("the value should serialize to JSON");
+        let resolved = registry
+            .resolve(&stored)
+            .expect("the registry should resolve the stored handle");
         assert_eq!(resolved, stored);
         assert_eq!(
             resolved.path(),
-            root.path().canonicalize().unwrap().join("scene.dirkasset")
+            root.path()
+                .canonicalize()
+                .expect("the asset root should exist")
+                .join("scene.dirkasset")
         );
         let wrong_type = AssetHandle::from_raw("scene.dirkasset", AssetType::Unknown);
         assert!(registry.resolve(&wrong_type).is_none());
@@ -947,17 +1021,19 @@ mod registry {
         let (_root, events, registry, ids) = registry_with_models(&["cached", "sentinel"]);
         let (id, sentinel) = (&ids[0], &ids[1]);
         let mut loaded = events.subscribe::<AssetLoaded<Model>>();
-        let first = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
+        let first = wait_for_load(registry.load_asset::<Model>(id)).expect("the asset should load");
         let event = next_event(&mut loaded);
         assert_eq!(event.handle.generation(), first.generation());
         drop(event);
-        let second = wait_for_load(registry.load_asset::<Model>(id)).unwrap();
+        let second =
+            wait_for_load(registry.load_asset::<Model>(id)).expect("the asset should load");
         assert_eq!(first.generation(), second.generation());
         // Loaded events share one ordered producer queue, so a duplicate
         // event for `second` would arrive before the sentinel's event.
-        let _sentinel = wait_for_load(registry.load_asset::<Model>(sentinel)).unwrap();
+        let _sentinel =
+            wait_for_load(registry.load_asset::<Model>(sentinel)).expect("the asset should load");
         assert_eq!(&next_event(&mut loaded).handle.handle(), sentinel);
-        first.take().unwrap();
+        first.take().expect("the asset should not be taken yet");
         assert!(matches!(second.take(), Err(Error::AlreadyTaken)));
     }
 
@@ -992,14 +1068,16 @@ mod registry {
                 let gate = gate.clone();
                 std::thread::spawn(move || {
                     gate.wait();
-                    registry.load_asset_immediate::<CountingAsset>(&id).unwrap()
+                    registry
+                        .load_asset_immediate::<CountingAsset>(&id)
+                        .expect("the asset should load")
                 })
             })
             .collect::<Vec<_>>();
         gate.wait();
         let handles = threads
             .into_iter()
-            .map(|thread| thread.join().unwrap())
+            .map(|thread| thread.join().expect("the loading thread should not panic"))
             .collect::<Vec<_>>();
         assert_eq!(DECODE_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(handles[0].generation(), handles[1].generation());
@@ -1010,18 +1088,23 @@ mod registry {
         let (_root, events, registry, id) = registry_with_model("reloaded");
         let mut loaded = events.subscribe::<AssetLoaded<Model>>();
         let mut unloaded = events.subscribe::<AssetUnloaded>();
-        let first = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let first =
+            wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
         let first_generation = first.generation();
         drop(next_event(&mut loaded));
         drop(first);
-        let second = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+        let second =
+            wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
         assert_ne!(first_generation, second.generation());
         drop(next_event(&mut loaded));
         let old_unload = wait_for_unload(&registry, &mut unloaded);
         assert_eq!(old_unload.handle, id);
         assert_eq!(old_unload.generation, first_generation);
         assert_eq!(
-            registry.cached_handle::<Model>(&id).unwrap().generation(),
+            registry
+                .cached_handle::<Model>(&id)
+                .expect("the asset should be cached")
+                .generation(),
             second.generation()
         );
         let second_generation = second.generation();
@@ -1039,7 +1122,8 @@ mod registry {
 
         // Every cycle drops the last asset and with it every unload dispatcher.
         for _ in 0..2 {
-            let handle = wait_for_load(registry.load_asset::<Model>(&id)).unwrap();
+            let handle =
+                wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
             let generation = handle.generation();
             drop(handle);
 

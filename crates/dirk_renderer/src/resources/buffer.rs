@@ -111,6 +111,7 @@ impl<Type: BuffType> Buffer<Type> {
         )?;
 
         unsafe {
+            #[expect(clippy::expect_used, reason = "CpuToGpu memory is always mapped.")]
             let ptr = staging_buf
                 .mapped()
                 .expect("should be host visible")
@@ -166,6 +167,10 @@ impl UniformBuffer {
     /// `size_of::<T>()` bytes — both invariants are guaranteed by every
     /// `UboData` constructed in this module.
     pub unsafe fn write<T: Copy>(&self, data: &T) {
+        #[expect(
+            clippy::expect_used,
+            reason = "Uniform buffers are allocated in mapped memory."
+        )]
         let ptr = self
             .mapped()
             .expect("UBO allocation must be host-visible")

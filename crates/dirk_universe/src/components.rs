@@ -134,6 +134,10 @@ impl<C: Component> AnyStorage for ComponentStorage<C> {
 }
 
 impl<C: Component> IndexMut<Entity> for ComponentStorage<C> {
+    #[expect(
+        clippy::expect_used,
+        reason = "Indexing panics on a missing key, like std's maps."
+    )]
     fn index_mut(&mut self, index: Entity) -> &mut Self::Output {
         self.map
             .get_mut(&index)

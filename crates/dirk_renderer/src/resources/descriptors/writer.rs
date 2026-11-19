@@ -151,11 +151,15 @@ impl<'dev> DescriptorWriter<'dev> {
 
 fn debug_assert_binding<L: SetLayout>(binding: u32, descriptor_type: vk::DescriptorType) {
     if cfg!(debug_assertions) {
-        let Some(layout_binding) = L::BINDINGS
+        let layout_binding = L::BINDINGS
             .iter()
-            .find(|layout_binding| layout_binding.binding == binding)
-        else {
-            panic!("descriptor binding {binding} does not exist in layout");
+            .find(|layout_binding| layout_binding.binding == binding);
+        debug_assert!(
+            layout_binding.is_some(),
+            "descriptor binding {binding} does not exist in layout"
+        );
+        let Some(layout_binding) = layout_binding else {
+            return;
         };
 
         debug_assert_eq!(

@@ -57,14 +57,24 @@ editor = [
     "dep:egui-ash-renderer",
 ]
 
+# The workspace lints (../../Cargo.toml), except `unsafe_code`: the renderer
+# calls Vulkan through ash.
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "allow"
 
 [lints.clippy]
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Production code propagates errors; tests may panic (see clippy.toml).
 unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
 # Every exception names its lint with `#[expect]` and says why.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
+# Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
 self_named_module_files = "warn"

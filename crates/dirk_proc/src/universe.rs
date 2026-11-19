@@ -43,14 +43,17 @@ pub fn generate_system_code(trait_def: &ItemTrait) -> syn::Result<TokenStream> {
         quote!(#s;)
     });
 
-    let blanket_methods = fns.iter().map(|m| {
-        let sig = &m.sig;
-        let name = &m.sig.ident;
-        let args = get_arg_names_from_sig(&m.sig);
-        quote! {
-            #sig { T::#name(#(#args),*) }
-        }
-    });
+    let blanket_methods = fns
+        .iter()
+        .map(|m| {
+            let sig = &m.sig;
+            let name = &m.sig.ident;
+            let args = get_arg_names_from_sig(&m.sig)?;
+            Ok(quote! {
+                #sig { T::#name(#(#args),*) }
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     // Doc strings for the Any* trait.
     let any_doc_main = format!(
@@ -141,15 +144,18 @@ pub fn generate_system_code(trait_def: &ItemTrait) -> syn::Result<TokenStream> {
     })
 }
 
-fn get_arg_names_from_sig(sig: &syn::Signature) -> Vec<TokenStream> {
+fn get_arg_names_from_sig(sig: &syn::Signature) -> syn::Result<Vec<TokenStream>> {
     sig.inputs
         .iter()
         .map(|arg| match arg {
             FnArg::Typed(pt) => match &*pt.pat {
-                Pat::Ident(id) => quote! { #id },
-                &_ => todo!("implement other pattern types"),
+                Pat::Ident(id) => Ok(quote! { #id }),
+                pat => Err(syn::Error::new_spanned(
+                    pat,
+                    "system trait methods must name each argument with a plain identifier",
+                )),
             },
-            FnArg::Receiver(_) => quote! {self},
+            FnArg::Receiver(_) => Ok(quote! {self}),
         })
         .collect()
 }

@@ -33,6 +33,10 @@ fn collect_all<T: Event>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
     events
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "Test helpers fail the test by panicking."
+)]
 fn wait_for<T: Event>(consumer: &mut Consumer<T>) -> T {
     collect_all(consumer, 1)
         .pop()

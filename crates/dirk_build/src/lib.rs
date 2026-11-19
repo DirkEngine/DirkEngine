@@ -20,6 +20,10 @@ pub fn configure_platform() {
 ///
 /// Will panic if it fails to run `cargo metadata`
 #[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "Build scripts report failure by panicking."
+)]
 pub fn workspace_dir() -> PathBuf {
     let metadata = cargo_metadata::MetadataCommand::new()
         .exec()

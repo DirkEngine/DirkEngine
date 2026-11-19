@@ -869,6 +869,10 @@ impl EditorServicesState {
             .split(NodePath::MAIN_ROOT, split, 0.75, egui_dock::Node::leaf(id));
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "The tab path was just found in the same dock state."
+    )]
     fn focus_window_tab(&mut self, id: EditorWindowId) {
         if let Some(path) = self.dock_state.find_tab(&id) {
             self.dock_state

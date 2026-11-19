@@ -60,6 +60,10 @@ impl PlatformWindows {
     ///
     /// Panics if the platform has not created its main window yet.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "The platform creates the main window before anything can ask for it."
+    )]
     pub fn main_window(&self) -> MainWindow<'_> {
         let guard = self.inner.read();
         let main_window = guard

@@ -61,6 +61,10 @@ impl<T: Asset> AssetRef<T> {
     ) -> Self {
         Self {
             asset_handle,
+            #[expect(
+                clippy::expect_used,
+                reason = "A u64 incremented once per load never runs out."
+            )]
             generation: AssetGeneration(
                 NEXT_GENERATION
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {

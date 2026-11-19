@@ -57,6 +57,10 @@ impl EngineBuilder {
     /// semantic version. This is a build-time configuration error.
     #[must_use]
     pub fn new() -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "The crate's own version is fixed at build time."
+        )]
         let package_version = dirk_utils::Version::from_str(env!("CARGO_PKG_VERSION"))
             .expect("crate package version should be a valid DirkEngine version");
 

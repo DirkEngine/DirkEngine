@@ -424,6 +424,10 @@ impl<T: Asset> Unpin for AssetLoad<T> {}
 impl<T: Asset> Future for AssetLoad<T> {
     type Output = Result<Handle<T>>;
 
+    #[expect(
+        clippy::panic,
+        reason = "Polling a future after it completed is a caller bug, as with std's futures."
+    )]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let Some(task) = self.task.as_mut() else {
             panic!("AssetLoad polled after completion");
@@ -673,6 +677,10 @@ impl AssetRegistry {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Dispatchers are keyed by the TypeId of the event they dispatch."
+    )]
     fn dispatch_loaded<T: Asset>(&self, handle: Handle<T>) {
         let type_id = TypeId::of::<T>();
         let mut dispatchers = self.inner.load_dispatchers.write();

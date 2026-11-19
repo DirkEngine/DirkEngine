@@ -150,6 +150,10 @@ impl Universe {
         clippy::too_many_lines,
         reason = "One arm per command, applied in the order they were recorded."
     )]
+    #[expect(
+        clippy::expect_used,
+        reason = "Each lookup follows the insert or check that guarantees it, earlier in the same batch."
+    )]
     fn run_commands(&mut self, cmd: &mut CommandBuffer, commands: Vec<Command>) {
         let mut created_worlds: HashSet<WorldId> = HashSet::new();
         let mut destroyed_worlds: HashSet<WorldId> = HashSet::new();

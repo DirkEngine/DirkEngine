@@ -1,5 +1,7 @@
 //! Entrypoint for exercising the new plugin/subsystem engine runtime.
 
+use std::process::ExitCode;
+
 #[cfg(feature = "cli")]
 use dirkengine::cli::run;
 
@@ -20,12 +22,11 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() {
-    match run() {
-        Ok(()) => {}
-        Err(err) => {
-            tracing::error!("{err:#}");
-            panic!("Error: {err:#}");
-        }
+fn main() -> ExitCode {
+    if let Err(err) = run() {
+        tracing::error!("{err:#}");
+        eprintln!("Error: {err:#}");
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
