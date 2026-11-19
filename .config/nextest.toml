@@ -1,0 +1,4 @@
+# A hung test, such as a deadlocked worker or event stream, fails with a report
+# instead of stalling validation indefinitely.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
