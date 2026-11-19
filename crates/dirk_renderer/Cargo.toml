@@ -39,6 +39,7 @@ anyhow.workspace = true
 dirk_build.workspace = true
 
 [dev-dependencies]
+dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }
 dirk_threads.workspace = true
 
 [features]

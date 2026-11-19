@@ -1,8 +1,5 @@
 //! The renderer's passes executed under validation, read back by the host.
 
-#[path = "../../dirk_rhi/tests/support/mod.rs"]
-mod support;
-
 use std::time::{Duration, Instant};
 
 use dirk_assets::{AssetHandle, AssetRegistry, AssetType};
@@ -13,10 +10,10 @@ use dirk_rhi::{
     Frame, Graphics, Image, ImageAccess, ImageDesc, ImageDimension, ImageUsage, Memory, Rhi,
     SampleCount,
 };
+use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_threads::WorkerPool;
 use dirk_universe::{Entity, Universe, World};
 use glam::{Mat4, Vec3, vec3};
-use support::with_rhi;
 
 use crate::{
     models::ModelRegistry,
