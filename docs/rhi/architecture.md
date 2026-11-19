@@ -78,11 +78,13 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
 ```rust
 let frame = rhi.begin_frame()?;              // waits for this slot's previous work, frees garbage
 let objects = frame.alloc(&object_data)?;    // fresh host-visible memory only this frame reads
+let a = frame.acquire(&mut swapchain_a)?;      // AcquiredImage: render to a.image()
+let b = frame.acquire(&mut swapchain_b)?;
 let mut cmd = frame.encoder::<Graphics>("scene")?;
 cmd.wait_for(upload)?;                       // the GPU waits for another queue's Completion
-// ... record ...
-frame.submit(cmd)?;                           // or submit several, across queues
-frame.present(acquired)?;                     // presentation is part of the frame
+// ... record: render passes move a.image() from ImageAccess::Present and back ...
+frame.submit(cmd)?;                          // waits for every acquisition since the last one
+frame.present([a, b])?;                      // one submission and one present for both
 frame.finish();                               // closes the frame (also on Drop)
 ```
 
@@ -176,8 +178,47 @@ frame.finish();                               // closes the frame (also on Drop)
   independent blend, the color target limit, depth bias clamp. Pipelines have topology,
   culling, front face, depth test and bias, per-target blending and write masks; stencil
   tests come when something needs them.
-- Typestate presentation: `AcquiredFrame` -> submitted -> presented. Presenting before
-  submit, or submitting twice, does not compile. No atomics tracking frame phase.
+- Presentation is part of the frame: `frame.acquire(&mut swapchain) -> AcquiredImage`
+  registers the acquisition with the frame, whose **next graphics submission waits for
+  every acquisition since the last one** (at attachment output and transfer stages), so
+  any encoder may render to `acquired.image()` with ordinary commands.
+  `frame.present([a, b])` (any `IntoIterator<Item = AcquiredImage>`) makes one empty
+  graphics submission signaling each image's present semaphore, whose first scope covers
+  every earlier submission, then one `vkQueuePresentKHR` for all swapchains. Acquired
+  images borrow the frame and their swapchain, and presenting consumes them, so outliving
+  the frame, presenting twice, or resizing while an image is out do not compile
+  (`compile_fail` doctests). An acquired image never presented marks its swapchain for
+  recreation on the next acquisition, and a frame whose acquisitions no submission waited
+  for waits for them in an empty submission when it closes, so acquire semaphores are
+  always consumed within their frame. One image per swapchain and frame.
+
+## Presentation
+
+- `RhiCreateInfo::display` enables presentation (surface instance extensions, and
+  `VK_KHR_swapchain` becomes a device requirement). `rhi.create_surface(Arc<T: SurfaceTarget>)`
+  takes the platform's shared window owner (`dirk_platform::WindowSurfaceTarget`); the
+  surface keeps it alive until its deferred free, so whoever drops the last clone must do
+  so on the main thread. `rhi.create_swapchain(surface, &SwapchainDesc { extent, formats,
+  present_mode, usage })` chooses the format (sRGB color space) and present mode (FIFO
+  fallback) up front; images are created on the first acquisition.
+- Swapchain images are `Image`s (single-mip 2D with a view, outside the heap) that the
+  swapchain owns; usage is limited to color attachment and copies. They rest in
+  `ImageAccess::Present`: each acquisition queues the image's transition from undefined
+  contents to it, recorded first by the frame's next graphics submission after its
+  acquire wait, and render passes and copies move it from there and back like any image.
+- Lifecycle (Vulkan): acquire semaphores per frame slot, reusable because beginning a
+  frame waits for its slot's previous work; present semaphores per image, reused when the
+  image is reacquired. The acquire budget is one image per swapchain at a time, enforced by
+  the borrow. Out-of-date or suboptimal acquisitions and presents mark the swapchain for
+  recreation; a recreation that still finds it out of date, or a 0x0 surface, returns
+  `Error::SwapchainOutOfDate`: skip presenting that frame. `swapchain.resize(w, h)` only
+  marks it. Recreation passes the old swapchain as `oldSwapchain` without waiting; the old
+  one is destroyed through deferred destruction after waiting for the graphics queue to
+  idle, since nothing else proves presentation finished (`VK_EXT_swapchain_maintenance1`
+  present fences would; not needed yet). That is the only stall, once per recreation.
+- Headless tests cover what needs no display; `cargo run -p dirk_rhi --example present`
+  checks acquisition, presentation of two windows at once and recreation on real windows,
+  with each window rendered by its own ordinary submission.
 
 ## Binding model: bindless, verified at compile time
 

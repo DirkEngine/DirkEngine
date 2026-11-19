@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use super::{Buffer, Check, Device, Image};
+use super::{Buffer, Check, Device, Image, presentation::PRESENT_STAGES};
 use crate::{
     BufferAccess, BufferBarrier, BufferCopy, BufferImageCopy, Filter, Format, ImageAccess,
     ImageCopy, ImageRegion, QueueTransfer, QueueType, Result, ShaderStages, command::Transition,
@@ -478,15 +478,9 @@ impl ImageAccess {
                 A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             ),
-            Self::DepthStencilRead(stages) => (
-                fragment_tests | stages.vk(),
-                if stages.is_empty() {
-                    A::DEPTH_STENCIL_ATTACHMENT_READ
-                } else {
-                    A::DEPTH_STENCIL_ATTACHMENT_READ | A::SHADER_SAMPLED_READ
-                },
-                L::READ_ONLY_OPTIMAL,
-            ),
+            // Ordered after acquiring by the acquire semaphore's wait, and
+            // before presenting by the present semaphore's signal.
+            Self::Present => (PRESENT_STAGES, A::NONE, L::PRESENT_SRC_KHR),
         }
     }
 }

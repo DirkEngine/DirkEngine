@@ -487,10 +487,12 @@ fn objects_of_another_device_are_rejected() -> Result<()> {
             ),
             "another device",
         );
+        // This device's own submission reaches as far as the other's below.
+        frame.submit(frame.encoder::<Graphics>("own")?)?;
         frame.finish();
         drop(foreign);
 
-        // A completion from another device, beyond anything this one submitted.
+        // A completion from another device.
         let frame = other.begin_frame()?;
         let elsewhere = frame.submit(frame.encoder::<Graphics>("elsewhere")?)?;
         frame.finish();

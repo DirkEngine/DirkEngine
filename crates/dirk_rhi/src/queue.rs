@@ -53,6 +53,8 @@ impl QueueKind for CopyQueue {
 /// A point on a queue's timeline, reached when a submission completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Completion {
+    /// The id of the RHI the submission ran on.
+    device: u64,
     pub(crate) queue: QueueType,
     pub(crate) value: u64,
 }
@@ -116,10 +118,21 @@ impl Rhi {
         Ok(self.device.completed(completion.queue)? >= completion.value)
     }
 
+    /// The completion of submission `value` to `queue`.
+    pub(crate) fn completion(&self, queue: QueueType, value: u64) -> Completion {
+        Completion {
+            device: self.id,
+            queue,
+            value,
+        }
+    }
+
     /// Rejects completions this device never submitted, which would never be
     /// reached.
     pub(crate) fn check_submitted(&self, completion: Completion) -> Result<()> {
-        if completion.value > self.device.submitted()[completion.queue as usize] {
+        if completion.device != self.id
+            || completion.value > self.device.submitted()[completion.queue as usize]
+        {
             return Err(Error::invalid(
                 "completion",
                 &completion.to_string(),
