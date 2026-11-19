@@ -41,9 +41,9 @@ impl From<::egui::Modifiers> for Modifiers {
     fn from(value: ::egui::Modifiers) -> Self {
         Self {
             alt: value.alt,
-            ctrl: value.ctrl || ((!cfg!(platform_macos)) && value.command),
+            ctrl: value.ctrl || ((!cfg!(target_os = "macos")) && value.command),
             shift: value.shift,
-            super_key: value.mac_cmd || (cfg!(platform_macos) && value.command),
+            super_key: value.mac_cmd || (cfg!(target_os = "macos") && value.command),
         }
     }
 }
@@ -54,8 +54,8 @@ impl From<Modifiers> for ::egui::Modifiers {
             alt: value.alt,
             ctrl: value.ctrl,
             shift: value.shift,
-            mac_cmd: cfg!(platform_macos) && value.super_key,
-            command: if cfg!(platform_macos) {
+            mac_cmd: cfg!(target_os = "macos") && value.super_key,
+            command: if cfg!(target_os = "macos") {
                 value.super_key
             } else {
                 value.ctrl

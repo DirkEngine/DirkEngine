@@ -82,9 +82,6 @@ uses it too. Before anything destructive, ask what else it touches.
   also need the Khronos validation layer (see the README). Tests never need a
   GPU or a window, since CI can't count on either: test the logic around GPU
   code, as the frame graph's tests do.
-- Don't set `RUSTFLAGS`: it replaces the `.cargo/config.toml` rustflags that
-  set the `platform_*` cfgs. macOS-only code then silently compiles out: the
-  build passes and the engine fails at run time on MoltenVK.
 
 ## Conventions
 

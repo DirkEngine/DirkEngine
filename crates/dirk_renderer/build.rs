@@ -1,4 +1,4 @@
-//! Builds platform configuration and generated shader metadata for `dirk_renderer`.
+//! Builds the shaders and generated shader metadata for `dirk_renderer`.
 
 use anyhow::{Context, anyhow, bail, ensure};
 use cargo_gpu_install::{
@@ -19,8 +19,6 @@ use std::{
 };
 
 fn main() -> anyhow::Result<()> {
-    dirk_build::configure_platform();
-
     println!("cargo:rustc-check-cfg=cfg(validation)");
 
     let profile = std::env::var("PROFILE").unwrap_or_default();
