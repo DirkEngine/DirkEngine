@@ -1,4 +1,5 @@
-//! Shared setup for native tests.
+//! Shared setup for the native tests of `dirk_rhi` and the crates built on
+//! it.
 
 use dirk_rhi::{Error, Result, Rhi, RhiCreateInfo};
 

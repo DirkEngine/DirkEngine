@@ -27,3 +27,6 @@ missing_docs = "warn"
 [lints.clippy]
 pedantic = "warn"
 unwrap_used = "warn"
+
+[dev-dependencies]
+dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }

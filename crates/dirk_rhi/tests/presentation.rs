@@ -1,15 +1,13 @@
 //! What of presentation runs without a display. Acquiring, presenting and
 //! recreating swapchains need one; `examples/present.rs` checks them by hand.
 
-mod support;
-
 use std::sync::Arc;
 
 use dirk_rhi::{Error, Result};
+use dirk_rhi_test_shaders::support::with_rhi;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
-use support::with_rhi;
 
 /// A window that is already gone.
 struct Closed;

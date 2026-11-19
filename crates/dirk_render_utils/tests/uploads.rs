@@ -1,8 +1,5 @@
 //! Staged uploads, read back by graphics work under validation.
 
-#[path = "../../dirk_rhi/tests/support/mod.rs"]
-mod support;
-
 use std::time::Duration;
 
 use dirk_render_utils::Uploader;
@@ -12,7 +9,7 @@ use dirk_rhi::{
     ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageUsage, Memory, Result, Rhi,
     SampleCount, ShaderStages,
 };
-use support::with_rhi;
+use dirk_rhi_test_shaders::support::with_rhi;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
