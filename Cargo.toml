@@ -143,15 +143,23 @@ proc-macro2 = "1"
 unsafe_code = "forbid"
 missing_docs = "warn"
 
+# Every Clippy warning fails CI: `just lint` runs Clippy with `-D warnings`.
+# The groups sit at priority -1 so the single lints below can override them.
 [workspace.lints.clippy]
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Production code propagates errors; tests may panic (see clippy.toml).
 unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
 # Every exception names its lint with `#[expect]` and says why.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 # Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
 self_named_module_files = "warn"
-
 # Line tables keep file and line numbers in backtraces but drop the variable
 # and type info that makes up most of a debug build's output. Also applies to
 # tests, which inherit this profile.

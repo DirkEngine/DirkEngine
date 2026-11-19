@@ -107,7 +107,7 @@ impl Image {
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect(),
             gltf::image::Format::R8G8B8A8 => tex.pixels.clone(),
-            fmt => panic!("Unsuported glTF image format: {fmt:?}"),
+            format => return Err(crate::Error::UnsupportedImageFormat(format)),
         };
 
         let mip_levels = Self::mip_levels(tex.width, tex.height);
@@ -122,6 +122,7 @@ impl Image {
         )?;
 
         unsafe {
+            #[expect(clippy::expect_used, reason = "CpuToGpu memory is always mapped.")]
             let ptr = staging_buf
                 .mapped()
                 .expect("the buffer should be host visible")

@@ -1,0 +1,6 @@
+# `expect_used`, `panic` and `dbg_macro` hold for production code only; tests
+# may panic on failure and print what they inspect. `unwrap` is never allowed:
+# a test's `expect` says what should have held.
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true

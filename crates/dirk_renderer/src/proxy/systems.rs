@@ -30,6 +30,10 @@ impl UniverseSystem for RendererUniverseSystem {
         universe: &dirk_universe::Universe,
         entity: dirk_universe::Entity,
     ) {
+        #[expect(
+            clippy::expect_used,
+            reason = "The universe spawns an entity into a world before telling systems."
+        )]
         let world = universe
             .get_world(entity)
             .expect("entity should be in world");

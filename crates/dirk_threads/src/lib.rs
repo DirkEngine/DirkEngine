@@ -54,6 +54,10 @@ impl WorkerPool {
     ///
     /// Panics if the runtime cannot be built.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "Building a runtime only fails when the OS can't spawn threads, which the engine can't run without."
+    )]
     pub fn new(name: &str) -> Self {
         let runtime = Builder::new_multi_thread()
             .worker_threads(default_worker_count().get())

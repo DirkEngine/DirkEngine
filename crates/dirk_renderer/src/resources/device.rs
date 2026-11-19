@@ -135,6 +135,7 @@ impl RenderDevice {
         })))
     }
 
+    #[expect(clippy::expect_used, reason = "Only `Drop` takes the allocator.")]
     pub fn allocate(&self, desc: &AllocationCreateDesc<'_>) -> Result<Allocation> {
         Ok(self
             .allocator
@@ -160,6 +161,7 @@ impl RenderDevice {
 }
 
 impl RenderDeviceInner {
+    #[expect(clippy::expect_used, reason = "Only `Drop` takes the allocator.")]
     fn free(&self, allocation: Allocation) -> Result<()> {
         Ok(self
             .allocator
@@ -264,6 +266,10 @@ impl DeletionQueue {
 }
 
 impl Garbage {
+    #[expect(
+        clippy::expect_used,
+        reason = "Freeing only fails for an allocation from another allocator, which the device never hands out."
+    )]
     fn destroy(self, render_device: &RenderDeviceInner) {
         let device = &render_device.device;
         unsafe {

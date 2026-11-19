@@ -263,6 +263,10 @@ impl EventManager {
     }
 
     /// Returns the topic for `T`, creating it and its routing task on first use.
+    #[expect(
+        clippy::expect_used,
+        reason = "Topics are keyed by the TypeId of the event they carry."
+    )]
     fn topic<T: Event>(&self) -> Arc<Topic<T>> {
         let type_id = TypeId::of::<T>();
         let existing = self.bus.topics.read().get(&type_id).cloned();
