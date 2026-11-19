@@ -146,7 +146,7 @@ impl SceneManager {
                     objects,
                     vertices: primitive.vertices.storage()?,
                     texture: primitive.texture,
-                    sampler: models.sampler(),
+                    sampler: primitive.sampler,
                 };
                 let indices = Indices {
                     buffer: &primitive.indices,

@@ -119,7 +119,7 @@ fn draw_models(
     let mut models = {
         let mut frame = rhi.begin_frame()?;
         let mut uploads = Uploads::new(&mut frame);
-        let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, u64::MAX)?;
+        let models = ModelRegistry::new(&mut uploads, &events, u64::MAX)?;
         uploads.submit()?;
         models
     };
@@ -152,7 +152,7 @@ fn draw_models(
         std::thread::sleep(Duration::from_millis(1));
         let mut frame = rhi.begin_frame()?;
         let mut uploads = Uploads::new(&mut frame);
-        models.update(&mut uploads)?;
+        models.update(uploads.rhi(), &mut uploads);
         uploads.submit()?;
     }
 
@@ -263,7 +263,7 @@ fn model_uploads_past_the_budget_wait_for_later_frames() -> Result {
         let mut models = {
             let mut frame = rhi.begin_frame()?;
             let mut uploads = Uploads::new(&mut frame);
-            let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, 1)?;
+            let models = ModelRegistry::new(&mut uploads, &events, 1)?;
             uploads.submit()?;
             models
         };
@@ -283,7 +283,7 @@ fn model_uploads_past_the_budget_wait_for_later_frames() -> Result {
             );
             let mut frame = rhi.begin_frame()?;
             let mut uploads = Uploads::new(&mut frame);
-            models.update(&mut uploads)?;
+            models.update(uploads.rhi(), &mut uploads);
             uploads.submit()?;
             let now = quads
                 .iter()
@@ -296,6 +296,28 @@ fn model_uploads_past_the_budget_wait_for_later_frames() -> Result {
             );
             uploaded = now;
         }
+        Ok(())
+    })
+}
+
+/// A unit quad from the origin, without normals or material, drawn by a
+/// triangle list covering its lower right half and a strip and a fan
+/// covering all of it; only their second triangles cover its top. It is
+/// white and lit head-on wherever converted triangles keep their winding,
+/// so culling keeps them, and flat normals face the viewer.
+#[test]
+fn converted_topologies_draw_with_flat_normals() -> Result {
+    const EXTENT: (u32, u32) = (32, 16);
+    with_rhi(|rhi| {
+        let objects = [("gltf/multi_primitive.dirkasset", Vec3::ZERO)];
+        let texels = draw_models(rhi, EXTENT, &objects)?;
+        let (white, black) = ([255; 4], [0, 0, 0, 255]);
+        // The top of the quad, its bottom, then outside it.
+        assert_texels(
+            &texels,
+            EXTENT.0,
+            &[(19, 2, white), (19, 6, white), (13, 4, black)],
+        );
         Ok(())
     })
 }
