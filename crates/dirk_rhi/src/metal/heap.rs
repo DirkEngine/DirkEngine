@@ -8,16 +8,17 @@ use std::{collections::VecDeque, ptr::NonNull};
 
 use dirk_shaders::bindless::heap::{self, CAPACITIES, first_element, metal::BUFFER_LENGTHS};
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLDevice, MTLOrigin, MTLPixelFormat, MTLRenderCommandEncoder, MTLRenderStages, MTLResource,
-    MTLResourceID, MTLResourceOptions, MTLResourceUsage, MTLSamplerDescriptor, MTLSamplerState,
-    MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    MTLResourceID, MTLResourceOptions, MTLResourceUsage, MTLSamplerState, MTLSize, MTLStorageMode,
+    MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
 };
 use parking_lot::Mutex;
 
-use super::{Check, Device, Object};
-use crate::{Error, Result};
+use super::{Check, Device, Object, Sampler};
+use crate::{Error, Result, SamplerDesc};
 
 /// A slot in one of the heap's arrays.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +54,15 @@ struct Resident {
     resources: Vec<NonNull<ProtocolObject<dyn MTLResource>>>,
     /// The slot each resource fills; `None` for the heap's own resources.
     owners: Vec<Option<Slot>>,
+}
+
+impl Resident {
+    /// Adds `resource`, filling `owner`, and returns its position.
+    fn push(&mut self, resource: &ProtocolObject<dyn MTLResource>, owner: Option<Slot>) -> usize {
+        self.resources.push(NonNull::from(resource));
+        self.owners.push(owner);
+        self.resources.len() - 1
+    }
 }
 
 /// Free slots of each array, and the resources render passes use.
@@ -104,31 +114,19 @@ impl Heap {
                 .map(Object::from)
         };
         let arguments = buffer(BUFFER_LENGTHS + 1, 8)?;
-        arguments.setLabel(Some(&objc2_foundation::NSString::from_str("bindless heap")));
+        arguments.setLabel(Some(&NSString::from_str("bindless heap")));
         let lengths = buffer(BUFFER_LENGTHS, 4)?;
         let empty = (heap::TEXTURES_2D..heap::SAMPLERS)
             .map(|binding| Self::empty_texture(device, binding))
             .collect::<Result<Vec<_>>>()?;
         Self::zero(queue, &empty)?;
-        let sampler = MTLSamplerDescriptor::new();
-        sampler.setSupportArgumentBuffers(true);
-        let default_sampler = device
-            .newSamplerStateWithDescriptor(&sampler)
-            .check("newSamplerStateWithDescriptor")?
-            .into();
+        let default_sampler = Sampler::create(device, &SamplerDesc::default())?;
         let mut slots = Slots::default();
         // The lengths and empty textures stay resident.
         for (binding, texture) in (0..).zip(&empty) {
-            let resident = &mut slots.resident[usage(binding)];
-            resident
-                .resources
-                .push(NonNull::from(ProtocolObject::from_ref(&**texture)));
-            resident.owners.push(None);
+            slots.resident[usage(binding)].push(ProtocolObject::from_ref(&**texture), None);
         }
-        slots.resident[0]
-            .resources
-            .push(NonNull::from(ProtocolObject::from_ref(&*lengths)));
-        slots.resident[0].owners.push(None);
+        slots.resident[0].push(ProtocolObject::from_ref(&*lengths), None);
         let heap = Self {
             arguments,
             lengths,
@@ -338,10 +336,7 @@ impl Device {
             Descriptor::Buffer(buffer) => ProtocolObject::from_ref(buffer),
             Descriptor::Sampler(_) => return Ok(slot),
         };
-        let resident = &mut slots.resident[usage(binding)];
-        let position = resident.resources.len();
-        resident.resources.push(NonNull::from(resource));
-        resident.owners.push(Some(slot));
+        let position = slots.resident[usage(binding)].push(resource, Some(slot));
         let positions = &mut slots.positions[binding as usize];
         if positions.len() <= index as usize {
             positions.resize(index as usize + 1, 0);
