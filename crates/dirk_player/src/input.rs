@@ -35,6 +35,8 @@ impl InputContext {
             | InputEvent::PointerButton { .. }
             | InputEvent::Scroll { .. }
             | InputEvent::FocusChanged(true)
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
             | InputEvent::ModifiersChanged(_) => {}
         }
     }

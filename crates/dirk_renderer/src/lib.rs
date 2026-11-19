@@ -252,8 +252,11 @@ impl dirk_engine::Subsystem for Renderer {
             let frame = dirk_engine::editor::EditorRenderContext::new(delta_time, handle);
 
             self.viewport_editor.sync_ready_state(&self.viewports);
-            self.egui
+            let ui_state = self
+                .egui
                 .run_frame(&input, &self.editor, &frame, universe)?;
+            self.platform_windows
+                .apply_ui_state(input.window_id, ui_state);
         }
 
         #[cfg(not(feature = "editor"))]
