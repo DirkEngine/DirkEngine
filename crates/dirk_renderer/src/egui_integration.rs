@@ -3,7 +3,7 @@ use std::time::Instant;
 use ash::vk;
 use dirk_engine::editor::{EditorRenderContext, EditorServices};
 use dirk_input::{ButtonState, InputEvent};
-use dirk_platform::{Theme, WindowId, WindowInputEvent};
+use dirk_platform::{CursorIcon, ImeArea, Theme, UiState, WindowId, WindowInputEvent};
 use dirk_universe::Universe;
 use egui::{ClippedPrimitive, Context, TextureId, TexturesDelta, ViewportId, ViewportInfo};
 use egui_ash_renderer::{DynamicRendering, Options, RenderMode, allocator::DefaultAllocator};
@@ -60,6 +60,9 @@ impl EguiState {
         })
     }
 
+    /// Runs the editor UI for one frame, keeping its paint data for
+    /// [`Self::render`], and returns the cursor and input method state the UI
+    /// requests from its window.
     #[allow(clippy::cast_precision_loss)]
     pub fn run_frame(
         &mut self,
@@ -67,7 +70,7 @@ impl EguiState {
         editor: &EditorServices,
         context: &EditorRenderContext<'_>,
         universe: &Universe,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<UiState> {
         let native_pixels_per_point = input.native_pixels_per_point.max(f32::EPSILON);
         let screen_rect = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -108,13 +111,27 @@ impl EguiState {
         );
 
         let output = editor.render_ui(&self.ctx, raw_input, context, universe)?;
-        let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+        let pixels_per_point = output.pixels_per_point;
+        let primitives = self.ctx.tessellate(output.shapes, pixels_per_point);
         self.pending = Some(EguiPaintData {
             textures_delta: output.textures_delta,
             primitives,
-            pixels_per_point: output.pixels_per_point,
+            pixels_per_point,
         });
-        Ok(())
+
+        let platform = output.platform_output;
+        Ok(UiState {
+            cursor: platform_cursor(platform.cursor_icon),
+            ime: platform.ime.map(|ime| {
+                let rect = ime.cursor_rect * pixels_per_point;
+                ImeArea {
+                    x: f64::from(rect.min.x),
+                    y: f64::from(rect.min.y),
+                    width: f64::from(rect.width()),
+                    height: f64::from(rect.height()),
+                }
+            }),
+        })
     }
 
     pub fn free_textures_for_frame(&mut self, frame: usize) -> Result<()> {
@@ -179,6 +196,48 @@ impl Drop for EguiPaintData {
         // A skipped frame or rendering error can leave deltas unapplied.
         self.textures_delta.clear();
     }
+}
+
+/// Maps an egui cursor to the platform cursor, or `None` to hide it.
+fn platform_cursor(icon: egui::CursorIcon) -> Option<CursorIcon> {
+    use egui::CursorIcon as Ui;
+    Some(match icon {
+        Ui::None => return None,
+        Ui::Default => CursorIcon::Default,
+        Ui::ContextMenu => CursorIcon::ContextMenu,
+        Ui::Help => CursorIcon::Help,
+        Ui::PointingHand => CursorIcon::Pointer,
+        Ui::Progress => CursorIcon::Progress,
+        Ui::Wait => CursorIcon::Wait,
+        Ui::Cell => CursorIcon::Cell,
+        Ui::Crosshair => CursorIcon::Crosshair,
+        Ui::Text => CursorIcon::Text,
+        Ui::VerticalText => CursorIcon::VerticalText,
+        Ui::Alias => CursorIcon::Alias,
+        Ui::Copy => CursorIcon::Copy,
+        Ui::Move => CursorIcon::Move,
+        Ui::NoDrop => CursorIcon::NoDrop,
+        Ui::NotAllowed => CursorIcon::NotAllowed,
+        Ui::Grab => CursorIcon::Grab,
+        Ui::Grabbing => CursorIcon::Grabbing,
+        Ui::AllScroll => CursorIcon::AllScroll,
+        Ui::ResizeHorizontal => CursorIcon::EwResize,
+        Ui::ResizeNeSw => CursorIcon::NeswResize,
+        Ui::ResizeNwSe => CursorIcon::NwseResize,
+        Ui::ResizeVertical => CursorIcon::NsResize,
+        Ui::ResizeEast => CursorIcon::EResize,
+        Ui::ResizeSouthEast => CursorIcon::SeResize,
+        Ui::ResizeSouth => CursorIcon::SResize,
+        Ui::ResizeSouthWest => CursorIcon::SwResize,
+        Ui::ResizeWest => CursorIcon::WResize,
+        Ui::ResizeNorthWest => CursorIcon::NwResize,
+        Ui::ResizeNorth => CursorIcon::NResize,
+        Ui::ResizeNorthEast => CursorIcon::NeResize,
+        Ui::ResizeColumn => CursorIcon::ColResize,
+        Ui::ResizeRow => CursorIcon::RowResize,
+        Ui::ZoomIn => CursorIcon::ZoomIn,
+        Ui::ZoomOut => CursorIcon::ZoomOut,
+    })
 }
 
 fn is_srgb_format(format: vk::Format) -> bool {
@@ -262,15 +321,9 @@ impl EguiInputState {
                         modifiers,
                     });
                 }
-                if *state == ButtonState::Pressed
-                    && !*repeat
-                    && !modifiers.command
-                    && !modifiers.ctrl
-                    && let Some(text) = key.text()
-                {
-                    out.push(egui::Event::Text(text.to_owned()));
-                }
             }
+            InputEvent::Text(text) => out.push(egui::Event::Text(text.clone())),
+            InputEvent::Ime(event) => out.extend(event.clone().to_egui().map(egui::Event::Ime)),
             InputEvent::PointerMoved { position, .. } => {
                 out.push(egui::Event::PointerMoved(
                     position.to_egui(extent, native_pixels_per_point),
@@ -328,7 +381,7 @@ impl EguiInputState {
 mod tests {
     use super::*;
     use dirk_input::{
-        LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition, PointerButton,
+        ImeEvent, LogicalKey, Modifiers, NormalizedDelta, NormalizedPosition, PointerButton,
         ScrollUnit,
     };
     use egui::{Pos2, Vec2};
@@ -366,21 +419,30 @@ mod tests {
     }
 
     #[test]
-    fn printable_key_press_emits_key_and_text_events() {
-        let modifiers = Modifiers::default();
+    fn text_comes_from_text_events_and_keeps_its_case() {
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         let events = EguiInputState::default().translate_events(
             window_id(1),
             glam::UVec2 { x: 100, y: 100 },
             1.0,
-            &[WindowInputEvent {
-                window: window_id(1),
-                event: InputEvent::Key {
-                    key: LogicalKey::character("a"),
-                    state: ButtonState::Pressed,
-                    repeat: false,
-                    modifiers,
+            &[
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Key {
+                        key: LogicalKey::character("A"),
+                        state: ButtonState::Pressed,
+                        repeat: false,
+                        modifiers,
+                    },
                 },
-            }],
+                WindowInputEvent {
+                    window: window_id(1),
+                    event: InputEvent::Text("A".to_owned()),
+                },
+            ],
         );
 
         assert_eq!(
@@ -393,76 +455,42 @@ mod tests {
                     repeat: false,
                     modifiers: modifiers.into(),
                 },
-                egui::Event::Text("a".to_owned()),
+                egui::Event::Text("A".to_owned()),
             ]
         );
     }
 
     #[test]
-    fn space_key_press_emits_text_event() {
-        let events = EguiInputState::default().translate_events(
-            window_id(1),
-            glam::UVec2 { x: 100, y: 100 },
-            1.0,
-            &[WindowInputEvent {
-                window: window_id(1),
-                event: InputEvent::Key {
-                    key: LogicalKey::Named(NamedKey::Space),
-                    state: ButtonState::Pressed,
-                    repeat: false,
-                    modifiers: Modifiers::default(),
-                },
-            }],
-        );
-
-        assert!(events.contains(&egui::Event::Text(" ".to_owned())));
-    }
-
-    #[test]
-    fn printable_key_text_events_are_suppressed_for_repeats_releases_and_command_modifiers() {
-        let ctrl_modifiers = Modifiers {
-            ctrl: true,
-            ..Modifiers::default()
-        };
+    fn ime_composition_reaches_egui() {
         let events = EguiInputState::default().translate_events(
             window_id(1),
             glam::UVec2 { x: 100, y: 100 },
             1.0,
             &[
-                WindowInputEvent {
-                    window: window_id(1),
-                    event: InputEvent::Key {
-                        key: LogicalKey::character("a"),
-                        state: ButtonState::Pressed,
-                        repeat: true,
-                        modifiers: Modifiers::default(),
-                    },
-                },
-                WindowInputEvent {
-                    window: window_id(1),
-                    event: InputEvent::Key {
-                        key: LogicalKey::character("b"),
-                        state: ButtonState::Released,
-                        repeat: false,
-                        modifiers: Modifiers::default(),
-                    },
-                },
-                WindowInputEvent {
-                    window: window_id(1),
-                    event: InputEvent::Key {
-                        key: LogicalKey::character("c"),
-                        state: ButtonState::Pressed,
-                        repeat: false,
-                        modifiers: ctrl_modifiers,
-                    },
-                },
-            ],
+                ImeEvent::Enabled,
+                ImeEvent::Preedit("あ".to_owned()),
+                ImeEvent::Commit("あ".to_owned()),
+                ImeEvent::Disabled,
+            ]
+            .map(|event| WindowInputEvent {
+                window: window_id(1),
+                event: InputEvent::Ime(event),
+            }),
         );
 
-        assert!(
-            events
-                .iter()
-                .all(|event| !matches!(event, egui::Event::Text(_)))
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: "あ".to_owned(),
+                    active_range_chars: None,
+                }),
+                egui::Event::Ime(egui::ImeEvent::Commit("あ".to_owned())),
+                egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: String::new(),
+                    active_range_chars: None,
+                }),
+            ]
         );
     }
 
