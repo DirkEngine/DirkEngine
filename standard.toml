@@ -18,7 +18,10 @@ unsafe-modules = [
     "dirk_renderer::window",
     "dirk_renderer",
     "dirk_rhi::buffer",
+    "dirk_rhi::command",
+    "dirk_rhi::frame",
     "dirk_rhi::native",
+    "frames",
     "resources",
 ]
 

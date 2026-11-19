@@ -3,20 +3,24 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 
-use super::{Check, Device};
-use crate::{BufferDesc, BufferUsage, Memory, Result};
+use super::{Check, Device, device::Garbage};
+use crate::{BufferDesc, BufferUsage, Memory, QueueType, Result};
 
 /// A Vulkan buffer and its memory.
 pub(crate) struct Buffer {
-    device: Arc<Device>,
+    pub(super) device: Arc<Device>,
     pub(super) raw: vk::Buffer,
     allocation: Allocation,
+    /// Whether every queue family shares the buffer, so transfers between
+    /// queues move no ownership.
+    pub(super) shared: bool,
 }
 
 impl Buffer {
     /// Creates a buffer for a validated description. Host-visible buffers are
     /// padded and aligned to whole non-coherent atoms so flushes of any range
-    /// stay inside their allocation.
+    /// stay inside their allocation, and shared by every queue family, so
+    /// any queue reads what the host wrote without an ownership transfer.
     pub(crate) fn new(device: &Arc<Device>, desc: &BufferDesc<'_>) -> Result<Self> {
         let atom = device.non_coherent_atom_size;
         let host_visible = desc.memory != Memory::Device;
@@ -25,10 +29,17 @@ impl Buffer {
         } else {
             desc.size
         };
+        let families = [QueueType::Graphics, QueueType::Copy].map(|queue| device.family(queue));
         let info = vk::BufferCreateInfo::default()
             .size(size)
-            .usage(desc.usage.vk())
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            .usage(desc.usage.vk());
+        let shared = host_visible && families[0] != families[1];
+        let info = if shared {
+            info.sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(&families)
+        } else {
+            info.sharing_mode(vk::SharingMode::EXCLUSIVE)
+        };
         // SAFETY: `info` is valid for the device.
         let raw = unsafe { device.raw.create_buffer(&info, None) }.check("vkCreateBuffer")?;
         // Owned from here on, so a failure below destroys the buffer.
@@ -36,6 +47,7 @@ impl Buffer {
             device: device.clone(),
             raw,
             allocation: Allocation::default(),
+            shared,
         };
         // SAFETY: `raw` was created from this device.
         let mut requirements = unsafe { device.raw.get_buffer_memory_requirements(raw) };
@@ -64,7 +76,7 @@ impl Buffer {
     ///
     /// The range is in bounds, the memory is host-visible, and neither the
     /// host nor the GPU accesses the range concurrently.
-    pub(crate) unsafe fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+    pub(crate) unsafe fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         // SAFETY: the caller keeps the range in bounds of the mapping and
         // excludes concurrent access.
         unsafe {
@@ -156,9 +168,10 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        // SAFETY: no submissions exist yet, so the GPU cannot be using the buffer.
-        unsafe { self.device.raw.destroy_buffer(self.raw, None) };
-        self.device.free(std::mem::take(&mut self.allocation));
+        self.device.bury(Garbage::Buffer(
+            self.raw,
+            std::mem::take(&mut self.allocation),
+        ));
     }
 }
 
