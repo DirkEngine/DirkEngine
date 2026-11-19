@@ -683,6 +683,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirk_render_utils"
+version = "0.1.0"
+dependencies = [
+ "dirk_rhi",
+ "dirk_rhi_test_shaders",
+]
+
+[[package]]
 name = "dirk_renderer"
 version = "0.1.0"
 dependencies = [
