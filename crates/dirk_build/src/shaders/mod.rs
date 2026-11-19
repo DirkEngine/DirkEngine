@@ -1,5 +1,6 @@
 //! Builds rust-gpu shader crates for `dirk_rhi`.
 
+mod msl;
 mod push;
 
 use std::{
@@ -29,19 +30,24 @@ use rspirv::{
 /// The generated file declares a type per entry point, named after it in
 /// `PascalCase` (`main_vs` becomes `MainVs`), implementing `dirk_rhi::Shader`
 /// with the stage, push data size and whether it writes storage buffers or
-/// images reflected from its module, and the push data type its `#[spirv(push_constant)]` parameter refers to in the
-/// crate's source; see the `push` module. Creating a shader whose push data block
+/// images reflected from its module, and the push data type its
+/// `#[spirv(push_constant)]` parameter refers to in the crate's source; see
+/// the `push` module. Creating a shader whose push data block
 /// differs in size from that type fails the build. Modules declaring
 /// resources other than the bindless heap's arrays as
-/// `dirk_shaders::bindless::heap` lays them out fail the shader build.
+/// `dirk_shaders::bindless::heap` lays them out fail the shader build. For
+/// Apple targets, each module is also translated to the Metal Shading
+/// Language and written beside it; see the `msl` module.
 ///
 /// # Errors
 ///
 /// Returns an error if the rust-gpu backend cannot be installed, the crate
-/// does not compile, or a module cannot be read or reflected.
+/// does not compile, or a module cannot be read, reflected or translated.
 pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
     let shader_crate = shader_crate.as_ref();
     let out_dir = PathBuf::from(env::var("OUT_DIR").context("OUT_DIR is not set")?);
+    let metal =
+        env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| matches!(os.as_str(), "macos" | "ios"));
     let backend = install(shader_crate)?;
     let mut builder = backend.to_spirv_builder(shader_crate, "spirv-unknown-vulkan1.3");
     builder.build_script.defaults = true;
@@ -70,10 +76,15 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
     for (entry_point, module) in modules.into_iter().collect::<BTreeMap<_, _>>() {
         let spirv =
             fs::read(&module).with_context(|| format!("reading the SPIR-V of `{entry_point}`"))?;
-        let path = out_dir.join(format!("{}.spv", entry_point.replace("::", "-")));
+        let reflected = Reflected::new(&entry_point, &spirv)?;
+        let file = entry_point.replace("::", "-");
+        if metal {
+            let msl = msl::translate(&entry_point, &spirv, reflected.stage)?;
+            fs::write(out_dir.join(format!("{file}.metal")), msl)?;
+        }
+        let path = out_dir.join(format!("{file}.spv"));
         fs::write(&path, &spirv)?;
         let path = path.to_str().context("OUT_DIR is not valid UTF-8")?;
-        let reflected = Reflected::new(&entry_point, &spirv)?;
         let push = source
             .push_type(&entry_point)
             .with_context(|| format!("finding the push data type of `{entry_point}`"))?;
@@ -88,10 +99,10 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
              unsafe impl dirk_rhi::Shader for {name} {{\n    \
                  type Push = {push};\n    \
                  const ENTRY_POINT: &'static str = {entry_point:?};\n    \
-                 const STAGE: dirk_rhi::ShaderStage = dirk_rhi::ShaderStage::{stage};\n    \
+                 const STAGE: dirk_rhi::ShaderStage = dirk_rhi::ShaderStage::{stage:?};\n    \
                  const PUSH_SIZE: usize = {push_size};\n    \
                  const WRITES_STORAGE: bool = {writes_storage};\n    \
-                 const SPIRV: &'static [u8] = include_bytes!({path:?});\n\
+                 const CODE: &'static [u8] = include_bytes!({path:?});\n\
              }}\n",
             name = type_name(&entry_point),
             stage = reflected.stage,
@@ -120,10 +131,17 @@ pub fn install(shader_crate: &Path) -> anyhow::Result<InstalledBackend> {
     Install::from_shader_crate(shader_crate.to_path_buf()).run()
 }
 
+/// The stage an entry point runs in, named like `dirk_rhi::ShaderStage`.
+#[derive(Clone, Copy, Debug)]
+enum Stage {
+    Vertex,
+    Fragment,
+    Compute,
+}
+
 /// What the shader build reflects from an entry point's module.
 struct Reflected {
-    /// Name of the `dirk_rhi::ShaderStage` variant.
-    stage: &'static str,
+    stage: Stage,
     /// Size of the push data block, zero without one.
     push_size: u32,
     /// Whether it writes storage buffers or images.
@@ -140,9 +158,9 @@ impl Reflected {
             bail!("the module of `{entry_point}` does not hold exactly one entry point");
         };
         let stage = match entry.operands.first() {
-            Some(Operand::ExecutionModel(ExecutionModel::Vertex)) => "Vertex",
-            Some(Operand::ExecutionModel(ExecutionModel::Fragment)) => "Fragment",
-            Some(Operand::ExecutionModel(ExecutionModel::GLCompute)) => "Compute",
+            Some(Operand::ExecutionModel(ExecutionModel::Vertex)) => Stage::Vertex,
+            Some(Operand::ExecutionModel(ExecutionModel::Fragment)) => Stage::Fragment,
+            Some(Operand::ExecutionModel(ExecutionModel::GLCompute)) => Stage::Compute,
             model => bail!("`{entry_point}` runs in unsupported stage {model:?}"),
         };
         let push_size = Types(&module)
