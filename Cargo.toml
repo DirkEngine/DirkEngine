@@ -66,6 +66,8 @@ resolver = "3"
 members = [
     "crates/*",
     "crates/dirk_renderer/shaders",
+    "crates/dirk_rhi/test-shaders",
+    "crates/dirk_rhi/test-shaders/gpu",
 ]
 
 [workspace.package]
@@ -87,6 +89,7 @@ tracing = "0.1"
 piquel-log = { version = "0.0.6", features = ["log", "file"] }
 parking_lot = "0.12"
 bitflags = "2"
+bytemuck = { version = "1", features = ["derive"] }
 tempfile = "3"
 slotmap = "1"
 signal-hook = "0.4"
