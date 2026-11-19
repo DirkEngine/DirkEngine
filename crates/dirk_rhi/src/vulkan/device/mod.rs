@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, ffi::CString, mem::ManuallyDrop};
+use std::{collections::BTreeSet, ffi::CString, mem::ManuallyDrop, sync::Arc};
 
 use ash::{ext::debug_utils, vk};
 use gpu_allocator::{
@@ -16,7 +16,7 @@ use super::{
     queue::Queue,
 };
 use crate::{
-    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo,
+    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo, SurfaceTarget,
     command::Transition,
     graveyard::{Buried, Graveyard},
     heap::Reads,
@@ -31,13 +31,18 @@ pub(super) enum Garbage {
         slot: Option<Slot>,
     },
     Image {
-        raw: vk::Image,
+        /// `None` for swapchain images, which their swapchain owns.
+        raw: Option<vk::Image>,
         view: Option<vk::ImageView>,
         allocation: Allocation,
         slots: [Option<Slot>; 2],
     },
     Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
+    /// A retired swapchain and the semaphores of its presentation.
+    Swapchain(vk::SwapchainKHR, Vec<vk::Semaphore>),
+    /// A surface and the window it presents to, kept alive until now.
+    Surface(vk::SurfaceKHR, Arc<dyn SurfaceTarget>),
 }
 
 impl Buried for Garbage {
@@ -46,7 +51,7 @@ impl Buried for Garbage {
             Self::Buffer { slot, .. } => [*slot, None],
             Self::Image { slots, .. } => *slots,
             Self::Sampler(_, slot) => [Some(*slot), None],
-            Self::Pipeline(_) => [None; 2],
+            Self::Pipeline(_) | Self::Swapchain(..) | Self::Surface(..) => [None; 2],
         };
         slots.into_iter().flatten()
     }
@@ -56,6 +61,9 @@ impl Buried for Garbage {
 pub(crate) struct Device {
     pub(crate) capabilities: Capabilities,
     pub(super) raw: ash::Device,
+    pub(super) physical: vk::PhysicalDevice,
+    /// Swapchain functions, with presentation.
+    pub(super) swapchains: Option<ash::khr::swapchain::Device>,
     /// The bindless heap and the pipeline layout every pipeline shares.
     pub(super) heap: Heap,
     /// Size non-coherent host memory is flushed and invalidated in.
@@ -76,13 +84,13 @@ pub(crate) struct Device {
     initializations: Mutex<Vec<Transition>>,
     /// Images dropped since the last frame began, whose first transitions
     /// are forgotten when the next one begins. The graveyard destroys an
-    /// image only once the frame after the one it is tagged with has begun,
-    /// which took its handle from here, so a new image given the same handle
-    /// never matches a stale entry; `destroy` still removes it, as a
-    /// safeguard.
+    /// image, or a swapchain with its images, only once the frame after the
+    /// one it is tagged with has begun, which took their handles from here,
+    /// so a new image given the same handle never matches a stale entry;
+    /// `destroy` still removes an image's, as a safeguard.
     dropped_images: Mutex<Vec<ImageId>>,
     /// Destroyed after the device, which `Drop` destroys first.
-    instance: Instance,
+    pub(super) instance: Instance,
 }
 
 impl Device {
@@ -160,7 +168,12 @@ impl Device {
             debug: instance
                 .debug_utils()
                 .then(|| debug_utils::Device::new(&instance.raw, &raw)),
+            swapchains: instance
+                .surface
+                .is_some()
+                .then(|| ash::khr::swapchain::Device::new(&instance.raw, &raw)),
             raw,
+            physical: adapter.raw,
             heap,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
@@ -194,11 +207,11 @@ impl Device {
     }
 
     /// Forgets the dropped `image`'s first transition, if still queued,
-    /// when the next frame begins, before the image is destroyed. Until
-    /// then, commands recorded before the drop may expect it. Call it before
-    /// burying the image, so that an image a frame beginning on another
-    /// thread misses is tagged with that frame (see
-    /// [`begin_frame`](Self::begin_frame)).
+    /// when the next frame begins, before the image, or a swapchain image's
+    /// swapchain, is destroyed. Until then, commands recorded before the drop
+    /// may expect it. Call it before burying the image, so that an image a
+    /// frame beginning on another thread misses is tagged with that frame
+    /// (see [`begin_frame`](Self::begin_frame)).
     pub(super) fn forget_initialization_next_frame(&self, image: ImageId) {
         self.dropped_images.lock().push(image);
     }
@@ -264,26 +277,52 @@ impl Device {
                     allocation,
                     slots,
                 } => {
-                    // Finds nothing, since the frame after the image's tag
-                    // began, and forgot it, before the graveyard freed it.
-                    // Kept as a safeguard, so a new image given this handle
-                    // never matches what is left of this one.
-                    self.dropped_images.lock().retain(|dropped| *dropped != raw);
-                    self.forget_initialization(raw);
                     for slot in slots.into_iter().flatten() {
                         self.remove_from_heap(slot);
                     }
                     if let Some(view) = view {
                         self.raw.destroy_image_view(view, None);
                     }
-                    self.raw.destroy_image(raw, None);
-                    self.free(allocation);
+                    if let Some(raw) = raw {
+                        // Finds nothing, since the frame after the image's
+                        // tag began, and forgot it, before the graveyard
+                        // freed it. Kept as a safeguard, so a new image given
+                        // this handle never matches what is left of this one.
+                        self.dropped_images.lock().retain(|dropped| *dropped != raw);
+                        self.forget_initialization(raw);
+                        self.raw.destroy_image(raw, None);
+                        self.free(allocation);
+                    }
                 }
                 Garbage::Sampler(raw, slot) => {
                     self.remove_from_heap(slot);
                     self.raw.destroy_sampler(raw, None);
                 }
                 Garbage::Pipeline(raw) => self.raw.destroy_pipeline(raw, None),
+                Garbage::Swapchain(raw, semaphores) => {
+                    // Presentation signals no timeline, so only an idle queue
+                    // proves it is done with the swapchain and semaphores.
+                    // Retired swapchains are rare and their frames are done,
+                    // so this waits for at most the last frame's work.
+                    let queue = self.lock_queue(QueueType::Graphics);
+                    if let Err(error) = self.raw.queue_wait_idle(*queue) {
+                        error!(%error, "failed to wait for presentation to finish");
+                    }
+                    drop(queue);
+                    for semaphore in semaphores {
+                        self.raw.destroy_semaphore(semaphore, None);
+                    }
+                    if let Some(swapchains) = &self.swapchains {
+                        swapchains.destroy_swapchain(raw, None);
+                    }
+                }
+                Garbage::Surface(raw, target) => {
+                    if let Some((surfaces, _)) = &self.instance.surface {
+                        surfaces.destroy_surface(raw, None);
+                    }
+                    // The window may close now; see `Surface`.
+                    drop(target);
+                }
             }
         }
     }

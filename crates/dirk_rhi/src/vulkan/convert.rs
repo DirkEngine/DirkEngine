@@ -28,6 +28,11 @@ impl Format {
 }
 
 impl Format {
+    /// The format equivalent to `format`, if the RHI represents it.
+    pub(super) fn from_vk(format: vk::Format) -> Option<Self> {
+        Self::ALL.iter().copied().find(|ours| ours.vk() == format)
+    }
+
     /// Every aspect the format stores.
     pub(super) fn vk_aspects(self) -> vk::ImageAspectFlags {
         match (self.is_depth_stencil(), self.has_stencil()) {
