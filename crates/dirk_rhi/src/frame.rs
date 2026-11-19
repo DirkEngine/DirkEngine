@@ -144,10 +144,7 @@ impl Frame<'_> {
     pub fn submit<Q: QueueKind>(&self, encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
         let (raw, waits) = self.take(encoder)?;
         let value = self.rhi.device.submit(Q::TYPE, raw, waits)?;
-        Ok(Completion {
-            queue: Q::TYPE,
-            value,
-        })
+        Ok(self.rhi.completion(Q::TYPE, value))
     }
 
     /// The commands and waits of `encoder`, checking it belongs to this
