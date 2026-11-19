@@ -1,4 +1,7 @@
-#![allow(unsafe_code)]
+#![expect(
+    unsafe_code,
+    reason = "Every resource wraps a Vulkan object created and destroyed through ash."
+)]
 
 pub mod buffer;
 pub mod command_pool;

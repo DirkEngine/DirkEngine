@@ -20,6 +20,8 @@ pub fn derive_event_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<To
                 let fmt = get_message_format_from_attrs(&variant.attrs)?;
                 let (pattern, format_expr) = create_field_bindings(&variant.fields, &fmt)?;
                 Ok(quote! {
+                    // Generated code keeps `allow`: an `expect` would warn for
+                    // every format that uses all of its fields.
                     #[allow(unused_variables)]
                     Self::#var_name #pattern => #format_expr,
                 })
@@ -50,6 +52,7 @@ pub fn derive_event_struct(input: &DeriveInput, data: &DataStruct) -> syn::Resul
         format_expr
     } else {
         quote! {
+            // See the enum arms above for why this is an `allow`.
             #[allow(unused_variables)]
             let Self #pattern = self;
             #format_expr

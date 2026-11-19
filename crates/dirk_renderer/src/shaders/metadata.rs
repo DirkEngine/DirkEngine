@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use ash::vk;
 use std::ffi::CStr;
 
@@ -13,8 +11,10 @@ pub trait VertexInput: Sized + Copy {
     const ATTRIBUTES: &'static [vk::VertexInputAttributeDescription];
 
     fn binding(binding: u32) -> vk::VertexInputBindingDescription {
-        // size_of::<Self> will never reach u32::MAX
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "A vertex is far smaller than u32::MAX bytes."
+        )]
         vk::VertexInputBindingDescription {
             binding,
             stride: size_of::<Self>() as u32,
@@ -33,6 +33,10 @@ pub trait VertexInput: Sized + Copy {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "No pipeline reads more than one vertex buffer yet."
+)]
 pub trait VertexInputs {
     fn layouts() -> Vec<VertexInputLayout>;
 }
@@ -82,11 +86,6 @@ impl VertexInputLayout {
         }
     }
 
-    #[must_use]
-    pub fn attribute_count(&self) -> usize {
-        self.attributes.len()
-    }
-
     pub fn attrs(
         &self,
         binding: u32,
@@ -119,18 +118,6 @@ pub trait Shader {
             .stage(stage)
             .module(module)
             .name(Self::ENTRYPOINT))
-    }
-
-    fn set_layouts(device: &mut RenderDevice) -> Result<Vec<vk::DescriptorSetLayout>> {
-        Self::SET_LAYOUTS
-            .iter()
-            .map(|&set| {
-                let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(set);
-                let layout = unsafe { device.device.create_descriptor_set_layout(&info, None)? };
-                device.destroy(Garbage::DescriptorSetLayout(layout));
-                Ok(layout)
-            })
-            .collect::<Result<Vec<_>>>()
     }
 }
 

@@ -95,12 +95,8 @@ struct RawEvent {
 #[derive(Debug, Clone, Event)]
 enum RawEnumEvent {
     A,
-    // this field is used
-    #[allow(unused)]
     B(i32),
-    C {
-        label: String,
-    },
+    C { label: String },
 }
 
 // =============================================================================

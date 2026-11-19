@@ -70,7 +70,10 @@ impl Viewport {
         &self.settings
     }
 
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(dead_code, reason = "Only the editor samples the viewport's output.")
+    )]
     pub fn output_view(&self) -> vk::ImageView {
         self.output.view()
     }

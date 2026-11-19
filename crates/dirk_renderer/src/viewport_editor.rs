@@ -380,7 +380,11 @@ fn extent_from_points(size: egui::Vec2, pixels_per_point: f32) -> vk::Extent2D {
 
 fn point_size_to_pixels(points: f32, pixels_per_point: f32) -> u32 {
     if points.is_finite() {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "Rounded and clamped to at least 1, a viewport's pixel size fits in u32."
+        )]
         {
             (points.max(1.0) * pixels_per_point).round().max(1.0) as u32
         }

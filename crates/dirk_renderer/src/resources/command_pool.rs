@@ -16,7 +16,10 @@ pub struct Graphics;
 #[derive(Debug)]
 pub struct Transfer;
 #[derive(Debug)]
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "No compute pool exists yet; the marker completes the set of queue kinds."
+)]
 pub struct Compute;
 
 /// Wrapper for [`vk::CommandPool`].
@@ -89,7 +92,13 @@ impl<Type: Pool> CommandPool<Type> {
             self.device.destroy_command_pool(self.pool, None);
         }
     }
-    #[cfg_attr(not(feature = "editor"), allow(unused))]
+    #[cfg_attr(
+        not(feature = "editor"),
+        expect(
+            dead_code,
+            reason = "Only the editor's egui renderer records its own commands."
+        )
+    )]
     pub fn raw(&self) -> vk::CommandPool {
         self.pool
     }
@@ -287,7 +296,13 @@ impl CommandBuffer {
             );
         }
     }
-    #[cfg_attr(feature = "editor", allow(unused))]
+    #[cfg_attr(
+        feature = "editor",
+        expect(
+            dead_code,
+            reason = "The editor shows the viewport in egui instead of copying it to the swapchain."
+        )
+    )]
     pub fn copy_image(
         &self,
         src_image: vk::Image,

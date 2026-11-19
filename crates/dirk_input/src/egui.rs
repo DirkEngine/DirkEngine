@@ -76,7 +76,10 @@ impl NormalizedPosition {
     }
     /// Turns the [`NormalizedPosition`] in to an [`egui::Pos2`] from
     /// an extent & a scale.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Window extents fit exactly in an f32."
+    )]
     #[must_use]
     pub fn to_egui(self, extent: glam::UVec2, native_pixels_per_point: f32) -> egui::Pos2 {
         let scale = native_pixels_per_point.max(f32::EPSILON);
@@ -98,7 +101,10 @@ impl NormalizedDelta {
     }
     /// Turns the [`NormalizedDelta`] in to an [`egui::Pos2`] from
     /// an extent & a scale.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Window extents fit exactly in an f32."
+    )]
     #[must_use]
     pub fn to_egui(self, extent: glam::UVec2, native_pixels_per_point: f32) -> egui::Vec2 {
         let scale = native_pixels_per_point.max(f32::EPSILON);

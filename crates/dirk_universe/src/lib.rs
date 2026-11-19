@@ -69,8 +69,10 @@ pub struct Universe {
     handle: UniverseHandle,
     buffer_receiver: Receiver<CommandBuffer>,
 
-    // this field starts with `universe`
-    #[allow(clippy::struct_field_names)]
+    #[expect(
+        clippy::struct_field_names,
+        reason = "The universe's own systems are named like the other system kinds."
+    )]
     universe_systems: UniverseSystemStorage,
     ticking_systems: TickingSystemStorage,
     entity_systems: EntitySystemStorage,
@@ -144,7 +146,10 @@ impl Universe {
 
     // HELPERS FOR THE TICK FUNCTION
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One arm per command, applied in the order they were recorded."
+    )]
     fn run_commands(&mut self, cmd: &mut CommandBuffer, commands: Vec<Command>) {
         let mut created_worlds: HashSet<WorldId> = HashSet::new();
         let mut destroyed_worlds: HashSet<WorldId> = HashSet::new();

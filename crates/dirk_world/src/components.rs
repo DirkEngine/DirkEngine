@@ -187,7 +187,6 @@ impl Transform {
             return;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         let delta = delta.as_vec2();
         let yaw = Quat::from_axis_angle(dirk_utils::UP_DIRECTION, -delta.x * sensitivity);
         let yawed = yaw * self.rotation;

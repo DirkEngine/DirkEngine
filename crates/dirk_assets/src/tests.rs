@@ -33,11 +33,10 @@
 //!
 //! Registry tests use their own temporary asset roots and always run in CI.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::missing_panics_doc,
-    clippy::too_many_lines
+    reason = "Tests fail by panicking."
 )]
 
 // ── bring the entire crate into scope ────────────────────────────────────────

@@ -122,7 +122,6 @@ pub struct ModelRegistry {
     models: HashMap<dirk_assets::AssetHandle, Model>,
 
     fallback_material: Material,
-    #[allow(unused)]
     fallback_texture: Texture,
     material_alloc: DescriptorAllocator<MaterialSet>,
 
@@ -361,8 +360,10 @@ impl ModelRegistry {
         let vertex_buffer = VertexBuffer::upload_slice(&self.device, &vertices)?;
         let index_buffer = IndexBuffer::upload_slice(&self.device, &indices)?;
 
-        // indices.len() will not surpass u32::MAX
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "A primitive's index count never approaches u32::MAX."
+        )]
         Ok(Primitive {
             vertex_buffer,
             index_buffer,

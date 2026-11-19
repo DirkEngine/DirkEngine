@@ -3,7 +3,10 @@ use quote::{format_ident, quote};
 use syn::{DeriveInput, FnArg, ItemTrait, LitStr, Pat, TraitItem, TypeParamBound};
 
 // this function is long because of the quote & the documentation.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One quote! template generates the whole system trait expansion."
+)]
 pub fn generate_system_code(trait_def: &ItemTrait) -> syn::Result<TokenStream> {
     if !trait_def.supertraits.iter().any(|s| match s {
         TypeParamBound::Trait(t) => t.path.segments.last().is_some_and(|s| s.ident == "System"),

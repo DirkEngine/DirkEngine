@@ -91,7 +91,10 @@ impl TimelineSemaphore {
     }
 
     /// Waits until the timeline semaphore reaches at least `value`.
-    #[allow(unused)]
+    #[expect(
+        dead_code,
+        reason = "Nothing waits on a timeline value from the CPU yet."
+    )]
     pub fn wait(&self, value: u64, timeout: u64) -> VkResult<()> {
         let semaphores = [self.raw];
         let values = [value];
@@ -102,7 +105,7 @@ impl TimelineSemaphore {
     }
 
     /// Returns the current timeline counter value.
-    #[allow(unused)]
+    #[expect(dead_code, reason = "Nothing reads a timeline value from the CPU yet.")]
     pub fn value(&self) -> VkResult<u64> {
         unsafe { self.device.device.get_semaphore_counter_value(self.raw) }
     }
