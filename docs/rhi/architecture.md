@@ -249,10 +249,11 @@ encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder
 - One global resource heap: one array per kind of resource and, for images, per view
   type, so every slot of an array holds the descriptor type and dimension shaders declare
   for it. Bindings and power-of-two capacities are constants in
-  `dirk_shaders::bindless::heap`: textures 2D, 2D array, cube, cube array and 3D (16384
-  each), storage images 2D, 2D array and 3D (4096 each, declared without a format; cubes
-  have no storage index), samplers (1024), storage buffers (65536), and depth textures
-  2D, 2D array, cube and cube array (1024 each; see [Depth comparison](#depth-comparison)).
+  `dirk_shaders::bindless::heap`: textures 2D, 2D array, cube, cube array and 3D, storage
+  images 2D, 2D array and 3D (declared without a format; cubes have no storage index),
+  and depth textures 2D, 2D array, cube and cube array (see
+  [Depth comparison](#depth-comparison)), 16384 each, one capacity for every image array;
+  samplers (1024) and storage buffers (65536).
   - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND |
     UPDATE_UNUSED_WHILE_PENDING` arrays (Vulkan 1.2 descriptor indexing). Every slot is
     written at creation, and rewritten when freed, to a null descriptor
@@ -288,9 +289,15 @@ encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
   The shader build reflects each entry point's push block size and emits constants so a
   `const` assertion fails the build if `size_of::<P>()` disagrees.
-- Stale indices are memory-safe: shaders mask every index to its array's capacity, and
-  each slot holds a null descriptor or a live resource of the array's kind and
-  dimension. In debug builds a generation check may report them later.
+- Indices read only the arrays of their kind: `get` accepts only those arrays' element
+  types (sealed traits over the `spirv_std` image, sampler and buffer types), the shader
+  build checks every array a shader declares against the heap's bindings, and `get` masks
+  the index to the capacity of every array of its kind. Each slot holds a descriptor of
+  the array's kind and dimension: a live resource, or, once freed, a null one. So an
+  index of any value reads inside its array: a stale or forged one reads the null
+  descriptor or another live resource of its kind. Freed slots are reused first in, first
+  out, so stale indices read the null descriptor for as long as possible. In debug builds
+  a generation check may report them later.
 
 ## Timestamps
 
