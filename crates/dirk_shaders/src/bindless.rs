@@ -257,5 +257,13 @@ mod gpu {
             // SAFETY: the slot is masked to the array's capacity.
             unsafe { buffers.index(self.slot() as usize) }
         }
+
+        /// This buffer's elements in `buffers`, as [`BufferIndex::get`], to
+        /// write them.
+        #[must_use]
+        pub fn get_mut(self, buffers: &mut RuntimeArray<TypedBuffer<[T]>>) -> &mut [T] {
+            // SAFETY: the slot is masked to the array's capacity.
+            unsafe { buffers.index_mut(self.slot() as usize) }
+        }
     }
 }

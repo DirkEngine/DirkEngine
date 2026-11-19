@@ -122,6 +122,12 @@ pub struct Limits {
     pub max_storage_buffer_size: u64,
     /// Most draws one indirect draw call makes.
     pub max_draw_indirect_count: u32,
+    /// Most invocations per compute workgroup along each axis.
+    pub max_compute_workgroup_size: [u32; 3],
+    /// Most invocations per compute workgroup in total.
+    pub max_compute_workgroup_invocations: u32,
+    /// Most workgroups one dispatch runs along each axis.
+    pub max_compute_workgroups: [u32; 3],
 }
 
 bitflags! {

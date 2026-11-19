@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use dirk_shaders::bindless::heap::metal::HEAP_BUFFER;
 use objc2::{
     rc::{Retained, autoreleasepool},
     runtime::ProtocolObject,
@@ -7,11 +8,11 @@ use objc2::{
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferDescriptor,
-    MTLCommandBufferErrorOption, MTLCommandEncoder, MTLCommandQueue, MTLIndexType, MTLOrigin,
-    MTLPrimitiveType, MTLRenderCommandEncoder, MTLSize,
+    MTLCommandBufferErrorOption, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLIndexType, MTLOrigin, MTLPrimitiveType, MTLRenderCommandEncoder, MTLSize,
 };
 
-use super::{Buffer, Check, Device, Image, Object, usize};
+use super::{Buffer, Check, Device, Image, Object, compute::ComputePipelineId, usize};
 use crate::{
     BufferBarrier, BufferCopy, BufferImageCopy, Format, ImageAccess, ImageBarrier, ImageCopy,
     ImageRange, ImageRegion, QueueType, Result,
@@ -24,12 +25,13 @@ pub(crate) struct CommandPool {
     queue: QueueType,
 }
 
-/// The encoder a command buffer records with. Metal records copies and
-/// render passes with separate encoders, one at a time.
+/// The encoder a command buffer records with. Metal records copies, render
+/// passes and dispatches with separate encoders, one at a time.
 enum Encoder {
     None,
     Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
     Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
 }
 
 /// A command buffer being recorded.
@@ -40,6 +42,8 @@ pub(crate) struct CommandBuffer {
     pub(super) primitive: MTLPrimitiveType,
     /// The bound index buffer, its offset and type.
     pub(super) indices: Option<(Object<dyn MTLBuffer>, u64, MTLIndexType)>,
+    /// The compute pipeline bound to the open compute encoder.
+    pub(super) compute_pipeline: Option<ComputePipelineId>,
 }
 
 impl CommandPool {
@@ -83,6 +87,7 @@ impl CommandPool {
             encoder: Encoder::None,
             primitive: MTLPrimitiveType::Triangle,
             indices: None,
+            compute_pipeline: None,
         })
     }
 }
@@ -99,7 +104,9 @@ impl CommandBuffer {
             Encoder::None => {}
             Encoder::Blit(encoder) => encoder.endEncoding(),
             Encoder::Render(encoder) => encoder.endEncoding(),
+            Encoder::Compute(encoder) => encoder.endEncoding(),
         }
+        self.compute_pipeline = None;
     }
 
     /// The open blit encoder, beginning one if needed.
@@ -113,6 +120,33 @@ impl CommandBuffer {
         match &self.encoder {
             Encoder::Blit(encoder) => encoder,
             _ => unreachable!("a blit encoder was just begun"),
+        }
+    }
+
+    /// The open compute encoder, beginning one, which binds the heap and
+    /// makes its resources resident, if needed.
+    pub(super) fn compute(
+        &mut self,
+        device: &Device,
+    ) -> &ProtocolObject<dyn MTLComputeCommandEncoder> {
+        if !matches!(self.encoder, Encoder::Compute(_)) {
+            self.end_encoding();
+            let encoder = autoreleasepool(|_| self.raw.computeCommandEncoder())
+                .expect("Metal creates encoders for command buffers without an open one");
+            // SAFETY: the heap outlives the work of every frame.
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&device.heap.arguments),
+                    0,
+                    HEAP_BUFFER as usize,
+                );
+            }
+            device.heap.use_resources_for_compute(&encoder);
+            self.encoder = Encoder::Compute(encoder);
+        }
+        match &self.encoder {
+            Encoder::Compute(encoder) => encoder,
+            _ => unreachable!("a compute encoder was just begun"),
         }
     }
 
