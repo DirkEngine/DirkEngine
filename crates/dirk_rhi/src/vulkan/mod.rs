@@ -2,15 +2,18 @@
 
 mod adapter;
 mod buffer;
+mod command;
 mod convert;
 mod device;
 mod image;
 mod instance;
+mod queue;
 mod sampler;
 
 pub(crate) use buffer::Buffer;
+pub(crate) use command::{CommandBuffer, CommandPool};
 pub(crate) use device::Device;
-pub(crate) use image::{Image, ImageView};
+pub(crate) use image::{Image, ImageId, ImageView};
 pub(crate) use sampler::Sampler;
 
 use crate::{Error, Result};
@@ -30,3 +33,17 @@ impl<T> Check<T> for ash::prelude::VkResult<T> {
         })
     }
 }
+
+/// Implements `is_from` for native objects holding their device.
+macro_rules! device_children {
+    ($($object:ty),+) => {$(
+        impl $object {
+            /// Whether this object was created from `device`.
+            pub(crate) fn is_from(&self, device: &Device) -> bool {
+                std::ptr::eq(&*self.device, device)
+            }
+        }
+    )+};
+}
+
+device_children!(Buffer, Image);
