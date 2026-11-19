@@ -87,6 +87,15 @@ impl BufferAccess {
         matches!(self, Self::CopyDestination | Self::ShaderWrite(_))
     }
 
+    /// The stages of a shader access, which must name at least one.
+    #[must_use]
+    pub const fn shader_stages(self) -> Option<ShaderStages> {
+        match self {
+            Self::ShaderRead(stages) | Self::ShaderWrite(stages) => Some(stages),
+            _ => None,
+        }
+    }
+
     /// The usage the buffer needs for this access.
     #[must_use]
     pub const fn usage(self) -> BufferUsage {
@@ -120,6 +129,18 @@ impl ImageAccess {
                 | Self::ColorAttachment
                 | Self::DepthStencilAttachment
         )
+    }
+
+    /// The stages of a shader access, which must name at least one.
+    /// [`ImageAccess::DepthStencilRead`] is not one: its stages may be empty.
+    #[must_use]
+    pub const fn shader_stages(self) -> Option<ShaderStages> {
+        match self {
+            Self::Sampled(stages) | Self::StorageRead(stages) | Self::StorageWrite(stages) => {
+                Some(stages)
+            }
+            _ => None,
+        }
     }
 
     /// The usage the image needs for this access.

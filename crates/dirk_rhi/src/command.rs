@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{
     Buffer, BufferAccess, BufferUsage, Completion, Error, Filter, Format, FormatFeatures, Frame,
     Graphics, Image, ImageAccess, ImageRange, ImageRegion, ImageUsage, QueueKind, QueueTransfer,
-    QueueType, Result, SampleCount, native,
+    QueueType, Result, SampleCount, ShaderStages, native,
 };
 
 /// Copies `size` bytes between buffers.
@@ -299,10 +299,11 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Invalid`] if a resource is from another device, lacks
-    /// the usage an access needs, an image range is out of bounds, an image is
-    /// transitioned to [`ImageAccess::Undefined`], or a transfer does not
-    /// involve this encoder's queue.
+    /// Returns [`Error::Invalid`] if a shader access names no stage, a
+    /// resource is from another device, lacks the usage an access needs, an
+    /// image range is out of bounds, an image is transitioned to
+    /// [`ImageAccess::Undefined`], or a transfer does not involve this
+    /// encoder's queue.
     pub unsafe fn barrier(
         &mut self,
         buffers: &[BufferBarrier<'_>],
@@ -317,6 +318,11 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                     reason,
                 ))
             };
+            if let Err(reason) =
+                Self::check_stages([barrier.before, barrier.after], BufferAccess::shader_stages)
+            {
+                return invalid(reason);
+            }
             self.check_buffer(
                 barrier.buffer,
                 barrier.before.usage() | barrier.after.usage(),
@@ -337,6 +343,11 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                     reason,
                 ))
             };
+            if let Err(reason) =
+                Self::check_stages([barrier.before, barrier.after], ImageAccess::shader_stages)
+            {
+                return invalid(reason);
+            }
             self.check_image(
                 barrier.image,
                 barrier.before.usage() | barrier.after.usage(),
@@ -389,6 +400,20 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             return invalid(format!("lacks the {usage:?} usage"));
         }
         Ok(())
+    }
+
+    /// Checks that each shader access names a stage.
+    fn check_stages<A: Copy + std::fmt::Debug>(
+        accesses: [A; 2],
+        stages: fn(A) -> Option<ShaderStages>,
+    ) -> Result<(), String> {
+        match accesses
+            .into_iter()
+            .find(|&access| stages(access).is_some_and(|stages| stages.is_empty()))
+        {
+            Some(access) => Err(format!("{access:?} names no shader stage")),
+            None => Ok(()),
+        }
     }
 
     /// Checks that a queue transfer moves between queues, one of them this

@@ -548,6 +548,19 @@ fn recording_rejects_invalid_requests() -> Result<()> {
         };
         assert_invalid(storage, "STORAGE");
         // SAFETY: rejected before recording.
+        let stageless = unsafe {
+            encoder.barrier(
+                &[BufferBarrier {
+                    buffer: &destination,
+                    before: BufferAccess::CopyDestination,
+                    after: BufferAccess::ShaderRead(ShaderStages::empty()),
+                    transfer: None,
+                }],
+                &[],
+            )
+        };
+        assert_invalid(stageless, "names no shader stage");
+        // SAFETY: rejected before recording.
         let unrelated = unsafe {
             encoder.barrier(
                 &[BufferBarrier {
