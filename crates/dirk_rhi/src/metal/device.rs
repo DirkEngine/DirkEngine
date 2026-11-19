@@ -8,12 +8,16 @@ use std::{
 };
 
 use dirk_shaders::bindless::heap;
-use objc2_metal::{MTLArgumentBuffersTier, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily};
+use objc2_metal::{
+    MTLArgumentBuffersTier, MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily,
+};
 use tracing::{error, info, warn};
 
-use super::{ImageId, Object, blit::Blitter, heap::Heap, heap::Slot, queue::Queue};
+use super::{
+    ImageId, Object, allocator::Allocator, blit::Blitter, heap::Heap, heap::Slot, queue::Queue,
+};
 use crate::{
-    Capabilities, Error, Features, Format, FormatCapabilities, Limits, MAX_COLOR_TARGETS,
+    Capabilities, Error, Features, Format, FormatCapabilities, Limits, MAX_COLOR_TARGETS, Memory,
     QueueType, Result, RhiCreateInfo, command::Transition, graveyard::Graveyard,
 };
 
@@ -68,8 +72,13 @@ pub(crate) struct Device {
     pub(super) raw: Object<dyn MTLDevice>,
     /// Indexed by `QueueType`.
     pub(super) queues: [Queue; QueueType::COUNT],
+    /// The heaps every buffer and texture is allocated from.
+    pub(super) allocator: Allocator,
     /// The bindless heap's argument buffer.
     pub(super) heap: Heap,
+    /// A few bytes of device memory whose contents never matter, which
+    /// encoders that must not be empty fill.
+    pub(super) scratch: Object<dyn MTLBuffer>,
     /// Scaling blits, which Metal draws.
     pub(super) blitter: Blitter,
     pub(super) health: Arc<Health>,
@@ -116,9 +125,12 @@ impl Device {
             Queue::new(&raw, QueueType::Graphics, info.application_name)?,
             Queue::new(&raw, QueueType::Copy, info.application_name)?,
         ];
+        let allocator = Allocator::new();
         Ok(Self {
             capabilities: Self::capabilities(&raw, name),
-            heap: Heap::new(&raw, &queues[QueueType::Graphics as usize].raw)?,
+            heap: Heap::new(&raw, &allocator, &queues[QueueType::Graphics as usize].raw)?,
+            scratch: allocator.buffer(&raw, 4, Memory::Device)?.into(),
+            allocator,
             blitter: Blitter::default(),
             health: Arc::default(),
             validation: info.validation,
@@ -191,7 +203,8 @@ impl Device {
     }
 
     /// Releases every object dropped by the end of frame `completed`, whose
-    /// work, and all work before it, has completed.
+    /// work, and all work before it, has completed, and the heaps they
+    /// leave empty.
     pub(crate) fn collect(&self, completed: u64) {
         self.graveyard.collect(completed, |garbage| {
             for slot in garbage.slots.into_iter().flatten() {
@@ -199,6 +212,7 @@ impl Device {
             }
             drop(garbage.object);
         });
+        self.allocator.trim();
     }
 
     /// Number of submitted command buffers that failed. Metal's API
