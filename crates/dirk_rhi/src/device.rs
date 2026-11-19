@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bitflags::bitflags;
 
-use crate::{Format, FormatCapabilities, Result, native};
+use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
 
 /// Application information and policy used to create an [`Rhi`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -15,8 +15,13 @@ pub struct RhiCreateInfo<'a> {
 }
 
 /// The render hardware interface: one device and everything created from it.
+///
+/// Dropping it waits for the GPU to finish all submitted work.
 pub struct Rhi {
     pub(crate) device: Arc<native::Device>,
+    /// The number of the last frame begun; zero before the first.
+    pub(crate) frame: u64,
+    pub(crate) slots: [FrameSlot; FRAMES_IN_FLIGHT],
 }
 
 impl Rhi {
@@ -31,6 +36,8 @@ impl Rhi {
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
         Ok(Self {
             device: Arc::new(native::Device::new(info)?),
+            frame: 0,
+            slots: Default::default(),
         })
     }
 
