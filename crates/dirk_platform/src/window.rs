@@ -2,9 +2,10 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use winit::{
-    dpi::PhysicalSize,
+    cursor::CursorIcon,
+    dpi::{PhysicalPosition, PhysicalSize},
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
-    window::{Theme, WindowId},
+    window::{ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, Theme, WindowId},
 };
 
 use crate::event::WindowEvent;
@@ -22,6 +23,26 @@ pub struct PlatformWindows {
 }
 
 impl PlatformWindows {
+    /// Applies the cursor and input method state requested by the UI drawn
+    /// in a window.
+    ///
+    /// The UI requests its state every frame, so unchanged state is detected
+    /// under the read lock and not reapplied to the native window.
+    pub fn apply_ui_state(&self, id: WindowId, state: UiState) {
+        let unchanged = self
+            .inner
+            .read()
+            .windows
+            .get(&id)
+            .is_none_or(|window| window.ui_state == state);
+        if unchanged {
+            return;
+        }
+        if let Some(window) = self.inner.write().windows.get_mut(&id) {
+            window.apply_ui_state(state);
+        }
+    }
+
     pub(crate) fn insert(&self, window: Window) -> WindowId {
         let id = window.id();
         self.inner.write().windows.insert(id, window);
@@ -94,6 +115,48 @@ impl PlatformWindows {
     }
 }
 
+/// Cursor and input method state requested by the UI drawn in a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiState {
+    /// Cursor icon, or `None` to hide the cursor.
+    pub cursor: Option<CursorIcon>,
+    /// Text input area, or `None` when the UI is not editing text.
+    pub ime: Option<ImeArea>,
+}
+
+impl Default for UiState {
+    /// The state of a newly created native window.
+    fn default() -> Self {
+        Self {
+            cursor: Some(CursorIcon::Default),
+            ime: None,
+        }
+    }
+}
+
+/// Area of a window, in physical pixels, where text is being edited. The
+/// input method places its candidate window next to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImeArea {
+    /// Left edge.
+    pub x: f64,
+    /// Top edge.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
+}
+
+impl ImeArea {
+    fn request_data(self) -> ImeRequestData {
+        ImeRequestData::default().with_cursor_area(
+            PhysicalPosition::new(self.x, self.y).into(),
+            PhysicalSize::new(self.width, self.height).into(),
+        )
+    }
+}
+
 /// Read guard for the main platform window.
 pub struct MainWindow<'a> {
     guard: MappedRwLockReadGuard<'a, Window>,
@@ -130,6 +193,8 @@ pub struct Window {
     /// If the window is completely hidden (minized or covered by another
     /// window)
     occluded: bool,
+    /// UI state last applied to the native window.
+    ui_state: UiState,
 }
 
 impl Window {
@@ -140,6 +205,7 @@ impl Window {
             focused: false,
             theme: window.theme().unwrap_or(Theme::Dark),
             occluded: false,
+            ui_state: UiState::default(),
             raw: Arc::new(WindowSurfaceTarget { raw: window }),
         }
     }
@@ -183,6 +249,37 @@ impl Window {
     #[must_use]
     pub fn theme(&self) -> Theme {
         self.theme
+    }
+
+    /// Applies the parts of `state` that differ from the last applied state.
+    fn apply_ui_state(&mut self, state: UiState) {
+        let window = &self.raw.raw;
+        if self.ui_state.cursor.is_some() != state.cursor.is_some() {
+            window.set_cursor_visible(state.cursor.is_some());
+        }
+        if let Some(icon) = state.cursor
+            && self.ui_state.cursor != Some(icon)
+        {
+            window.set_cursor(icon.into());
+        }
+
+        let request = match (self.ui_state.ime, state.ime) {
+            (None, Some(area)) => ImeEnableRequest::new(
+                ImeCapabilities::new().with_cursor_area(),
+                area.request_data(),
+            )
+            .map(ImeRequest::Enable),
+            (Some(old), Some(area)) if old != area => Some(ImeRequest::Update(area.request_data())),
+            (Some(_), None) => Some(ImeRequest::Disable),
+            _ => None,
+        };
+        if let Some(request) = request
+            && let Err(error) = window.request_ime_update(request)
+        {
+            tracing::warn!(?error, "could not update the window input method");
+        }
+
+        self.ui_state = state;
     }
 
     /// Handles [`WindowEvent`]. These should first be proccessed
