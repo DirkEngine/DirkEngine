@@ -127,10 +127,7 @@ impl Descriptor<'_> {
 
 /// Whether the array at `binding` holds storage images.
 const fn is_storage(binding: u32) -> bool {
-    matches!(
-        binding,
-        heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D
-    )
+    matches!(binding, heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D)
 }
 
 /// The heap's argument buffer and what fills its empty slots.
@@ -389,11 +386,19 @@ impl Heap {
     /// `useResources` takes them: `count` at `resources`.
     pub(super) fn declare(
         declared: &Declared,
-        mut declare: impl FnMut(NonNull<NonNull<ProtocolObject<dyn MTLResource>>>, usize, MTLResourceUsage),
+        mut declare: impl FnMut(
+            NonNull<NonNull<ProtocolObject<dyn MTLResource>>>,
+            usize,
+            MTLResourceUsage,
+        ),
     ) {
         for (resources, usage) in declared.iter().zip(USAGES) {
             if !resources.is_empty() {
-                declare(NonNull::from(resources.as_slice()).cast(), resources.len(), usage);
+                declare(
+                    NonNull::from(resources.as_slice()).cast(),
+                    resources.len(),
+                    usage,
+                );
             }
         }
     }

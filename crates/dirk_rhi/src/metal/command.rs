@@ -64,12 +64,10 @@ struct Fences {
 impl Fences {
     /// A fence for a new encoder.
     fn take(&mut self) -> Fence {
-        let fence = self.free.pop().unwrap_or_else(|| {
-            self.device
-                .newFence()
-                .expect("Metal creates fences")
-                .into()
-        });
+        let fence = self
+            .free
+            .pop()
+            .unwrap_or_else(|| self.device.newFence().expect("Metal creates fences").into());
         self.used.push(fence.clone());
         fence
     }
@@ -125,6 +123,20 @@ impl Encoder {
     }
 }
 
+/// How a command buffer orders its encoders; see the module's
+/// documentation.
+struct Order {
+    fences: Arc<Mutex<Fences>>,
+    /// The fences encoders begun from now on wait for: those of the
+    /// encoders begun before the last barrier but after the one before it,
+    /// or the queue's join fence before the first barrier ending an
+    /// encoder.
+    waits: Vec<Fence>,
+    /// The fences of the encoders begun since the last barrier; the open
+    /// encoder updates the last one.
+    since: Vec<Fence>,
+}
+
 /// What render and compute encoders make resident: every heap, and the
 /// resources the bindless heap declares, as of their generations.
 #[derive(Default)]
@@ -135,25 +147,17 @@ struct Residency {
     heaps: Vec<Object<dyn MTLHeap>>,
     /// Alive until the frame closes, which command buffers cannot outlive.
     declared: Declared,
+    /// Whether the open encoder made these resident.
+    resident: bool,
 }
 
 /// A command buffer being recorded.
 pub(crate) struct CommandBuffer {
     raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     encoder: Encoder,
-    fences: Arc<Mutex<Fences>>,
-    /// The fences encoders begun from now on wait for: those of the
-    /// encoders begun before the last barrier but after the one before it,
-    /// or the queue's join fence before the first barrier ending an
-    /// encoder.
-    waits: Vec<Fence>,
-    /// The fences of the encoders begun since the last barrier; the open
-    /// encoder updates the last one.
-    since: Vec<Fence>,
-    /// What render and compute encoders make resident.
-    residency: Residency,
-    /// Whether the open encoder made `residency` resident.
-    resident: bool,
+    // Boxed, so encoders, which are moved around, stay small.
+    order: Box<Order>,
+    residency: Box<Residency>,
     /// Primitives the bound pipeline draws.
     pub(super) primitive: MTLPrimitiveType,
     /// The bound index buffer, its offset and type.
@@ -205,11 +209,12 @@ impl CommandPool {
         Ok(CommandBuffer {
             raw,
             encoder: Encoder::None,
-            fences: self.fences.clone(),
-            waits: vec![queue.join.clone()],
-            since: Vec::new(),
-            residency: Residency::default(),
-            resident: false,
+            order: Box::new(Order {
+                fences: self.fences.clone(),
+                waits: vec![queue.join.clone()],
+                since: Vec::new(),
+            }),
+            residency: Box::default(),
             primitive: MTLPrimitiveType::Triangle,
             indices: None,
             compute_pipeline: None,
@@ -227,18 +232,18 @@ impl CommandBuffer {
     ) {
         self.end_encoding();
         let encoder = autoreleasepool(|_| begin(&self.raw));
-        for fence in &self.waits {
+        for fence in &self.order.waits {
             encoder.wait(fence);
         }
-        self.since.push(self.fences.lock().take());
-        self.resident = false;
+        self.order.since.push(self.order.fences.lock().take());
+        self.residency.resident = false;
         self.encoder = encoder;
     }
 
     /// Ends the open encoder, if any, updating its fence.
     pub(super) fn end_encoding(&mut self) {
         let encoder = std::mem::replace(&mut self.encoder, Encoder::None);
-        if let Some(fence) = self.since.last() {
+        if let Some(fence) = self.order.since.last() {
             encoder.end(fence);
         }
         self.compute_pipeline = None;
@@ -250,8 +255,8 @@ impl CommandBuffer {
     /// ones before, so nothing is lost when there are none.
     pub(super) fn sync(&mut self) {
         self.end_encoding();
-        if !self.since.is_empty() {
-            self.waits = std::mem::take(&mut self.since);
+        if !self.order.since.is_empty() {
+            self.order.waits = std::mem::take(&mut self.order.since);
         }
     }
 
@@ -259,7 +264,7 @@ impl CommandBuffer {
     /// `join`: an encoder waiting for every encoder recorded updates it.
     pub(super) fn finish(&mut self, device: &Device, join: &Fence) -> Result<()> {
         self.sync();
-        device.join(&self.raw, &self.waits, join)
+        device.join(&self.raw, &self.order.waits, join)
     }
 
     /// The command buffer, to commit once recording finished.
@@ -321,7 +326,9 @@ impl CommandBuffer {
         ) -> Option<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>>,
     ) -> &ProtocolObject<dyn MTLRenderCommandEncoder> {
         self.open(|commands| {
-            Encoder::Render(begin(commands).expect("Metal creates render encoders for validated passes"))
+            Encoder::Render(
+                begin(commands).expect("Metal creates render encoders for validated passes"),
+            )
         });
         self.render()
     }
@@ -344,17 +351,19 @@ impl CommandBuffer {
         if self.residency.generations != generations {
             let (heaps, (declared_generation, declared)) =
                 (device.allocator.heaps(), device.heap.declared());
-            self.residency = Residency {
+            *self.residency = Residency {
                 generations: [heaps.0, declared_generation],
                 heaps: heaps.1,
                 declared,
+                resident: false,
             };
-            self.resident = false;
         }
-        if self.resident {
+        if self.residency.resident {
             return;
         }
-        let Residency { heaps, declared, .. } = &self.residency;
+        let Residency {
+            heaps, declared, ..
+        } = &*self.residency;
         match &self.encoder {
             Encoder::Render(encoder) => {
                 for heap in heaps {
@@ -386,7 +395,7 @@ impl CommandBuffer {
                 unreachable!("only draws and dispatches reach the bindless heap")
             }
         }
-        self.resident = true;
+        self.residency.resident = true;
     }
 }
 

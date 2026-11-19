@@ -8,7 +8,8 @@ use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLFunction, MTLLibrary, MTLLoadAction,
     MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerState, MTLStoreAction, MTLTexture, MTLTextureType, MTLViewport,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerState, MTLStoreAction,
+    MTLTexture, MTLTextureType, MTLViewport,
 };
 use parking_lot::Mutex;
 

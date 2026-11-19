@@ -105,9 +105,14 @@ impl Allocator {
     ) -> Result<Option<Retained<T>>> {
         let mut blocks = self.blocks.lock();
         let fits = |block: &&Block| {
-            block.memory == memory && block.raw.maxAvailableSizeWithAlignment(needed.align) >= needed.size
+            block.memory == memory
+                && block.raw.maxAvailableSizeWithAlignment(needed.align) >= needed.size
         };
-        if let Some(resource) = blocks.iter().filter(fits).find_map(|block| create(&block.raw)) {
+        if let Some(resource) = blocks
+            .iter()
+            .filter(fits)
+            .find_map(|block| create(&block.raw))
+        {
             return Ok(Some(resource));
         }
         let desc = MTLHeapDescriptor::new();
@@ -137,8 +142,8 @@ impl Allocator {
         let mut spares = Vec::new();
         let count = blocks.len();
         blocks.retain(|block| {
-            let keep = block.raw.usedSize() > 0
-                || (block.shared && !spares.contains(&block.memory));
+            let keep =
+                block.raw.usedSize() > 0 || (block.shared && !spares.contains(&block.memory));
             if keep && block.raw.usedSize() == 0 {
                 spares.push(block.memory);
             }

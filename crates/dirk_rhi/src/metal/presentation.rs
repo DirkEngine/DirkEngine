@@ -104,10 +104,10 @@ impl Swapchain {
     /// formats it supports, or an sRGB one, and the present mode, or FIFO if
     /// unsupported. Waiting for a drawable never times out, as acquisitions
     /// block until an image is available.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the signature is shared with Vulkan, where this can fail"
-    )]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the surface belongs to another device.
     pub(crate) fn new(
         device: &Arc<Device>,
         surface: Surface,

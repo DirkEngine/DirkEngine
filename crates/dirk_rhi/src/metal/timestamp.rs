@@ -30,12 +30,9 @@ impl Clock {
     pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Option<Self> {
         // SAFETY: the counter set name is a constant string.
         let name = unsafe { MTLCommonCounterSetTimestamp };
-        let Some(counters) = device
+        let counters = device
             .counterSets()
-            .and_then(|sets| sets.iter().find(|set| &*set.name() == name))
-        else {
-            return None;
-        };
+            .and_then(|sets| sets.iter().find(|set| &*set.name() == name))?;
         let sampling = if device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary) {
             Sampling::StageBoundary
         } else if device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary) {

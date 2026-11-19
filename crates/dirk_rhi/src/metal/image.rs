@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString};
-use objc2_metal::{
-    MTLResource, MTLTexture, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage,
-};
+use objc2_metal::{MTLResource, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
 
 use super::{
     Check, Device, Object,
