@@ -15,9 +15,10 @@ use cargo_gpu_install::{
     install::{Install, InstalledBackend},
     spirv_builder::{Capability, ModuleResult, SpirvMetadata},
 };
+use dirk_shaders::bindless::heap;
 use rspirv::{
     dr::{Instruction, Module, Operand},
-    spirv::{Decoration, ExecutionMode, ExecutionModel, Op, StorageClass},
+    spirv::{Decoration, Dim, ExecutionMode, ExecutionModel, ImageFormat, Op, StorageClass},
 };
 
 /// Compiles the rust-gpu shader crate at `shader_crate` (relative to the
@@ -161,6 +162,9 @@ impl Reflected {
         let push_size = Types(&module)
             .push_size()
             .with_context(|| format!("reflecting the push data of `{entry_point}`"))?;
+        Types(&module)
+            .check_bindings()
+            .with_context(|| format!("checking the heap arrays `{entry_point}` declares"))?;
         let workgroup_size = match stage {
             Stage::Compute => Self::workgroup_size(&module)
                 .with_context(|| format!("`{entry_point}` declares no workgroup size"))?,
@@ -208,6 +212,84 @@ impl Types<'_> {
         ensure!(blocks.next().is_none(), "more than one push constant block");
         let pointer = self.get(variable.result_type.context("untyped variable")?)?;
         self.size(id_operand(pointer, 1)?)
+    }
+
+    /// Checks that every resource the module declares is one of the heap's
+    /// arrays, in descriptor set 0, declared with the elements it holds.
+    fn check_bindings(&self) -> anyhow::Result<()> {
+        let resources = self.0.types_global_values.iter().filter(|instruction| {
+            instruction.class.opcode == Op::Variable
+                && matches!(
+                    instruction.operands.first(),
+                    Some(Operand::StorageClass(
+                        StorageClass::UniformConstant
+                            | StorageClass::Uniform
+                            | StorageClass::StorageBuffer
+                    ))
+                )
+        });
+        for variable in resources {
+            let id = variable.result_id.context("unnamed variable")?;
+            let set = self.decoration(id, None, Decoration::DescriptorSet);
+            let binding = self.decoration(id, None, Decoration::Binding);
+            let (Some(0), Some(binding)) = (set, binding) else {
+                bail!("resource {id} is not in descriptor set 0, the heap, but in {set:?}");
+            };
+            let expected = Element::at(binding)
+                .with_context(|| format!("binding {binding} is not one of the heap's arrays"))?;
+            let declared = self
+                .element(variable)
+                .with_context(|| format!("reflecting the array at binding {binding}"))?;
+            ensure!(
+                declared == expected,
+                "binding {binding} holds {expected:?}, not the {declared:?} declared"
+            );
+        }
+        Ok(())
+    }
+
+    /// The elements of the runtime array `variable` points to.
+    fn element(&self, variable: &Instruction) -> anyhow::Result<Element> {
+        let pointer = self.get(variable.result_type.context("untyped variable")?)?;
+        let array = self.get(id_operand(pointer, 1)?)?;
+        ensure!(
+            array.class.opcode == Op::TypeRuntimeArray,
+            "it is not a runtime array"
+        );
+        let element = self.get(id_operand(array, 0)?)?;
+        let class = variable.operands.first();
+        Ok(match (class, element.class.opcode) {
+            (Some(Operand::StorageClass(StorageClass::StorageBuffer)), Op::TypeStruct) => {
+                Element::StorageBuffer
+            }
+            (Some(Operand::StorageClass(StorageClass::UniformConstant)), Op::TypeSampler) => {
+                Element::Sampler
+            }
+            (Some(Operand::StorageClass(StorageClass::UniformConstant)), Op::TypeImage) => {
+                let Some(&Operand::Dim(dim)) = element.operands.get(1) else {
+                    bail!("the image has no dimensionality");
+                };
+                let [depth, arrayed, multisampled, sampled] =
+                    [2, 3, 4, 5].map(|operand| literal_operand(element, operand));
+                let (arrayed, depth) = (arrayed? == 1, depth? == 1);
+                ensure!(multisampled? == 0, "the images are multisampled");
+                match sampled? {
+                    1 => Element::Texture {
+                        dim,
+                        arrayed,
+                        depth,
+                    },
+                    2 if !depth
+                        && element.operands.get(6)
+                            == Some(&Operand::ImageFormat(ImageFormat::Unknown)) =>
+                    {
+                        Element::StorageImage { dim, arrayed }
+                    }
+                    _ => bail!("the images are neither sampled nor formatless storage images"),
+                }
+            }
+            (class, opcode) => bail!("{opcode:?} elements in {class:?} are not in the heap"),
+        })
     }
 
     /// Size in bytes of the type `id`, as laid out by its decorations.
@@ -273,6 +355,48 @@ impl Types<'_> {
     }
 }
 
+/// What each element of one of the heap's arrays is, as shaders declare it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Element {
+    /// Sampled images, declared as depth images or not.
+    Texture { dim: Dim, arrayed: bool, depth: bool },
+    /// Storage images, declared without a format.
+    StorageImage { dim: Dim, arrayed: bool },
+    /// Samplers.
+    Sampler,
+    /// Storage buffers.
+    StorageBuffer,
+}
+
+impl Element {
+    /// The elements of the heap's array at `binding`, if it has one there.
+    fn at(binding: u32) -> Option<Self> {
+        let texture = |dim, arrayed, depth| Self::Texture {
+            dim,
+            arrayed,
+            depth,
+        };
+        let storage = |dim, arrayed| Self::StorageImage { dim, arrayed };
+        Some(match binding {
+            heap::TEXTURES_2D => texture(Dim::Dim2D, false, false),
+            heap::TEXTURES_2D_ARRAY => texture(Dim::Dim2D, true, false),
+            heap::TEXTURES_CUBE => texture(Dim::DimCube, false, false),
+            heap::TEXTURES_CUBE_ARRAY => texture(Dim::DimCube, true, false),
+            heap::TEXTURES_3D => texture(Dim::Dim3D, false, false),
+            heap::STORAGE_IMAGES_2D => storage(Dim::Dim2D, false),
+            heap::STORAGE_IMAGES_2D_ARRAY => storage(Dim::Dim2D, true),
+            heap::STORAGE_IMAGES_3D => storage(Dim::Dim3D, false),
+            heap::SAMPLERS => Self::Sampler,
+            heap::BUFFERS => Self::StorageBuffer,
+            heap::DEPTH_TEXTURES_2D => texture(Dim::Dim2D, false, true),
+            heap::DEPTH_TEXTURES_2D_ARRAY => texture(Dim::Dim2D, true, true),
+            heap::DEPTH_TEXTURES_CUBE => texture(Dim::DimCube, false, true),
+            heap::DEPTH_TEXTURES_CUBE_ARRAY => texture(Dim::DimCube, true, true),
+            _ => return None,
+        })
+    }
+}
+
 /// The id operand at `index` of `instruction`.
 fn id_operand(instruction: &Instruction, index: usize) -> anyhow::Result<u32> {
     match instruction.operands.get(index) {
@@ -307,11 +431,47 @@ fn type_name(entry_point: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::type_name;
+    use dirk_shaders::bindless::heap;
+    use rspirv::{
+        dr::{Builder, Operand},
+        spirv::{Decoration, Dim, ImageFormat, StorageClass},
+    };
+
+    use super::{Types, type_name};
 
     #[test]
     fn entry_points_become_pascal_case_types() {
         assert_eq!(type_name("fill_vs"), "FillVs");
         assert_eq!(type_name("mesh::shadow_fs"), "MeshShadowFs");
+    }
+
+    /// Checks a module declaring an array of single-sampled 2D images, of
+    /// `depth` and `sampled` as `OpTypeImage` encodes them, at `binding`.
+    fn check(binding: u32, depth: u32, sampled: u32) -> anyhow::Result<()> {
+        let mut builder = Builder::new();
+        let float = builder.type_float(32, None);
+        let format = ImageFormat::Unknown;
+        let image = builder.type_image(float, Dim::Dim2D, depth, 0, 0, sampled, format, None);
+        let array = builder.type_runtime_array(image);
+        let pointer = builder.type_pointer(None, StorageClass::UniformConstant, array);
+        let variable = builder.variable(pointer, None, StorageClass::UniformConstant, None);
+        builder.decorate(variable, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+        builder.decorate(variable, Decoration::Binding, [Operand::LiteralBit32(binding)]);
+        Types(&builder.module()).check_bindings()
+    }
+
+    #[test]
+    fn heap_arrays_are_declared_with_the_elements_they_hold() {
+        // Depth 2 is unknown, as `Image!` declares by default; sampled 2 is
+        // a storage image.
+        check(heap::TEXTURES_2D, 2, 1).expect("2D textures");
+        check(heap::DEPTH_TEXTURES_2D, 1, 1).expect("2D depth textures");
+        check(heap::STORAGE_IMAGES_2D, 2, 2).expect("2D storage images");
+        assert!(check(heap::TEXTURES_2D_ARRAY, 2, 1).is_err(), "not arrayed");
+        assert!(check(heap::DEPTH_TEXTURES_2D, 2, 1).is_err(), "not depth");
+        assert!(check(heap::TEXTURES_2D, 1, 1).is_err(), "depth");
+        assert!(check(heap::TEXTURES_2D, 2, 2).is_err(), "storage");
+        assert!(check(heap::SAMPLERS, 2, 1).is_err(), "not samplers");
+        assert!(check(64, 2, 1).is_err(), "no array there");
     }
 }
