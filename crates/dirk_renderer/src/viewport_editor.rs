@@ -357,6 +357,8 @@ fn draw_viewport_window(
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. }
             | InputEvent::FocusChanged(true)
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
             | InputEvent::ModifiersChanged(_) => {}
         }
     }

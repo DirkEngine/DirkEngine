@@ -39,15 +39,6 @@ impl LogicalKey {
     pub fn character(text: impl AsRef<str>) -> Self {
         Self::Character(text.as_ref().to_lowercase())
     }
-    /// Returns the text stored by the logical key
-    #[must_use]
-    pub fn text(&self) -> Option<&str> {
-        match self {
-            Self::Character(text) if !text.is_empty() => Some(text),
-            Self::Named(NamedKey::Space) => Some(" "),
-            _ => None,
-        }
-    }
 }
 
 /// Named logical keyboard keys used by engine bindings.
@@ -159,6 +150,12 @@ pub enum InputEvent {
         /// Active keyboard modifiers.
         modifiers: Modifiers,
     },
+    /// Text typed by the user, as produced by the keyboard layout. Unlike
+    /// [`InputEvent::Key`], it preserves case and is repeated while a key is
+    /// held.
+    Text(String),
+    /// Composition update from the platform input method.
+    Ime(ImeEvent),
     /// The pointer moved.
     PointerMoved {
         /// Current clamped normalized position.
@@ -196,6 +193,19 @@ pub enum InputEvent {
     /// The input region gained or lost keyboard focus. Losing focus releases
     /// held input even when the OS does not send matching release events.
     FocusChanged(bool),
+}
+
+/// Platform-independent input method event.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ImeEvent {
+    /// Composition started.
+    Enabled,
+    /// Current, uncommitted composition text.
+    Preedit(String),
+    /// Final composition text.
+    Commit(String),
+    /// Composition ended.
+    Disabled,
 }
 
 /// A raw input that can activate an [`InputAction`].
@@ -344,6 +354,8 @@ impl InputState {
             | InputEvent::PointerEntered
             | InputEvent::Scroll { .. }
             | InputEvent::FocusChanged(true)
+            | InputEvent::Text(_)
+            | InputEvent::Ime(_)
             | InputEvent::ModifiersChanged(_) => {}
             // release held keys
             InputEvent::PointerLeft | InputEvent::FocusChanged(false) => {
