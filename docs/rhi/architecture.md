@@ -68,33 +68,43 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   resource tracking because encoders cannot outlive their frame.
 - Freed entries are collected when a frame begins (it already waits for its slot), and on
   `Rhi::wait_idle` / `Drop for Rhi`.
+- Beginning frame F waits for each queue's last submission as recorded when frame
+  `F - FRAMES_IN_FLIGHT + 1` began, so the wait stays correct even if a `Frame` is leaked.
 - `Completion` is `#[derive(Clone, Copy)] struct Completion { queue: QueueType, value: u64 }`
   with `rhi.wait(c, timeout)` and `rhi.is_complete(c)`.
 
 ## Frames
 
 ```rust
-let mut frame = rhi.begin_frame()?;          // waits for this slot's previous work, frees garbage
-scene_data.get_mut(&frame).write(&scene);    // PerFrame<T>: safe per-slot host writes
+let frame = rhi.begin_frame()?;              // waits for this slot's previous work, frees garbage
+scene_data.write(&frame, 0, bytes)?;         // PerFrame<Buffer>: safe per-slot host writes
 let mut cmd = frame.encoder::<Graphics>("scene")?;
+cmd.wait_for(upload)?;                       // the GPU waits for another queue's Completion
 // ... record ...
 frame.submit(cmd)?;                           // or submit several, across queues
 frame.present(acquired)?;                     // presentation is part of the frame
-frame.finish()?;                              // closes the frame (also on Drop)
+frame.finish();                               // closes the frame (also on Drop)
 ```
 
 - `FRAMES_IN_FLIGHT` is a single constant in `dirk_rhi`.
 - `PerFrame<T>` replaces hand-rolled `[T; MAX_FRAMES_IN_FLIGHT]` arrays and their
-  `// SAFETY: waited for this slot` comments. Holding `&Frame` proves the slot is idle.
+  `// SAFETY: waited for this slot` comments. Holding `&Frame` proves the slot is idle;
+  `get`/`get_mut` take the frame, and `PerFrame<Buffer>::write` is the safe host write.
+- `begin_frame` borrows the `Rhi` mutably, so only one frame is open; `frame.rhi()` creates
+  objects meanwhile. Encoders borrow the frame and record on its thread.
 - Headless users (tests, tools) use frames too. A frame is a recording scope, not a window.
 
 ## Queues and recording
 
-- Typed queues stay: `Graphics` and `Copy` (sealed `QueueKind`), with the `compile_fail`
-  doctests proving a copy encoder cannot begin a render pass and a render pass borrows its
-  encoder. Copy-queue ownership transfer is handled by the RHI/uploads, not callers.
-- No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync);
-  only queue submission/present take that queue's lock.
+- Typed queues stay: `Graphics` and `CopyQueue` (sealed `QueueKind`; not `Copy`, which
+  glob imports would let shadow the `Copy` trait), with the `compile_fail` doctests proving
+  a copy encoder cannot blit or begin a render pass and a render pass borrows its encoder.
+  Copy-queue ownership transfer is handled by the RHI/uploads, not callers; barriers carry
+  an optional `QueueTransfer` recorded on both queues.
+- No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync)
+  apart from `gpu-allocator`'s allocator, locked only to allocate and free memory, and the
+  list of dropped objects, locked to add and collect them; only
+  queue submission/present take that queue's lock, and waits hold none.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes outside `PerFrame`, and creating shaders from unvalidated bytes.
 - Dynamic state defaults: viewport and scissor default to the render area.
