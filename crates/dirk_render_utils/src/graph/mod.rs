@@ -69,8 +69,10 @@ use resources::{Resources, Source, Table};
 ///     .depth(depth, LoadOp::Clear(1.0))
 ///     .record(|pass| pass.draw(scene, &[1.0; 4], 0..3, 0..1))?;
 /// graph.execute(frame, &mut encoder, transients)?;
-/// let presentable = frame.submit_with(encoder, acquired)?;
-/// frame.present(presentable)
+/// for presentable in frame.submit_with(encoder, [acquired])? {
+///     frame.present(presentable)?;
+/// }
+/// # Ok(())
 /// # }
 /// ```
 pub struct RenderGraph<'a> {
