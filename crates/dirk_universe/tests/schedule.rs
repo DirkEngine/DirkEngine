@@ -150,7 +150,7 @@ fn filters_and_deltas_order_their_systems_after_writers() {
     fn changed(_query: Query<Entity, Changed<A>>) {
         log("changed");
     }
-    fn delta(_query: Query<(Entity, Delta<A>)>) {
+    fn delta(_changes: Changes<A>) {
         log("delta");
     }
     let mut universe = universe_with_entity(Universe::builder())

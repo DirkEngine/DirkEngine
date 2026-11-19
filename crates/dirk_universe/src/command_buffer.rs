@@ -106,8 +106,9 @@ impl CommandBuffer {
         self.commands
             .push(Command::SetComponent(entity, Box::new(component)));
     }
-    /// Removes a single component, dropping its value immediately; `Delta`
-    /// reports the removal.
+    /// Removes a single component when the buffer is applied, dropping its
+    /// value then. `Changes` reports the removal to systems that saw the
+    /// component; one added and removed between two runs is not reported.
     ///
     /// The entity itself is **not** despawned. If the component is not
     /// present this is a no-op and records nothing.

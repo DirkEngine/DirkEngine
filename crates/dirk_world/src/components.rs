@@ -8,7 +8,7 @@ use dirk_assets::{AssetHandle, AssetLease, AssetRegistry, Model};
 use dirk_universe::{
     Entity,
     components::Component,
-    query::{Delta, Query},
+    query::{Changes, Delta},
     systems::System,
 };
 use glam::{Mat4, Quat, Vec3};
@@ -61,7 +61,7 @@ impl ModelUploadSystem {
 }
 
 impl System for ModelUploadSystem {
-    type Params<'u> = Query<'u, (Entity, Delta<'u, Renderable>)>;
+    type Params<'u> = Changes<'u, Renderable>;
 
     fn run(&mut self, renderables: Self::Params<'_>) {
         for (entity, delta) in &renderables {

@@ -20,7 +20,7 @@ pub mod components;
 use components::{AnyComponent, Component, Components};
 
 pub mod query;
-use query::{Join, Query, ReadOnlyQueryData, filter::QueryFilter};
+use query::{Query, ReadOnlyQueryData, filter::QueryFilter};
 
 pub mod systems;
 use systems::{ErasedSystem, IntoSystem};
@@ -50,8 +50,8 @@ pub mod prelude {
         CommandBuffer, Entity, InWorld, Universe, UniverseHandle, World, WorldId,
         components::Component,
         query::{
-            Delta, Lagged, Query,
-            filter::{Added, Changed, With, Without},
+            Changes, Delta, Lagged, Query,
+            filter::{Changed, With, Without},
         },
         systems::{Commands, DeltaTime, IntoSystem, System},
     };
@@ -371,8 +371,8 @@ impl Universe {
     }
 
     /// Returns a read-only query over the current universe, for use outside
-    /// systems. `Added`, `Changed` and `Delta` treat every present component
-    /// as new, since there is no previous run to compare against.
+    /// systems. `Changed` treats every present component as new, since there
+    /// is no previous run to compare against.
     #[must_use]
     pub fn query<D: ReadOnlyQueryData>(&self) -> Query<'_, D> {
         Query::new(self, 0)
@@ -380,10 +380,7 @@ impl Universe {
 
     /// Like [`Universe::query`], restricted by the filter `F`.
     #[must_use]
-    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> Query<'_, D, F>
-    where
-        D::Liveness: Join<F::Liveness>,
-    {
+    pub fn query_filtered<D: ReadOnlyQueryData, F: QueryFilter>(&self) -> Query<'_, D, F> {
         Query::new(self, 0)
     }
 

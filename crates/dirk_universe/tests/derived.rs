@@ -175,7 +175,7 @@ fn removed_outputs_are_reported_as_deltas() {
     thread_local! {
         static REMOVED: Cell<usize> = const { Cell::new(0) };
     }
-    fn observe(momenta: Query<(Entity, Delta<Momentum>)>) {
+    fn observe(momenta: Changes<Momentum>) {
         let removed = momenta.iter().filter(|(_, delta)| delta.value().is_none());
         REMOVED.set(REMOVED.get() + removed.count());
     }

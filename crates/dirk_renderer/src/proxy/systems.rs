@@ -7,7 +7,7 @@ use crate::{Error, render_commands::RenderCommandSender};
 use dirk_player::PlayerId;
 use dirk_universe::{
     Entity, InWorld, World, WorldId,
-    query::{Delta, Query},
+    query::{Changes, Delta},
     systems::System,
 };
 use dirk_world::components::{Renderable, Transform};
@@ -82,11 +82,11 @@ impl RendererSystem {
 
 impl System for RendererSystem {
     type Params<'u> = (
-        Query<'u, (Entity, Delta<'u, World>)>,
-        Query<'u, (Entity, Delta<'u, InWorld>)>,
-        Query<'u, (Entity, Delta<'u, Renderable>)>,
-        Query<'u, (Entity, Delta<'u, Transform>)>,
-        Query<'u, (Entity, Delta<'u, PlayerId>)>,
+        Changes<'u, World>,
+        Changes<'u, InWorld>,
+        Changes<'u, Renderable>,
+        Changes<'u, Transform>,
+        Changes<'u, PlayerId>,
     );
 
     fn run(&mut self, (worlds, locations, meshes, transforms, players): Self::Params<'_>) {
@@ -106,28 +106,30 @@ impl System for RendererSystem {
             }
         }
 
-        let mut despawned = HashSet::new();
+        let mut despawned = Vec::new();
         for (entity, delta) in &locations {
             match delta {
                 Delta::Set(in_world) => self.place(entity, in_world.0),
                 Delta::Removed => {
-                    despawned.insert(entity);
+                    self.proxies.remove(&entity);
+                    despawned.push(entity);
                 }
             }
         }
 
-        for (entity, delta) in meshes.iter().filter(|(e, _)| !despawned.contains(e)) {
+        // Only entities inside worlds have proxies: world entities can carry
+        // components too, and despawned entities just lost theirs.
+        for (entity, delta) in meshes.iter().filter(|(e, _)| self.proxies.contains(e)) {
             self.mesh(entity, delta.value());
         }
-        for (entity, delta) in transforms.iter().filter(|(e, _)| !despawned.contains(e)) {
+        for (entity, delta) in transforms.iter().filter(|(e, _)| self.proxies.contains(e)) {
             self.transform(entity, delta.value());
         }
-        for (entity, delta) in players.iter().filter(|(e, _)| !despawned.contains(e)) {
+        for (entity, delta) in players.iter().filter(|(e, _)| self.proxies.contains(e)) {
             self.player(entity, delta.value().copied());
         }
 
         for entity in despawned {
-            self.proxies.remove(&entity);
             self.sender.enqueue_command(move |renderer| {
                 renderer.clear_viewports_for_camera(entity);
                 renderer.scene_manager.destroy_proxy(entity)?;
@@ -140,5 +142,31 @@ impl System for RendererSystem {
                 Ok(())
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dirk_universe::{Universe, World};
+    use dirk_world::components::Transform;
+
+    use super::RendererSystem;
+    use crate::render_commands;
+
+    #[test]
+    fn world_level_components_do_not_update_proxies() {
+        let (sender, receiver) = render_commands::channel();
+        let mut universe = Universe::builder()
+            .with_system(RendererSystem::new(sender))
+            .build()
+            .expect("systems should schedule");
+        let mut cmd = universe.handle().command_buffer();
+        let world = cmd.create_world(World::builder("w"));
+        cmd.set_component(world.entity(), Transform::default());
+        cmd.submit();
+        universe.tick(0.0);
+
+        // Only the scene is created; the world entity has no proxy to update.
+        assert_eq!(receiver.collect().len(), 1);
     }
 }

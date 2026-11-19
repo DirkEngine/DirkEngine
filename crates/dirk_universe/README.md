@@ -84,7 +84,6 @@ Overlapping read/write or write/write borrows within one system are rejected
 by `UniverseBuilder::build`, conservatively even when filters would make them
 disjoint.
 
-`Added<C>` matches components attached since the observing system last ran.
 `Changed<C>` matches additions, replacements, and mutable dereferences since
 that system last ran. Merely fetching or reading a mutable component does not
 mark it changed. Assigning the same value does; there is no value comparison.
@@ -93,18 +92,16 @@ Interior mutation through types such as `Cell` is not automatically tracked.
 Each system has its own execution counter. Reading changes never consumes them
 for another system. Multiple edits between observations
 produce one match containing the current value. No historical values are kept.
-Replacing an existing component is changed but not added; removing and
-reinserting it is both. On a system's first run, all present matching components
-count as added and changed. Outside a system, these filters also match all
-present components because there is no previous invocation.
+On a system's first run, all present matching components count as changed.
+Outside a system, `Changed` also matches all present components because there
+is no previous invocation.
 
-`Delta<C>` reports what happened to `C` since the observing system last ran:
-`Delta::Set` with the current value, or `Delta::Removed`. It reports the net
-change, so a component removed and re-added is `Set`, and one added and removed
-again between two runs is not reported at all. Despawned entities report
-`Removed`, which is why a `Delta` can only be combined with `Entity`; the
-compiler rejects other combinations. Removals are kept until every system has
-run once after them.
+To also see removals, a system takes `Changes<C>`. It yields each entity whose
+`C` changed since the system last ran, with a `Delta`: `Delta::Set` with the
+current value, or `Delta::Removed`. Changes are net, so a component removed and
+re-added is `Set`, and one added and removed again between two runs is not
+reported at all. Despawned entities report `Removed`. Removals are kept until
+every system has run once after them.
 
 ```rust
 use dirk_universe::prelude::*;
@@ -112,7 +109,7 @@ use dirk_universe::prelude::*;
 #[derive(Debug, Component)]
 struct Health(u32);
 
-fn synchronize(health: Query<(Entity, Delta<Health>)>) {
+fn synchronize(health: Changes<Health>) {
     for (entity, delta) in &health {
         match delta {
             Delta::Set(value) => println!("{entity:?} now has {} health", value.0),
@@ -127,7 +124,7 @@ assert!(universe.is_ok());
 Structure is data too. A world is an entity carrying a `World` component, and
 may carry any other world-level components. Every other entity carries an
 `InWorld` component naming its world: spawning adds it, `send` replaces it and
-despawning removes it. `Delta<World>` and `Delta<InWorld>` therefore observe
+despawning removes it. `Changes<World>` and `Changes<InWorld>` therefore observe
 world creation and destruction and entity spawns, moves and despawns. `World`
 and `InWorld` are read-only: queries can read them, but only the engine writes
 them. Because worlds are entities, `Query<Entity>` includes them; add
@@ -171,7 +168,7 @@ insertion order. Destroying or despawning a world despawns its entities too.
 ## Scheduling
 
 Nobody orders systems by hand. A system that reads a component, whether through
-`&C`, `Delta<C>` or a filter such as `Changed<C>`, runs after every system that
+`&C`, `Changes<C>` or a filter such as `Changed<C>`, runs after every system that
 writes `C`, so it sees this tick's values. `Lagged<D>` reads `D` before this
 tick's systems write it instead: its system runs before the writers, which also
 breaks dependency cycles. Commands applied at the start of the tick are already
