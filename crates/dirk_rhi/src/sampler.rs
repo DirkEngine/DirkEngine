@@ -1,4 +1,4 @@
-use crate::{Error, Result, Rhi, SamplerIndex, native};
+use crate::{CompareOp, Error, Result, Rhi, SamplerIndex, native};
 
 /// How texels are filtered between samples.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -41,6 +41,11 @@ pub struct SamplerDesc<'a> {
     pub min_lod: f32,
     /// Highest mip level sampled.
     pub max_lod: f32,
+    /// Makes a comparison sampler: depth comparisons with it return how
+    /// many of the filtered texels pass `reference op texel`, from zero to
+    /// one, as shadow maps are filtered. Shaders use comparison samplers
+    /// only to compare depth images, and other samplers never to compare.
+    pub compare: Option<CompareOp>,
 }
 
 impl Default for SamplerDesc<'_> {
@@ -55,6 +60,7 @@ impl Default for SamplerDesc<'_> {
             max_anisotropy: 1,
             min_lod: 0.0,
             max_lod: f32::MAX,
+            compare: None,
         }
     }
 }
@@ -76,6 +82,8 @@ pub struct SamplerInfo {
     pub min_lod: f32,
     /// Highest mip level sampled.
     pub max_lod: f32,
+    /// The comparison of a comparison sampler.
+    pub compare: Option<CompareOp>,
 }
 
 /// How shaders sample images. Destroyed when dropped.
@@ -122,6 +130,7 @@ impl Rhi {
                 max_anisotropy: desc.max_anisotropy,
                 min_lod: desc.min_lod,
                 max_lod: desc.max_lod,
+                compare: desc.compare,
             },
             label: desc.label.into(),
         })

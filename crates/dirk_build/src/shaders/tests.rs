@@ -40,8 +40,10 @@ fn heap_arrays_are_declared_with_the_elements_they_hold() {
     // Depth 2 is unknown, as `Image!` declares by default; sampled 2 is
     // a storage image.
     check(heap::TEXTURES_2D, 2, 1).expect("2D textures");
+    check(heap::DEPTH_TEXTURES_2D, 1, 1).expect("2D depth textures");
     check(heap::STORAGE_IMAGES_2D, 2, 2).expect("2D storage images");
     assert!(check(heap::TEXTURES_2D_ARRAY, 2, 1).is_err(), "not arrayed");
+    assert!(check(heap::DEPTH_TEXTURES_2D, 2, 1).is_err(), "not depth");
     assert!(check(heap::TEXTURES_2D, 1, 1).is_err(), "depth");
     assert!(check(heap::TEXTURES_2D, 2, 2).is_err(), "storage");
     assert!(check(heap::SAMPLERS, 2, 1).is_err(), "not samplers");

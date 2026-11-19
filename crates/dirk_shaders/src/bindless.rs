@@ -20,6 +20,11 @@
 //! }
 //! ```
 //!
+//! Views of depth images live in their own arrays, which shaders declare as
+//! depth images so they can compare them against a reference through a
+//! comparison sampler, as shadow maps are filtered (see
+//! [`DepthTextureIndex`]).
+//!
 //! Each index reads only the arrays of its kind: its `get` accepts only
 //! their element types, which the shader build checks against the heap's
 //! bindings, and masks the index to their capacity, which is the same for
@@ -75,9 +80,17 @@ pub mod heap {
     pub const SAMPLERS: u32 = 8;
     /// Storage buffers.
     pub const BUFFERS: u32 = 9;
+    /// Sampled 2D depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D: u32 = 10;
+    /// Sampled 2D array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D_ARRAY: u32 = 11;
+    /// Sampled cube depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE: u32 = 12;
+    /// Sampled cube array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE_ARRAY: u32 = 13;
 
-    /// Slots in each image array, sampled and storage alike, so an image
-    /// index masked to it fits every image array.
+    /// Slots in each image array, sampled, depth and storage alike, so an
+    /// image index masked to it fits every image array.
     pub const IMAGE_CAPACITY: u32 = 1 << 14;
     /// Slots in the sampler array.
     pub const SAMPLER_CAPACITY: u32 = 1 << 10;
@@ -85,7 +98,7 @@ pub mod heap {
     pub const BUFFER_CAPACITY: u32 = 1 << 16;
 
     /// Capacity of each array, indexed by binding.
-    pub const CAPACITIES: [u32; 10] = [
+    pub const CAPACITIES: [u32; 14] = [
         IMAGE_CAPACITY,
         IMAGE_CAPACITY,
         IMAGE_CAPACITY,
@@ -96,6 +109,10 @@ pub mod heap {
         IMAGE_CAPACITY,
         SAMPLER_CAPACITY,
         BUFFER_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
     ];
 
     /// Index of the first element of the array at `binding` when the arrays
@@ -122,7 +139,10 @@ pub mod heap {
         /// Argument buffer element after the arrays: a pointer to one `u32`
         /// per element, the byte length of storage buffers, which shaders
         /// bound their reads with.
-        #[expect(clippy::cast_possible_truncation, reason = "there are ten arrays")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "There are fourteen arrays."
+        )]
         pub const BUFFER_LENGTHS: u32 = super::first_element(super::CAPACITIES.len() as u32);
     }
 }
@@ -178,12 +198,20 @@ macro_rules! indices {
 
 indices! {
     /// A sampled image view in the heap: in the texture array of its view
-    /// type, such as [`heap::TEXTURES_2D`].
+    /// type, such as [`heap::TEXTURES_2D`]. Views of depth images have a
+    /// [`DepthTextureIndex`] instead.
     TextureIndex: IMAGE_CAPACITY, Texture, Texture,
+    /// A sampled depth image view in the heap: in the depth texture array of
+    /// its view type, such as [`heap::DEPTH_TEXTURES_2D`]. Shaders declare
+    /// these arrays as depth images (`Image!(2D, type = f32, sampled,
+    /// depth)`), which they can sample, load, or compare against a
+    /// reference with a comparison sampler (`sample_depth_reference`).
+    DepthTextureIndex: IMAGE_CAPACITY, DepthTexture, DepthTexture,
     /// A storage image view in the heap: in the storage image array of its
     /// view type, such as [`heap::STORAGE_IMAGES_2D`].
     StorageImageIndex: IMAGE_CAPACITY, StorageImage, StorageImage,
-    /// A sampler in the heap, at [`heap::SAMPLERS`].
+    /// A sampler in the heap, at [`heap::SAMPLERS`]. Comparison samplers
+    /// share the array; shaders use them only with depth comparisons.
     SamplerIndex: SAMPLER_CAPACITY, HeapSampler, Sampler,
 }
 
@@ -272,6 +300,8 @@ impl<T> BufferSlice<T> {
 pub enum HeapIndex {
     /// A sampled image view.
     Texture(TextureIndex),
+    /// A sampled depth image view.
+    DepthTexture(DepthTextureIndex),
     /// A storage image view.
     StorageImage(StorageImageIndex),
     /// A sampler.
@@ -415,11 +445,17 @@ pub mod gpu {
         pub trait Sealed {}
     }
 
-    /// Elements of the heap's arrays of sampled images, which
+    /// Elements of the heap's arrays of sampled color images, which
     /// [`TextureIndex`](super::TextureIndex) reads: single-sampled sampled
     /// 2D, 2D array, cube, cube array and 3D images not declared as depth
     /// images.
     pub trait Texture: sealed::Sealed {}
+
+    /// Elements of the heap's arrays of sampled depth images, which
+    /// [`DepthTextureIndex`](super::DepthTextureIndex) reads: single-sampled
+    /// sampled 2D, 2D array, cube and cube array images declared as depth
+    /// images.
+    pub trait DepthTexture: sealed::Sealed {}
 
     /// Elements of the heap's arrays of storage images, which
     /// [`StorageImageIndex`](super::StorageImageIndex) reads: single-sampled
@@ -480,6 +516,11 @@ pub mod gpu {
             (Cube, True, False, Yes),
             (ThreeD, False, Unknown, Yes),
             (ThreeD, False, False, Yes);
+        DepthTexture:
+            (TwoD, False, True, Yes),
+            (TwoD, True, True, Yes),
+            (Cube, False, True, Yes),
+            (Cube, True, True, Yes);
         StorageImage:
             (TwoD, False, Unknown, No),
             (TwoD, False, False, No),
