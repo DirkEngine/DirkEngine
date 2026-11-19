@@ -113,7 +113,8 @@ frame.finish();                               // closes the frame (also on Drop)
   hold none. On Metal, the heap's lock is also taken when a render pass begins, to
   declare its resources, and blit pipelines are created under a lock on first use.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
-  host writes outside `PerFrame`, and creating shaders from unvalidated bytes.
+  host writes outside `PerFrame`, creating shaders from unvalidated bytes, and indexed
+  indirect draws, whose GPU-side index ranges nothing bounds.
 - **Images have a resting access.** `ImageInfo::rest`, chosen by `ImageDesc::rest` or
   defaulting from the usage (`ImageAccess::resting`: sampled by every stage, else storage
   read/write, else the attachment, else copy source, else copy destination), is the access
@@ -149,6 +150,20 @@ frame.finish();                               // closes the frame (also on Drop)
   `pass.draw_indexed(&pipeline, &push, Indices { buffer, format, offset, range, .. }, instances)`
   check only that the pipeline's targets equal the pass's (one small `==`) and that the
   indices fit their buffer; rebinding an unchanged pipeline or index buffer is skipped.
+- Indirect draws read their arguments from a buffer with `BufferUsage::INDIRECT`, in
+  `BufferAccess::Indirect`: `pass.draw_indirect(&pipeline, &push, IndirectDraws { buffer,
+  offset, count })` makes `count` draws whose `DrawArguments` lie back to back.
+  `dirk_shaders::indirect` defines `DrawArguments` and `DrawIndexedArguments` in the layout
+  Vulkan and Metal both read, so shaders writing draws share the host's types. Recording
+  checks the usage, the 4-byte alignment, that the arguments fit the buffer, and
+  `Limits::max_draw_indirect_count`. Arguments themselves are only known on the GPU:
+  vertex pulling makes any `DrawArguments` memory-safe, but nothing bounds the indices an
+  indexed draw reads (Vulkan would need `robustBufferAccess2`, Metal has no equivalent), so
+  `pass.draw_indexed_indirect(.., IndexBuffer { buffer, format, offset }, draws)` is
+  `unsafe`, promising the indices lie inside the index buffer. Vulkan requires
+  `multiDrawIndirect` and `drawIndirectFirstInstance`; Metal, which has neither a multi-draw
+  nor a count variant, makes one draw per argument. Draw-count buffers
+  (`vkCmdDrawIndirectCount`) wait for a Metal path (indirect command buffers).
 - Clip space is Vulkan's: y points down and depth runs from 0 to 1. Backends with
   another convention flip y when translating shaders.
 
@@ -473,5 +488,4 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Compute pipelines and dispatch, indirect draws, render-graph subresource ranges, async
-compute. Each adds API without breaking the above.
+Compute pipelines and dispatch, render-graph subresource ranges, async compute. Each adds API without breaking the above.
