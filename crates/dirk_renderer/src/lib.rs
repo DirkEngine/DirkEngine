@@ -23,7 +23,7 @@ use dirk_player::PlayerInputSender;
 #[cfg(not(feature = "editor"))]
 use dirk_player::PlayerPresentationAssignments;
 
-use dirk_universe::{Entity, Universe, UniverseBuilder, WorldId};
+use dirk_universe::{Entity, Universe, WorldId};
 use dirk_utils::Version;
 use raw_window_handle::HasDisplayHandle;
 use tracing::{debug, info};
@@ -118,7 +118,8 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
                 editor,
             )?;
 
-            ctx.extend_universe(renderer.universe_builder());
+            let system = renderer.system();
+            ctx.configure_universe(|universe| universe.with_system(system));
             Ok(renderer)
         });
         Ok(())
@@ -448,11 +449,11 @@ impl Renderer {
         }
     }
 
-    /// Returns a [`UniverseBuilder`] that is populated with [`Renderer`] systems.
-    fn universe_builder(&mut self) -> UniverseBuilder {
+    /// Returns the system mirroring universe changes into this [`Renderer`].
+    fn system(&mut self) -> RendererSystem {
         let (sender, receiver) = render_commands::channel();
         self.receivers.push(receiver);
-        Universe::builder().with_system(RendererSystem::new(sender))
+        RendererSystem::new(sender)
     }
 
     /// Ticks the renderer. Used to improve the various internal representations

@@ -424,10 +424,20 @@ impl EngineBuildContext {
         self.handle.workers()
     }
 
-    /// Extends the engine ECS builder with another prepared ECS builder.
-    pub fn extend_universe(&mut self, builder: UniverseBuilder) -> &mut Self {
-        let universe_builder = std::mem::take(&mut self.builder);
-        self.builder = universe_builder.with_other(builder);
+    /// Adds worlds, systems and derived components to the engine's universe:
+    ///
+    /// ```ignore
+    /// ctx.configure_universe(|universe| universe.with_system(movement));
+    /// ```
+    ///
+    /// Return the builder the closure receives. A new builder would drop
+    /// every other plugin's systems and disconnect the published
+    /// [`UniverseHandle`](dirk_universe::UniverseHandle).
+    pub fn configure_universe(
+        &mut self,
+        configure: impl FnOnce(UniverseBuilder) -> UniverseBuilder,
+    ) -> &mut Self {
+        self.builder = configure(std::mem::take(&mut self.builder));
         self
     }
 
