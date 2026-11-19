@@ -1,6 +1,6 @@
 [package]
 name = "dirk_rhi_test_shaders"
-description = "Shaders for dirk_rhi's native tests, built like the engine's"
+description = "Shaders and setup for the native tests of dirk_rhi and the crates built on it"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
