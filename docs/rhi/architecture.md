@@ -530,10 +530,34 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Renderer
 
-- Owns one `Rhi`. One graph per frame. One depth/MSAA attachment set per viewport (not per
-  frame slot). Per-object data lives in one per-slot storage buffer addressed by instance
-  index. Skip submission entirely when nothing is visible.
-- Compose UI in linear space and encode to the surface once.
+- Owns one `Rhi`. Each frame uploads new models, until its uploads staged the upload budget
+  (4 MiB, so a large scene loads over several frames), and UI textures, then acquires an image of
+  every visible window (not occluded, not empty, presentable). When none is visible, it
+  submits nothing else.
+- The viewports some acquired window shows and every acquired window render in one graph
+  and one submission, then one `frame.present` presents every window; the passes
+  drawing windows and the UI sample the viewports' outputs.
+- One output and depth/MSAA attachment set per viewport (not per frame slot), imported
+  into each frame's graph with no state kept between frames: the output with
+  `import`, the attachments with `import_scratch`, whose contents are discarded once the
+  output is resolved. They rest between frames, so frames in flight take turns with a
+  barrier between them, and the first frame needs no special case. A viewport without a
+  world and camera clears its output.
+- Per-object data and egui's vertices and indices are allocated in frame memory each
+  frame; meshes read their object by instance index through a `BufferSlice`. Meshes pull
+  their vertices through `BufferIndex`es, egui through `BufferSlice`s; textures and samplers are
+  `TextureIndex`es and `SamplerIndex`es in push data shared through `dirk_shaders::types`.
+  Every index is in push data or frame memory, whose types derive `HeapIndices`, so a
+  texture or mesh dropped while a frame still draws it lives until that frame completes,
+  with no bookkeeping in the renderer.
+- Colors are linear everywhere. The renderer's color images (viewport outputs, the UI,
+  textures) are `Rgba8Srgb`, encoded and decoded in hardware. egui's sRGB-encoded,
+  premultiplied colors are unpremultiplied, decoded and premultiplied again (alpha zero
+  marks an additive color), on the CPU for textures and in the vertex shader for vertex
+  colors, so the UI composites in linear space. Presentation draws the composited image
+  into the window, encoding once: in hardware on sRGB surfaces, in the shader otherwise.
+- Model textures get their mips on the CPU, averaged in linear space, until GPU mip
+  generation lands.
 
 ## Later, each as its own small PR
 
