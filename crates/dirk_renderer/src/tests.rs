@@ -127,13 +127,33 @@ fn draw_models(
         .iter()
         .map(|&(path, _)| AssetHandle::from_raw(path, AssetType::Model))
         .collect();
+    let mut assets_loaded = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
     for handle in &handles {
         let mut load = assets.load_asset::<dirk_assets::Model>(handle);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while load.try_poll().transpose()?.is_none() {
+        loop {
+            if let Some(asset) = load.try_poll().transpose()? {
+                assets_loaded.push(asset);
+                break;
+            }
             anyhow::ensure!(Instant::now() < deadline, "{handle:?} did not load in time");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+    // Load events reach the registry asynchronously.
+    while handles
+        .iter()
+        .any(|handle| models.primitives(handle).is_none())
+    {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "the models did not reach the renderer in time"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+        let mut frame = rhi.begin_frame()?;
+        let mut uploads = Uploads::new(&mut frame);
+        models.update(&mut uploads)?;
+        uploads.submit()?;
     }
 
     let universe = Universe::builder().build()?;
@@ -163,10 +183,7 @@ fn draw_models(
     let pipeline = presenter.pipeline(rhi, Format::Rgba8Unorm)?;
     let target = Target::new(rhi, Format::Rgba8Unorm, extent)?;
     let mut transients = Transients::default();
-    let mut frame = rhi.begin_frame()?;
-    let mut uploads = Uploads::new(&mut frame);
-    models.update(&mut uploads)?;
-    uploads.submit()?;
+    let frame = rhi.begin_frame()?;
     let objects = scene.write_objects(&frame)?;
     let mut graph = RenderGraph::new();
     viewport.record(&mut graph, objects, &scene, &models)?;
