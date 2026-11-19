@@ -34,14 +34,17 @@ impl<T> Graveyard<T> {
         self.frame.store(frame, Ordering::Release);
     }
 
-    /// Hands every object dropped by the end of frame `completed` to `free`.
-    /// Only call once all work up to and including that frame has completed.
+    /// Hands every object dropped by the end of frame `completed` to `free`,
+    /// after releasing the lock, so freeing does not block drops. Only call
+    /// once all work up to and including that frame has completed.
     pub(crate) fn collect(&self, completed: u64, free: impl FnMut(T)) {
-        self.buried
+        let dead: Vec<_> = self
+            .buried
             .lock()
             .extract_if(.., |(frame, _)| *frame <= completed)
             .map(|(_, object)| object)
-            .for_each(free);
+            .collect();
+        dead.into_iter().for_each(free);
     }
 }
 
