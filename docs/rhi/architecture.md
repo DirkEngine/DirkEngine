@@ -293,20 +293,22 @@ Metal 3 GPUs (Apple silicon, recent Intel and AMD Macs) with tier-2 argument buf
 macOS 13 or later; other devices are rejected with the reason. Metal has no per-format queries, so
 format capabilities follow Apple's feature tables, conservatively.
 
-- **Queues.** Both RHI queues submit to one `MTLCommandQueue`, each signaling its own
-  `MTLSharedEvent` timeline, so `Capabilities::dedicated_copy_queue` is false. Metal
+- **Queues.** Each RHI queue is an `MTLCommandQueue` signaling its own `MTLSharedEvent`
+  timeline, so copies run beside graphics work (`dedicated_copy_queue` is true). Metal
   encodes event waits before the passes that follow them, and an encoder's waits are known
-  only at submission, so they go into a command buffer committed just before, and again
-  before the signal. Command buffers that fail mark the device lost: waits poll for that
-  every 100 ms, since a failed command buffer may never reach its value.
+  only at submission, so they go into a command buffer committed just before it: a queue
+  blocks at a wait until the event reaches its value. Command buffers that fail mark the
+  device lost: waits check for that every 100 ms, since a failed command buffer may never
+  reach its value.
 - **Synchronization is Metal's hazard tracking.** Every resource is tracked, and each
   render pass declares the heap's resources with `useResources` (read for sampled
   textures, read-write for storage images and buffers), which also makes them resident.
-  Metal then orders conflicting accesses on its own, so barriers record nothing and queue
-  ownership transfers have no equivalent; they are still validated, and the encoder still
-  remembers where they leave images. Metal textures have no layouts, so resting accesses
-  move nothing: new images and acquisitions queue no first transition, and the safe
-  commands' moves to and from rest record nothing. Declaring every heap
+  Metal then orders conflicting accesses within a queue on its own, so barriers record
+  nothing and queue ownership transfers have no equivalent; they are still validated, and
+  the encoder still remembers where they leave images. Metal textures have no layouts, so
+  resting accesses move nothing: new images and acquisitions queue no first transition,
+  and the safe commands' moves to and from rest record nothing. Across queues, `wait_for`
+  orders work, as on Vulkan. Declaring every heap
   resource costs O(resources) per pass and serializes passes using storage resources; a
   residency set and explicit fences can replace it when that matters.
 - **Shaders.** `dirk_build::shaders` translates each entry point with SPIRV-Cross (MSL
