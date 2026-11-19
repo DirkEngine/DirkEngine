@@ -62,9 +62,6 @@ pub enum ImageAccess {
     ColorAttachment,
     /// Read and written as a depth/stencil attachment.
     DepthStencilAttachment,
-    /// Read as a depth/stencil attachment and sampled by the given stages,
-    /// which may be empty.
-    DepthStencilRead(ShaderStages),
     /// Owned by presentation: before a barrier, a swapchain image just
     /// acquired, whose contents are discarded; after it, ready to present.
     /// The first access after acquiring must be an attachment write or a
@@ -132,7 +129,6 @@ impl ImageAccess {
     }
 
     /// The stages of a shader access, which must name at least one.
-    /// [`ImageAccess::DepthStencilRead`] is not one: its stages may be empty.
     #[must_use]
     pub const fn shader_stages(self) -> Option<ShaderStages> {
         match self {
@@ -154,12 +150,6 @@ impl ImageAccess {
             Self::StorageRead(_) | Self::StorageWrite(_) => ImageUsage::STORAGE,
             Self::ColorAttachment => ImageUsage::COLOR_ATTACHMENT,
             Self::DepthStencilAttachment => ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-            Self::DepthStencilRead(stages) if stages.is_empty() => {
-                ImageUsage::DEPTH_STENCIL_ATTACHMENT
-            }
-            Self::DepthStencilRead(_) => {
-                ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::SAMPLED)
-            }
         }
     }
 }
