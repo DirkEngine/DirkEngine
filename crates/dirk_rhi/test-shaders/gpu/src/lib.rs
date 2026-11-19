@@ -4,8 +4,10 @@
 #![no_std]
 
 use bytemuck::NoUninit;
+use dirk_shaders::bindless::{BufferIndex, SamplerIndex, TextureIndex};
 use spirv_std::{
-    glam::{Vec4, vec4},
+    Image, RuntimeArray, Sampler, TypedBuffer,
+    glam::{Vec2, Vec4, vec4},
     spirv,
 };
 
@@ -36,4 +38,60 @@ pub fn fill_vs(
 #[spirv(fragment)]
 pub fn fill_fs(#[spirv(push_constant)] fill: &Fill, color: &mut Vec4) {
     *color = Vec4::from_array(fill.color);
+}
+
+/// A vertex of the textured shaders, pulled from a storage buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+pub struct Vertex {
+    /// Clip-space position.
+    pub position: [f32; 2],
+    /// Texture coordinates.
+    pub uv: [f32; 2],
+}
+
+/// Push data of the textured shaders: where their vertices, texture and
+/// sampler are in the bindless heap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+pub struct Textured {
+    /// The vertices, drawn in order.
+    pub vertices: BufferIndex<Vertex>,
+    /// A 2D texture.
+    pub texture: TextureIndex,
+    /// The sampler reading it.
+    pub sampler: SamplerIndex,
+}
+
+/// Places the vertex `push.vertices[index]`.
+#[spirv(vertex)]
+pub fn textured_vs(
+    #[spirv(vertex_index)] index: i32,
+    #[spirv(push_constant)] push: &Textured,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] buffers: &RuntimeArray<
+        TypedBuffer<[Vertex]>,
+    >,
+    #[spirv(position)] position: &mut Vec4,
+    uv: &mut Vec2,
+) {
+    let vertex = push.vertices.get(buffers)[index as usize];
+    *position = vec4(vertex.position[0], vertex.position[1], 0.0, 1.0);
+    *uv = Vec2::from_array(vertex.uv);
+}
+
+/// Samples `push.texture` with `push.sampler`.
+#[spirv(fragment)]
+pub fn textured_fs(
+    #[spirv(push_constant)] push: &Textured,
+    #[spirv(descriptor_set = 0, binding = 0)] textures: &RuntimeArray<
+        Image!(2D, type = f32, sampled),
+    >,
+    #[spirv(descriptor_set = 0, binding = 8)] samplers: &RuntimeArray<Sampler>,
+    uv: Vec2,
+    color: &mut Vec4,
+) {
+    *color = push
+        .texture
+        .get(textures)
+        .sample(*push.sampler.get(samplers), uv);
 }

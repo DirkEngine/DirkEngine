@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use super::{
     Check,
     adapter::{Adapter, RequiredFeatures},
+    heap::{Heap, Slot},
     instance::Instance,
     queue::Queue,
 };
@@ -19,14 +20,20 @@ use crate::{
 };
 
 /// A native object whose owner dropped it, destroyed once the GPU is done.
+/// Heap slots are emptied before the objects they describe are destroyed.
 pub(super) enum Garbage {
-    Buffer(vk::Buffer, Allocation),
+    Buffer {
+        raw: vk::Buffer,
+        allocation: Allocation,
+        slot: Option<Slot>,
+    },
     Image {
         raw: vk::Image,
         view: Option<vk::ImageView>,
         allocation: Allocation,
+        slots: [Option<Slot>; 2],
     },
-    Sampler(vk::Sampler),
+    Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
 }
 
@@ -34,8 +41,8 @@ pub(super) enum Garbage {
 pub(crate) struct Device {
     pub(crate) capabilities: Capabilities,
     pub(super) raw: ash::Device,
-    /// The layout every pipeline shares.
-    pub(super) pipeline_layout: vk::PipelineLayout,
+    /// The bindless heap and the pipeline layout every pipeline shares.
+    pub(super) heap: Heap,
     /// Size non-coherent host memory is flushed and invalidated in.
     pub(super) non_coherent_atom_size: u64,
     /// Locked only to allocate and free memory, which `gpu-allocator` needs
@@ -83,13 +90,14 @@ impl Device {
             .enabled_extension_names(&adapter.extensions)
             .enabled_features(&features)
             .push_next(&mut required.vulkan12)
-            .push_next(&mut required.vulkan13);
+            .push_next(&mut required.vulkan13)
+            .push_next(&mut required.robustness2);
         // SAFETY: the adapter belongs to `instance`, and every pointer in
         // `create_info` outlives the call.
         let raw = unsafe { instance.raw.create_device(adapter.raw, &create_info, None) }
             .check("vkCreateDevice")?;
-        let parts = Self::create_pipeline_layout(&raw).and_then(|layout| {
-            Allocator::new(&AllocatorCreateDesc {
+        let parts = Heap::new(&raw).and_then(|heap| {
+            let rest = Allocator::new(&AllocatorCreateDesc {
                 instance: instance.raw.clone(),
                 device: raw.clone(),
                 physical_device: adapter.raw,
@@ -98,13 +106,17 @@ impl Device {
                 allocation_sizes: AllocationSizes::default(),
             })
             .map_err(|error| Error::native("creating the memory allocator", error))
-            .and_then(|allocator| Ok((layout, allocator, Queue::create(&raw, adapter.families)?)))
-            .inspect_err(|_| {
-                // SAFETY: nothing uses the layout yet.
-                unsafe { raw.destroy_pipeline_layout(layout, None) };
-            })
+            .and_then(|allocator| Ok((allocator, Queue::create(&raw, adapter.families)?)));
+            match rest {
+                Ok((allocator, queues)) => Ok((heap, allocator, queues)),
+                Err(error) => {
+                    // SAFETY: nothing uses the heap yet.
+                    unsafe { heap.destroy(&raw) };
+                    Err(error)
+                }
+            }
         });
-        let (pipeline_layout, allocator, queues) = match parts {
+        let (heap, allocator, queues) = match parts {
             Ok(parts) => parts,
             Err(error) => {
                 // SAFETY: nothing created from the device is left.
@@ -121,7 +133,7 @@ impl Device {
                 .debug_utils()
                 .then(|| debug_utils::Device::new(&instance.raw, &raw)),
             raw,
-            pipeline_layout,
+            heap,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
             queues,
@@ -158,7 +170,14 @@ impl Device {
         // SAFETY: the graveyard only hands out objects whose work completed.
         unsafe {
             match garbage {
-                Garbage::Buffer(raw, allocation) => {
+                Garbage::Buffer {
+                    raw,
+                    allocation,
+                    slot,
+                } => {
+                    if let Some(slot) = slot {
+                        self.remove_from_heap(slot);
+                    }
                     self.raw.destroy_buffer(raw, None);
                     self.free(allocation);
                 }
@@ -166,14 +185,21 @@ impl Device {
                     raw,
                     view,
                     allocation,
+                    slots,
                 } => {
+                    for slot in slots.into_iter().flatten() {
+                        self.remove_from_heap(slot);
+                    }
                     if let Some(view) = view {
                         self.raw.destroy_image_view(view, None);
                     }
                     self.raw.destroy_image(raw, None);
                     self.free(allocation);
                 }
-                Garbage::Sampler(raw) => self.raw.destroy_sampler(raw, None),
+                Garbage::Sampler(raw, slot) => {
+                    self.remove_from_heap(slot);
+                    self.raw.destroy_sampler(raw, None);
+                }
                 Garbage::Pipeline(raw) => self.raw.destroy_pipeline(raw, None),
             }
         }
@@ -261,7 +287,7 @@ impl Drop for Device {
             for queue in &self.queues {
                 queue.destroy(&self.raw);
             }
-            self.raw.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.heap.destroy(&self.raw);
             // The allocator frees its memory through the device.
             ManuallyDrop::drop(self.allocator.get_mut());
             self.raw.destroy_device(None);

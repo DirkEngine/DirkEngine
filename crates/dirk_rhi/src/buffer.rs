@@ -1,6 +1,6 @@
 use bitflags::bitflags;
 
-use crate::{Error, Result, Rhi, native};
+use crate::{BufferIndex, Error, Result, Rhi, native};
 
 bitflags! {
     /// Ways a buffer may be used. Declared when the buffer is created.
@@ -66,8 +66,8 @@ impl Rhi {
     /// # Errors
     ///
     /// Returns [`Error::Invalid`] if the buffer is empty, has no usage or
-    /// exceeds the device's buffer size limit, or a native error if memory
-    /// cannot be allocated.
+    /// exceeds the device's buffer or storage buffer size limit, or a native
+    /// error if memory cannot be allocated or the heap is full.
     pub fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<Buffer> {
         let invalid = |reason| Error::invalid("buffer", desc.label, reason);
         let limit = self.capabilities().limits.max_buffer_size;
@@ -82,6 +82,13 @@ impl Rhi {
         }
         if desc.usage.is_empty() {
             return Err(invalid("usage is empty".to_owned()));
+        }
+        let storage_limit = self.capabilities().limits.max_storage_buffer_size;
+        if desc.usage.contains(BufferUsage::STORAGE) && desc.size > storage_limit {
+            return Err(invalid(format!(
+                "storage buffers are at most {storage_limit} bytes on this device, not {}",
+                desc.size
+            )));
         }
         Ok(Buffer {
             raw: native::Buffer::new(&self.device, desc)?,
@@ -100,6 +107,14 @@ impl Buffer {
     #[must_use]
     pub fn info(&self) -> &BufferInfo {
         &self.info
+    }
+
+    /// The buffer's index in the heap's storage buffer array, for shaders
+    /// reading it as an array of `T`, if it has [`BufferUsage::STORAGE`].
+    /// Any `T` is memory-safe: shader reads stay inside the buffer.
+    #[must_use]
+    pub fn index<T>(&self) -> Option<BufferIndex<T>> {
+        self.raw.slot().map(BufferIndex::new)
     }
 
     /// The buffer's debug label.
