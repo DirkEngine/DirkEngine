@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 use dirk_assets::AssetRegistry;
-use dirk_universe::Universe;
 
 pub mod components;
 use components::ModelUploadSystem;
@@ -19,7 +18,7 @@ impl dirk_engine::EnginePlugin for WorldPlugin {
 
         builder.add_subsystem(|ctx| {
             let assets = ctx.resource::<AssetRegistry>()?;
-            ctx.extend_universe(Universe::builder().with_system(ModelUploadSystem::new(assets)));
+            ctx.configure_universe(|universe| universe.with_system(ModelUploadSystem::new(assets)));
             Ok(WorldSubsystem)
         });
 

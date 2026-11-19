@@ -437,7 +437,7 @@ fn struct_systems_are_named_by_their_type() {
 }
 
 #[test]
-fn merge_order_does_not_change_the_schedule() {
+fn registration_order_does_not_change_the_schedule() {
     let names = |universe: &Universe| -> Vec<_> {
         universe
             .schedule()
@@ -446,15 +446,14 @@ fn merge_order_does_not_change_the_schedule() {
             .map(|s| s.name)
             .collect()
     };
-    let readers = || Universe::builder().with_system(read_b);
-    let writers = || Universe::builder().with_system(read_a_write_b);
-
-    let first = readers()
-        .with_other(writers())
+    let first = Universe::builder()
+        .with_system(read_b)
+        .with_system(read_a_write_b)
         .build()
         .expect("systems should schedule");
-    let second = writers()
-        .with_other(readers())
+    let second = Universe::builder()
+        .with_system(read_a_write_b)
+        .with_system(read_b)
         .build()
         .expect("systems should schedule");
 
