@@ -308,6 +308,28 @@ impl Rhi {
     }
 }
 
+impl Image {
+    /// Wraps a native image created elsewhere, such as a swapchain's, with
+    /// a view of `view_type` outside the heap.
+    pub(crate) fn from_native(
+        raw: native::Image,
+        info: ImageInfo,
+        view_type: ViewType,
+        label: &str,
+    ) -> Self {
+        Self {
+            raw,
+            info,
+            view: Some(ImageView {
+                view_type,
+                texture: None,
+                storage: None,
+            }),
+            label: label.into(),
+        }
+    }
+}
+
 impl ImageDesc<'_> {
     /// Validates the description against `capabilities` and returns the type
     /// of the view it needs, if any, and its resting access.
@@ -332,13 +354,13 @@ impl ImageDesc<'_> {
         let Some(rest) = self.rest else {
             return Ok(ImageAccess::resting(self.usage));
         };
-        if rest == ImageAccess::Undefined
+        if matches!(rest, ImageAccess::Undefined | ImageAccess::Present)
             || rest.shader_stages().is_some_and(|stages| stages.is_empty())
             || !self.usage.contains(rest.usage())
         {
             return Err(self.invalid(format!(
-                "cannot rest in {rest:?}, which is undefined, names no shader stage or needs \
-                 a usage beyond {:?}",
+                "cannot rest in {rest:?}, which is undefined or presentation's, names no \
+                 shader stage or needs a usage beyond {:?}",
                 self.usage
             )));
         }
