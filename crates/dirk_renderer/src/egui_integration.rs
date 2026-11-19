@@ -15,8 +15,9 @@ use dirk_render_utils::{Handle, RenderGraph, Uploads};
 use dirk_rhi::{
     AddressMode, BlendState, Buffer, BufferDesc, BufferUsage, ColorTarget, CullMode, Extent3d,
     Filter, Frame, FrontFace, GraphicsPipeline, GraphicsPipelineDesc, Image, ImageAccess,
-    ImageDesc, ImageDimension, ImageUsage, IndexFormat, Indices, LoadOp, Memory, PerFrame, Rect,
-    Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, ShaderStages, TextureIndex, Topology,
+    ImageDesc, ImageDimension, ImageRegion, ImageUsage, IndexFormat, Indices, LoadOp, Memory,
+    Origin3d, PerFrame, Rect, Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, ShaderStages,
+    TextureIndex, Topology,
 };
 use dirk_shaders::types::{EguiPush, EguiVertex};
 use dirk_universe::Universe;
@@ -42,6 +43,9 @@ const _: () = assert!(
 
 /// Bytes the per-frame vertex and index buffers hold at first.
 const INITIAL_BUFFER_SIZE: u64 = 1 << 16;
+
+/// How the UI's passes leave egui's textures between frames.
+const SAMPLED: ImageAccess = ImageAccess::Sampled(ShaderStages::FRAGMENT);
 
 /// The editor UI: egui's context, the input it is fed, and its rendering.
 pub struct EguiState {
@@ -222,13 +226,9 @@ pub struct EguiRenderer {
     screen_size: [f32; 2],
 }
 
-/// A texture egui manages, with its texels kept to apply partial updates.
+/// A texture egui manages.
 struct EguiTexture {
     image: Image,
-    /// Width and height in texels.
-    size: [usize; 2],
-    /// Linear, premultiplied colors, sRGB-encoded like the image's format.
-    texels: Vec<u8>,
     sampler: SamplerIndex,
 }
 
@@ -278,8 +278,9 @@ impl EguiRenderer {
         Ok(renderer)
     }
 
-    /// Applies the texture changes in `delta`, uploading changed textures
-    /// whole with `uploads`, and leaves no changes in it.
+    /// Applies the texture changes in `delta` with `uploads`, creating new
+    /// textures and writing updated parts into existing ones, and leaves no
+    /// changes in it.
     pub fn set_textures(
         &mut self,
         rhi: &Rhi,
@@ -293,24 +294,35 @@ impl EguiRenderer {
                 pos,
             } in changes
             {
-                let mut texels = EguiTexture::texels(&image.pixels);
-                let mut size = image.size;
-                if let Some(position) = pos {
-                    let texture = self
-                        .textures
-                        .get(&id)
-                        .ok_or(Error::UnknownEguiTexture(id))?;
-                    texels = texture.patched(position, size, &texels);
-                    size = texture.size;
-                }
-                let texture = EguiTexture {
-                    image: EguiTexture::upload(uploads, size, &texels)?,
-                    size,
-                    texels,
-                    sampler: self.sampler(rhi, options)?,
+                let texels = EguiTexture::texels(&image.pixels);
+                let sampler = self.sampler(rhi, options)?;
+                let Some([x, y]) = pos else {
+                    let texture = EguiTexture {
+                        image: EguiTexture::upload(uploads, image.size, &texels)?,
+                        sampler,
+                    };
+                    // The replaced image is freed once the GPU is done with it.
+                    self.textures.insert(id, texture);
+                    continue;
                 };
-                // The replaced image is freed once the GPU is done with it.
-                self.textures.insert(id, texture);
+                let texture = self
+                    .textures
+                    .get_mut(&id)
+                    .ok_or(Error::UnknownEguiTexture(id))?;
+                texture.sampler = sampler;
+                let [width, height] = image.size.map(EguiTexture::texel_count);
+                let region = ImageRegion {
+                    mip_level: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                    origin: Origin3d {
+                        x: EguiTexture::texel_count(x),
+                        y: EguiTexture::texel_count(y),
+                        z: 0,
+                    },
+                    extent: Extent3d::new_2d(width, height),
+                };
+                uploads.write_image(&texture.image, SAMPLED, region, &texels)?;
             }
         }
         Ok(())
@@ -580,39 +592,28 @@ impl EguiTexture {
             .collect()
     }
 
-    /// This texture's texels with the `size` texels `patch` at `position`.
-    fn patched(&self, [x, y]: [usize; 2], [width, height]: [usize; 2], patch: &[u8]) -> Vec<u8> {
-        let mut texels = self.texels.clone();
-        let row = self.size[0] * 4;
-        for (line, source) in patch.chunks_exact(width * 4).take(height).enumerate() {
-            let start = (y + line) * row + x * 4;
-            if let Some(destination) = texels.get_mut(start..start + source.len()) {
-                destination.copy_from_slice(source);
-            }
-        }
-        texels
+    /// A count or position of egui's texels as the RHI's. Ones too large
+    /// for it are rejected when uploading.
+    fn texel_count(count: usize) -> u32 {
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     /// Uploads `texels`, `size` texels, as a texture fragment shaders
     /// sample.
-    fn upload(
-        uploads: &mut Uploads<'_>,
-        [width, height]: [usize; 2],
-        texels: &[u8],
-    ) -> Result<Image> {
-        let size = |size: usize| u32::try_from(size).unwrap_or(u32::MAX);
+    fn upload(uploads: &mut Uploads<'_>, size: [usize; 2], texels: &[u8]) -> Result<Image> {
+        let [width, height] = size.map(Self::texel_count);
         Ok(uploads.image(
             &ImageDesc {
                 label: "egui texture",
                 dimension: ImageDimension::D2,
-                extent: Extent3d::new_2d(size(width), size(height)),
+                extent: Extent3d::new_2d(width, height),
                 format: COLOR_FORMAT,
                 usage: ImageUsage::SAMPLED,
                 mip_levels: 1,
                 array_layers: 1,
                 samples: SampleCount::X1,
             },
-            ImageAccess::Sampled(ShaderStages::FRAGMENT),
+            SAMPLED,
             &[texels],
         )?)
     }
