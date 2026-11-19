@@ -1,9 +1,10 @@
 # Continuous integration for DirkEngine.
 #
 #   checks -> formatting and the dependency audit, which compile nothing
-#   rust   -> clippy, tests, and the debug build, with every feature and with
-#             no default features, on Linux and macOS (the platform layer
-#             differs); Linux also runs the doc tests and builds the docs
+#   rust   -> clippy on every target (tests included), tests, and the debug
+#             build, with every feature and with no default features, on
+#             Linux and macOS (the platform layer differs); Linux also runs
+#             the doc tests and builds the docs with warnings denied
 #
 # Each job compiles once and reuses it for every step. Pull requests run only
 # when their changes can affect the result (see `changes`), and draft pull
@@ -112,14 +113,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # dirk_editor always enables the engine's editor support, so the
       # no-default-features passes leave it out.
-      - run: cargo clippy --workspace --locked --all-features -- -D warnings
-      - run: cargo clippy --workspace --exclude dirk_editor --locked --no-default-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
+      - run: cargo clippy --workspace --exclude dirk_editor --all-targets --locked --no-default-features -- -D warnings
       - run: cargo nextest run --workspace --locked --all-features
       - run: cargo nextest run --workspace --exclude dirk_editor --locked --no-default-features
       - if: runner.os == 'Linux'
         run: cargo test --workspace --locked --doc --all-features
+      # Broken intra-doc links fail the build.
       - if: runner.os == 'Linux'
         run: cargo doc --workspace --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Bundle debug build and runtime assets
         run: |
           cargo build --workspace --locked

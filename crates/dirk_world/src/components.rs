@@ -1,6 +1,6 @@
 //! This module has a bunch of frequently used and central [`Component`]s
 //!
-//! [`Component`]: universe::components::Component
+//! [`Component`]: dirk_universe::components::Component
 
 use std::sync::Arc;
 
@@ -41,7 +41,7 @@ pub struct Renderable {
 impl Renderable {
     /// Creates a new [`Renderable`] component from an [`AssetHandle`].
     ///
-    /// [`AssetHandle`]: assets::AssetHandle
+    /// [`AssetHandle`]: dirk_assets::AssetHandle
     #[must_use]
     pub fn new(model: dirk_assets::AssetHandle) -> Self {
         Self {
@@ -51,8 +51,8 @@ impl Renderable {
     }
 }
 
-/// A [`universe`] system that will automatically load a model
-/// when a [`Renderable`] is added to an [`universe::Entity`].
+/// A [`dirk_universe`] system that will automatically load a model
+/// when a [`Renderable`] is added to an [`dirk_universe::Entity`].
 #[derive(System)]
 pub struct ModelUploadSystem {
     assets: AssetRegistry,
@@ -155,7 +155,7 @@ impl Transform {
     /// Returns the unit vector pointing "forward" from this transform.
     ///
     /// The result is obtained by rotating the engine's canonical forward
-    /// direction ([`utils::FORWARD_DIRECTION`]) by the current orientation.
+    /// direction ([`FORWARD_DIRECTION`](dirk_utils::FORWARD_DIRECTION)) by the current orientation.
     #[must_use]
     pub fn forward(&self) -> Vec3 {
         self.rotation_quat() * dirk_utils::FORWARD_DIRECTION

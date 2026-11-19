@@ -305,7 +305,7 @@ mod asset_handle {
     #[test]
     fn debug_output_is_non_empty() {
         let h = AssetHandle::from_raw("a/b.dirkasset", AssetType::Model);
-        assert!(!format!("{h:?}").is_empty());
+        assert_ne!(format!("{h:?}"), "");
     }
 }
 
@@ -537,7 +537,7 @@ mod errors {
 
     #[test]
     fn debug_output_is_non_empty() {
-        assert!(!format!("{:?}", Error::AlreadyTaken).is_empty());
+        assert_ne!(format!("{:?}", Error::AlreadyTaken), "");
     }
 }
 
@@ -993,7 +993,7 @@ mod registry {
                 let gate = gate.clone();
                 std::thread::spawn(move || {
                     gate.wait();
-                    registry.load_asset_immediate::<CountingAsset>(id).unwrap()
+                    registry.load_asset_immediate::<CountingAsset>(&id).unwrap()
                 })
             })
             .collect::<Vec<_>>();

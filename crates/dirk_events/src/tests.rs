@@ -866,8 +866,8 @@ mod event_manager {
         let mgr = EventManager::new(workers.clone());
         let consumer = mgr.subscribe::<CounterEvent>();
         drop(mgr);
-        assert!(drain_until_closed(consumer.clone()).is_empty());
-        assert!(drain_until_closed(consumer).is_empty());
+        assert_eq!(drain_until_closed(consumer.clone()), [] as [u32; 0]);
+        assert_eq!(drain_until_closed(consumer), [] as [u32; 0]);
     }
 
     #[test]

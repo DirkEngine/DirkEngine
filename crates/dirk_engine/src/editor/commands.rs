@@ -1,4 +1,4 @@
-//! [`EditorCommand`]s. Menus can submit commands that will be run by the editor.
+//! Editor commands. Menus can submit commands that will be run by the editor.
 
 use std::sync::mpsc::Sender;
 

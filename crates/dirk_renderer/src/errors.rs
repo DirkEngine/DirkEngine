@@ -18,10 +18,10 @@ pub enum Error {
     /// An error loading Vulkan function
     #[error("Error loading Vulkan functions: {0}")]
     Loading(#[from] ash::LoadingError),
-    /// Error produced by the [`platform`] crate.
+    /// Error produced by the [`dirk_platform`] crate.
     #[error("platform error: {0}")]
     Platform(#[from] dirk_platform::Error),
-    /// Error produced by the [`assets`] crate.
+    /// Error produced by the [`dirk_assets`] crate.
     #[error("assets error: {0}")]
     AssetError(#[from] dirk_assets::Error),
     /// Error produced by the egui Vulkan renderer.
