@@ -313,8 +313,9 @@ encoder.write_timestamp(&mut timestamps, 0)?;  // graphics encoders, between com
   graphics family, a timestamp period and host query reset; ticks are masked to the
   valid bits and scaled by the period.
 - Metal: a counter sample buffer of the timestamp counter set. GPUs sampling at stage
-  boundaries (Apple GPUs) sample at the start of an empty blit pass; others sample
-  between blits. GPU ticks have no documented period, so it is measured against the CPU
+  boundaries (Apple GPUs) sample at the start of a blit pass filling a scratch buffer,
+  since Metal drops the samples of encoders without commands; others sample between
+  blits. GPU ticks have no documented period, so it is measured against the CPU
   clock since device creation. Devices sampling neither way lack `TIMESTAMPS`.
 
 ## Depth comparison

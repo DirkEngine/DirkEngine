@@ -3,10 +3,10 @@ use std::{ptr::NonNull, sync::Arc, time::Instant};
 use objc2::{rc::autoreleasepool, runtime::ProtocolObject};
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLCommandBuffer, MTLCommandEncoder,
+    MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder,
     MTLCommonCounterSetTimestamp, MTLCounterDontSample, MTLCounterResultTimestamp,
     MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint,
-    MTLCounterSet, MTLDevice, MTLStorageMode,
+    MTLCounterSet, MTLDevice, MTLResourceOptions, MTLStorageMode,
 };
 
 use super::{Check, CommandBuffer, Device, Object, device::Garbage};
@@ -17,9 +17,8 @@ use crate::Result;
 pub(super) struct Clock {
     /// The timestamp counter set.
     counters: Object<dyn MTLCounterSet>,
-    /// Whether timestamps are sampled at the start of an encoder, as on
-    /// Apple GPUs, rather than between blits.
-    stage_boundary: bool,
+    /// Where timestamps are sampled.
+    sampling: Sampling,
     /// The CPU and GPU clocks when the device was created. GPU ticks have
     /// no documented period, so it is measured against the CPU's.
     origin: (Instant, u64),
@@ -28,25 +27,34 @@ pub(super) struct Clock {
 impl Clock {
     /// The timestamp clock of `device`, or `None` if it cannot sample
     /// timestamps between commands.
-    pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Option<Self> {
-        let stage_boundary =
-            device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary);
-        if !stage_boundary
-            && !device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary)
-        {
-            return None;
-        }
+    pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Option<Self>> {
         // SAFETY: the counter set name is a constant string.
         let name = unsafe { MTLCommonCounterSetTimestamp };
-        let counters = device
-            .counterSets()?
-            .iter()
-            .find(|set| &*set.name() == name)?;
-        Some(Self {
+        let Some(counters) = device
+            .counterSets()
+            .and_then(|sets| sets.iter().find(|set| &*set.name() == name))
+        else {
+            return Ok(None);
+        };
+        let sampling = if device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary) {
+            let options = MTLResourceOptions::StorageModePrivate
+                | MTLResourceOptions::HazardTrackingModeUntracked;
+            let scratch = device
+                .newBufferWithLength_options(4, options)
+                .check("newBufferWithLength")?;
+            Sampling::StageBoundary {
+                scratch: scratch.into(),
+            }
+        } else if device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary) {
+            Sampling::BlitBoundary
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             counters: counters.into(),
-            stage_boundary,
+            sampling,
             origin: (Instant::now(), Self::gpu_time(device)),
-        })
+        }))
     }
 
     /// The GPU's clock now, in ticks.
@@ -71,6 +79,16 @@ impl Clock {
         let (elapsed, ticks) = (instant.elapsed().as_nanos() as f64, ticks as f64);
         if ticks > 0.0 { elapsed / ticks } else { 1.0 }
     }
+}
+
+/// Where a device samples timestamps.
+enum Sampling {
+    /// At the start of encoders, as on Apple GPUs. Metal drops the samples
+    /// of encoders without commands, so sampling passes fill `scratch`, an
+    /// untracked buffer whose contents never matter.
+    StageBoundary { scratch: Object<dyn MTLBuffer> },
+    /// Between blits.
+    BlitBoundary,
 }
 
 /// A Metal counter sample buffer of timestamps.
@@ -148,14 +166,11 @@ impl Drop for Timestamps {
 
 impl CommandBuffer {
     /// Writes timestamp `query` after the commands recorded before it: at
-    /// the start of an empty blit pass on GPUs sampling at stage
-    /// boundaries, or between blits on others.
+    /// the start of a blit pass filling the scratch buffer on GPUs sampling
+    /// at stage boundaries, or between blits on others.
     pub(crate) fn write_timestamp(&mut self, device: &Device, timestamps: &Timestamps, query: u32) {
-        let stage_boundary = device
-            .clock
-            .as_ref()
-            .is_some_and(|clock| clock.stage_boundary);
-        if stage_boundary {
+        let sampling = device.clock.as_ref().map(|clock| &clock.sampling);
+        if let Some(Sampling::StageBoundary { scratch }) = sampling {
             self.end_encoding();
             let pass = MTLBlitPassDescriptor::new();
             // SAFETY: attachment zero always exists, and the sample index is
@@ -166,9 +181,10 @@ impl CommandBuffer {
                 attachment.setStartOfEncoderSampleIndex(query as usize);
                 attachment.setEndOfEncoderSampleIndex(MTLCounterDontSample);
             }
-            autoreleasepool(|_| self.raw().blitCommandEncoderWithDescriptor(&pass))
-                .expect("Metal creates encoders for command buffers without an open one")
-                .endEncoding();
+            let encoder = autoreleasepool(|_| self.raw().blitCommandEncoderWithDescriptor(&pass))
+                .expect("Metal creates encoders for command buffers without an open one");
+            encoder.fillBuffer_range_value(scratch, NSRange::new(0, scratch.length()), 0);
+            encoder.endEncoding();
         } else {
             // SAFETY: the sample index is inside the buffer.
             unsafe {

@@ -118,7 +118,7 @@ impl Device {
             Queue::new(&raw, QueueType::Graphics, info.application_name)?,
             Queue::new(&raw, QueueType::Copy, info.application_name)?,
         ];
-        let clock = Clock::new(&raw);
+        let clock = Clock::new(&raw)?;
         Ok(Self {
             capabilities: Self::capabilities(&raw, name, clock.is_some()),
             heap: Heap::new(&raw, &queues[QueueType::Graphics as usize].raw)?,
