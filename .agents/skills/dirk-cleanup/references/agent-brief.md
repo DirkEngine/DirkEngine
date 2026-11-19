@@ -2,7 +2,7 @@
 
 You own one area of DirkEngine in a parallel cleanup pass. Your task names the
 area, paths, crates, branch prefix, issue and `CARGO_BUILD_JOBS`, and lists
-what the other agents and open PRs hold. Leave those files alone.
+what the other agents and open PRs hold.
 
 Read every file in your area, and `docs/dev/rust-conventions.md`. Make real
 simplifications, not cosmetic churn, and bring the code you touch in line
@@ -20,9 +20,10 @@ with the conventions. Report bigger issues.
   fix PR for each. If a cleanup can't be done without changing behavior, report
   it too. Report a vulnerability only in your final message, never in a PR,
   commit or code comment.
-- **Stay in your area.** Edit another area only when a rename forces it:
-  keep it minimal and list those files in the PR description. Report what
-  crosses areas: another lane cleans up between them.
+- **Stay in your area.** Never edit a file an open PR holds, nor rename what
+  such a file uses: report it instead. Edit another area only when a rename
+  forces it: keep it minimal and list those files in the PR description.
+  Report what crosses areas: another lane cleans up between them.
 - **Keep the docs right.** Fix stale doc comments in your files. If you rename
   something a README, an `AGENTS.md` or a page in `docs/` names, update it.
 - Stop and report anything that needs a design decision.
@@ -32,9 +33,9 @@ with the conventions. Report bigger issues.
 Export `CARGO_BUILD_JOBS` for every cargo command. Before you open each PR,
 run `just validate`, then what it and CI don't check:
 
-- If you touched `src`, the mixed feature sets: `cargo clippy --locked
-  --all-targets --no-default-features --features <f> -- -D warnings`, with
-  `editor` and with `cli`.
+- If you touched `src` or the root `Cargo.toml`, the mixed feature sets:
+  `cargo clippy --locked --all-targets --no-default-features --features <f>
+  -- -D warnings`, with `editor` and with `cli`.
 - If you touched a file that uses `cfg(validation)`, which release builds
   leave out, `cargo clippy --locked --release -p <crate> --all-features -- -D
   warnings`.
@@ -67,8 +68,8 @@ make it pass.
 - Open each PR as a **draft** with `file-pr`, despite its default, titled
   `refactor(<scope>): <what got simpler>`. The scope is the crate's name
   without `dirk_`, or `dirkengine` for `src`. Tooling PRs are `ci:`,
-  `build:` or `chore:`, and docs PRs `docs:`. The description fills in
-  `.github/pull_request_template.md` and says:
+  `build:` or `chore:`, and docs PRs `docs(<scope>):` or `docs:`. The
+  description fills in `.github/pull_request_template.md` and says:
   - `Part of #<n>`
   - what was hard to read and how you fixed it
   - every test you merged or removed

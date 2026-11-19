@@ -19,11 +19,12 @@ code. You split the work, brief them, route reviews and report.
 Work from a checkout of `origin/main` that contains this skill, since the
 delegates read their briefs from it. Keep a ledger in your scratchpad: each
 agent, branch, PR, review state and finding, and the files each task holds.
-Files are free once the task holding them has reported and its PRs touching them
-have merged. Start no task on files that aren't free. A forced edit outside an
-area (a renamed item's callers, a docs reference) is the exception: the agent
-holding those files rebases over it. After compaction, a usage limit or a T3
-restart, check the ledger and restart only what didn't finish.
+Files are free once the task holding them has reported and its PRs touching
+them have merged or closed. Start no task on files that aren't free. A forced
+edit in another lane's files (a renamed item's callers, a docs reference) is
+the exception: that lane rebases over it. Files open PRs hold have no
+exception. After compaction, a usage limit or a T3 restart, check the ledger
+and restart only what didn't finish.
 
 ## Audit
 
@@ -67,20 +68,21 @@ Nobody edits `assets` or `.agents`. `docs/`, every README and the `AGENTS.md`
 files belong to the docs lane. Each area agent opens several focused PRs, on
 branches named `refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
 
-Open PRs hold their files too: list them all with
-`gh pr list --limit 200 --json number,title,files`.
+Open PRs hold their files too, until they merge or close or the owner releases
+them: list them all with `gh pr list --limit 200 --json number,title,files`.
 
 Builds run in parallel on a machine with no swap. Pick one
 `CARGO_BUILD_JOBS` value for every agent that compiles, such as 4, and pass
-it to each. Every worktree builds the whole workspace, shaders included: run
-`just build` here first, so the rust-gpu backend is cached in
-`~/.cache/rust-gpu` before the agents start. Run at most 4 reviews at a time.
+it to each. Run `just build` here first, so every worktree finds rust-gpu's
+backend cached in `~/.cache/rust-gpu`. Run at most 4 reviews at a time.
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
 `refactor: cleanup pass, November 2026`. Each PR says `Part of #<n>`. Tell
 the owner the split in one message, with the files open PRs hold in each area.
-Start an area no open PR touches without waiting, and wait for the owner on
-the rest.
+Start an area no open PR touches without waiting. For the rest, ask the owner
+whether to start now, leaving the held files alone, or after those PRs merge.
+A held file that frees up goes to its area's agent if it's still running, and
+otherwise waits for the next pass.
 
 ### Start the agents
 
@@ -148,7 +150,7 @@ like the others.
 
 ### Bugs
 
-Every bug an agent or reviewer reports gets an issue and a fix PR:
+Each bug an agent or reviewer reports goes through these steps:
 
 1. Check it against current `main`, with a Sol delegate when there are many.
    Merge duplicate reports, and ask the owner about anything that might be
@@ -178,8 +180,7 @@ report:
 
 1. The PRs by area: link, lines added and removed, merge order, and the PRs
    that are stacked.
-2. The PRs to try with `just run` before merging, since no test or CI job
-   renders: those that change code that only runs with a GPU or a window.
+2. The PRs whose description asks for a `just run` before merging.
 3. Decisions only the owner can make, with your recommendation.
 4. The bugs: each one's issue, fix PR and state.
 5. The boundary themes, and which ones wait for the area PRs.
@@ -191,4 +192,5 @@ an issue or PR.
 ### After the merge
 
 Rerun the stats and compare them with the audit. Report again when the
-boundary and fix PRs are reviewed and green.
+boundary and fix PRs are reviewed and green, and close the pass's issue once
+they merge.
