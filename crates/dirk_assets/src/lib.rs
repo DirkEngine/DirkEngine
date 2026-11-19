@@ -171,6 +171,7 @@ impl AssetHandle {
     ///
     /// Unresolved handles resolve against `ASSETS_PATH`; see the
     /// [type-level docs](AssetHandle#identity-and-asset-roots).
+    #[must_use]
     pub fn path(&self) -> PathBuf {
         self.root
             .as_deref()
@@ -188,6 +189,7 @@ impl AssetHandle {
     /// should not occur in practice for well-formed handles).
     ///
     /// [`path`]: AssetHandle::path
+    #[must_use]
     pub fn dir(&self) -> PathBuf {
         self.path()
             .parent()
@@ -203,6 +205,7 @@ impl AssetHandle {
     /// let handle = AssetHandle::from_raw("models/hero.dirkasset", AssetType::Model);
     /// assert_eq!(handle.name(), "hero.dirkasset");
     /// ```
+    #[must_use]
     pub fn name(&self) -> String {
         self.path()
             .file_name()
@@ -218,6 +221,7 @@ impl AssetHandle {
     /// let handle = AssetHandle::from_raw("models/hero.dirkasset", AssetType::Model);
     /// assert_eq!(handle.asset_type(), AssetType::Model);
     /// ```
+    #[must_use]
     pub fn asset_type(&self) -> AssetType {
         self.asset_type
     }
@@ -229,6 +233,7 @@ impl AssetHandle {
     /// let handle = AssetHandle::from_raw("models/hero.dirkasset", AssetType::Model);
     /// assert_eq!(handle.raw(), "models/hero.dirkasset");
     /// ```
+    #[must_use]
     pub fn raw(&self) -> &str {
         &self.handle
     }
@@ -575,24 +580,25 @@ impl AssetRegistry {
     /// | Asset-type-specific load failure | [`Error::AssetLoadError`] |
     /// | Worker task cancellation or panic | [`Error::AssetLoadError`] |
     ///
+    #[must_use]
     pub fn load_asset<T: Asset>(&self, handle: &AssetHandle) -> AssetLoad<T> {
         let registry = self.clone();
         let handle = handle.clone();
         let task = self
             .inner
             .workers
-            .spawn_blocking(move || registry.load_asset_immediate::<T>(handle));
+            .spawn_blocking(move || registry.load_asset_immediate::<T>(&handle));
 
         AssetLoad::new(task)
     }
 
-    fn load_asset_immediate<T: Asset>(&self, handle: AssetHandle) -> Result<Handle<T>> {
+    fn load_asset_immediate<T: Asset>(&self, handle: &AssetHandle) -> Result<Handle<T>> {
         if handle.asset_type() != T::asset_type() {
             return Err(Error::TypeMismatch(handle.raw().to_owned()));
         }
 
         let canonical_handle = self
-            .resolve(&handle)
+            .resolve(handle)
             .ok_or_else(|| Error::NotFound(handle.raw().to_owned()))?;
 
         let load_lock = self
@@ -732,19 +738,19 @@ impl AssetRegistryInner {
             } else if metadata.is_file()
                 && path.extension().and_then(|e| e.to_str()) == Some(DIRK_ASSET_EXT)
             {
-                let relative_path =
-                    path.strip_prefix(base)
-                        .map(|p| p.to_path_buf())
-                        .map_err(|_| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                format!(
-                                    "path '{}' is not relative to base '{}'",
-                                    path.display(),
-                                    base.display()
-                                ),
-                            )
-                        })?;
+                let relative_path = path
+                    .strip_prefix(base)
+                    .map(std::path::Path::to_path_buf)
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "path '{}' is not relative to base '{}'",
+                                path.display(),
+                                base.display()
+                            ),
+                        )
+                    })?;
 
                 let data = std::fs::read(path)?;
                 let mut config: DirkAsset = serde_json::from_slice(&data)?;

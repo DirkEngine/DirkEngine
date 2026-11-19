@@ -138,8 +138,8 @@ impl Asset for Model {
 
         Ok(Self {
             gltf,
-            buffers,
             images,
+            buffers,
         })
     }
 

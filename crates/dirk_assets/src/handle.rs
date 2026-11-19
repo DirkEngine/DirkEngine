@@ -170,6 +170,7 @@ impl<T: Asset> Handle<T> {
     }
 
     /// Returns the [`AssetHandle`] of the asset.
+    #[must_use]
     pub fn handle(&self) -> AssetHandle {
         let inner = self.0.lock();
         inner.asset_handle.clone()

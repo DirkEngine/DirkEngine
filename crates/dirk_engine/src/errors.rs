@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// A wrapper for the result type that has an [`Error`].
+/// A wrapper for the result type that has an [`enum@Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// All errors that could be emitted by the engine.
