@@ -64,15 +64,15 @@ use std::{any::TypeId, cell::RefCell, marker::PhantomData};
 use crate::{
     CommandBuffer, Entity, Universe,
     components::{Component, Derived},
-    macros::sealed::Sealed,
-    query::{QueryData, ReadOnlyQueryData},
+    macros::sealed,
+    query::{Internal, QueryData, ReadOnlyQueryData},
     schedule::{Access, SystemConfig, SystemId},
     systems::ErasedSystem,
 };
 
 /// An argument of a derived component's function: `&C`, or `Option<&C>` for
 /// an input that is not required.
-pub trait DerivedArg: Sealed {
+pub trait DerivedArg: sealed::DerivedArg {
     /// The query data fetching this argument.
     #[doc(hidden)]
     type Data: ReadOnlyQueryData;
@@ -90,6 +90,7 @@ pub trait DerivedArg: Sealed {
     fn changed(entity: Entity, universe: &Universe, last_run: u64) -> bool;
 }
 
+impl<C: Component> sealed::DerivedArg for &C {}
 impl<C: Component> DerivedArg for &C {
     type Data = &'static C;
     type Arg<'a> = &'a C;
@@ -103,6 +104,7 @@ impl<C: Component> DerivedArg for &C {
     }
 }
 
+impl<C: Component> sealed::DerivedArg for Option<&C> {}
 impl<C: Component> DerivedArg for Option<&C> {
     type Data = Option<&'static C>;
     type Arg<'a> = Option<&'a C>;
@@ -188,8 +190,8 @@ macro_rules! impl_derived {
                 for &entity in &universe.alive {
                     let has_output = universe.components.contains(entity, TypeId::of::<Out>());
                     let inputs = (
-                        <&$first as QueryData>::fetch(entity, universe, last_run),
-                        $(<$ty::Data as QueryData>::fetch(entity, universe, last_run),)*
+                        <&$first as QueryData>::fetch(entity, universe, last_run, Internal::TOKEN),
+                        $(<$ty::Data as QueryData>::fetch(entity, universe, last_run, Internal::TOKEN),)*
                     );
                     let (Some($first_binding), $(Some($binding),)*) = inputs else {
                         if has_output {

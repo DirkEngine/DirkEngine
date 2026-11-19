@@ -7,7 +7,7 @@ use self::filter::QueryFilter;
 use crate::{
     Entity, Universe, WorldId,
     components::{Component, ComponentMut, MutableComponent},
-    macros::sealed::Sealed,
+    macros::sealed,
     schedule::Access,
 };
 use std::{any::TypeId, cell::Ref, collections::hash_set, marker::PhantomData};
@@ -52,7 +52,7 @@ impl<'u, D: QueryData, F: QueryFilter> Query<'u, D, F> {
         if !F::matches(entity, self.universe, self.last_run) {
             return None;
         }
-        D::fetch(entity, self.universe, self.last_run)
+        D::fetch(entity, self.universe, self.last_run, Internal::TOKEN)
     }
 
     /// Iterates over matching entities, allowing component mutation.
@@ -112,7 +112,7 @@ impl<'u, D: QueryData, F: QueryFilter> Iterator for QueryIter<'u, D, F> {
             {
                 continue;
             }
-            if let Some(item) = D::fetch(entity, self.universe, self.last_run) {
+            if let Some(item) = D::fetch(entity, self.universe, self.last_run, Internal::TOKEN) {
                 return Some(item);
             }
         }
@@ -219,27 +219,60 @@ impl<C: Component> Delta<'_, C> {
 }
 
 /// Describes the data fetched for each entity matched by a query: `Entity`,
-/// `&C`, `&mut C`, `Option<D>`, or tuples of these.
-pub trait QueryData: Sealed + Sized {
+/// `&C`, `&mut C`, `Option<D>`, or tuples of these. Only queries fetch it,
+/// so mutable borrows always pass the access checks:
+///
+/// ```compile_fail
+/// # use dirk_universe::{prelude::*, query::{Internal, QueryData}};
+/// # #[derive(Debug, Component)] struct Health(u32);
+/// fn poke(universe: &Universe, entity: Entity) {
+///     let health = <&mut Health as QueryData>::fetch(entity, universe, 0, Internal(()));
+/// }
+/// ```
+pub trait QueryData: sealed::QueryData + Sized {
     /// The concrete value borrowed or produced for one matched entity.
     type Item<'u>;
 
     /// Builds this data for `entity`, returning `None` if it does not match.
+    /// Only this crate can call it, as it bypasses the access checks.
     #[doc(hidden)]
-    fn fetch(entity: Entity, universe: &Universe, last_run: u64) -> Option<Self::Item<'_>>;
+    fn fetch(
+        entity: Entity,
+        universe: &Universe,
+        last_run: u64,
+        internal: Internal,
+    ) -> Option<Self::Item<'_>>;
 
     /// Registers component access for conflict validation.
     #[doc(hidden)]
     fn register_access(access: &mut Access);
 }
 
-/// Query data that does not require mutable access.
-pub trait ReadOnlyQueryData: QueryData {}
+/// Query data that does not require mutable access. Sealed, so read-only
+/// queries outside systems stay read-only:
+///
+/// ```compile_fail
+/// # use dirk_universe::{prelude::*, query::ReadOnlyQueryData};
+/// # #[derive(Debug, Component)] struct Health(u32);
+/// impl ReadOnlyQueryData for &mut Health {}
+/// ```
+pub trait ReadOnlyQueryData: QueryData + sealed::ReadOnlyQueryData {}
+
+/// Proof that a call comes from this crate, the only one that can construct
+/// it. Hidden hooks such as [`QueryData::fetch`] take one, so other crates
+/// cannot call them to borrow components past the access checks.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct Internal(());
+
+impl Internal {
+    pub(crate) const TOKEN: Self = Self(());
+}
 
 impl QueryData for () {
     type Item<'u> = ();
 
-    fn fetch(_: Entity, _: &Universe, _: u64) -> Option<Self::Item<'_>> {
+    fn fetch(_: Entity, _: &Universe, _: u64, _: Internal) -> Option<Self::Item<'_>> {
         Some(())
     }
 
@@ -255,10 +288,15 @@ macro_rules! impl_query_data_for_tuple {
         {
             type Item<'u> = ($first::Item<'u>, $($ty::Item<'u>,)*);
 
-            fn fetch(entity: Entity, universe: &Universe, last_run: u64) -> Option<Self::Item<'_>> {
+            fn fetch(
+                entity: Entity,
+                universe: &Universe,
+                last_run: u64,
+                internal: Internal,
+            ) -> Option<Self::Item<'_>> {
                 Some((
-                    $first::fetch(entity, universe, last_run)?,
-                    $($ty::fetch(entity, universe, last_run)?,)*
+                    $first::fetch(entity, universe, last_run, internal)?,
+                    $($ty::fetch(entity, universe, last_run, internal)?,)*
                 ))
             }
 
@@ -278,11 +316,12 @@ macro_rules! impl_query_data_for_tuple {
 }
 all_tuples!(impl_query_data_for_tuple);
 
-impl<C: Component> Sealed for &C {}
+impl<C: Component> sealed::QueryData for &C {}
+impl<C: Component> sealed::ReadOnlyQueryData for &C {}
 impl<C: Component> QueryData for &C {
     type Item<'u> = Ref<'u, C>;
 
-    fn fetch(entity: Entity, universe: &Universe, _: u64) -> Option<Self::Item<'_>> {
+    fn fetch(entity: Entity, universe: &Universe, _: u64, _: Internal) -> Option<Self::Item<'_>> {
         universe.component::<C>(entity)
     }
 
@@ -292,11 +331,11 @@ impl<C: Component> QueryData for &C {
 }
 impl<C: Component> ReadOnlyQueryData for &C {}
 
-impl<C: MutableComponent> Sealed for &mut C {}
+impl<C: MutableComponent> sealed::QueryData for &mut C {}
 impl<C: MutableComponent> QueryData for &mut C {
     type Item<'u> = ComponentMut<'u, C>;
 
-    fn fetch(entity: Entity, universe: &Universe, _: u64) -> Option<Self::Item<'_>> {
+    fn fetch(entity: Entity, universe: &Universe, _: u64, _: Internal) -> Option<Self::Item<'_>> {
         universe
             .components
             .get_mut::<C>(entity, universe.change_tick.get())
@@ -307,12 +346,18 @@ impl<C: MutableComponent> QueryData for &mut C {
     }
 }
 
-impl<D: QueryData> Sealed for Option<D> {}
+impl<D: QueryData> sealed::QueryData for Option<D> {}
+impl<D: ReadOnlyQueryData> sealed::ReadOnlyQueryData for Option<D> {}
 impl<D: QueryData> QueryData for Option<D> {
     type Item<'u> = Option<D::Item<'u>>;
 
-    fn fetch(entity: Entity, universe: &Universe, last_run: u64) -> Option<Self::Item<'_>> {
-        Some(D::fetch(entity, universe, last_run))
+    fn fetch(
+        entity: Entity,
+        universe: &Universe,
+        last_run: u64,
+        internal: Internal,
+    ) -> Option<Self::Item<'_>> {
+        Some(D::fetch(entity, universe, last_run, internal))
     }
 
     fn register_access(access: &mut Access) {
@@ -327,12 +372,18 @@ impl<D: ReadOnlyQueryData> ReadOnlyQueryData for Option<D> {}
 /// `.before()` placing a writer first takes precedence.
 pub struct Lagged<D>(PhantomData<D>);
 
-impl<D: ReadOnlyQueryData> Sealed for Lagged<D> {}
+impl<D: ReadOnlyQueryData> sealed::QueryData for Lagged<D> {}
+impl<D: ReadOnlyQueryData> sealed::ReadOnlyQueryData for Lagged<D> {}
 impl<D: ReadOnlyQueryData> QueryData for Lagged<D> {
     type Item<'u> = D::Item<'u>;
 
-    fn fetch(entity: Entity, universe: &Universe, last_run: u64) -> Option<Self::Item<'_>> {
-        D::fetch(entity, universe, last_run)
+    fn fetch(
+        entity: Entity,
+        universe: &Universe,
+        last_run: u64,
+        internal: Internal,
+    ) -> Option<Self::Item<'_>> {
+        D::fetch(entity, universe, last_run, internal)
     }
 
     fn register_access(access: &mut Access) {
@@ -341,11 +392,12 @@ impl<D: ReadOnlyQueryData> QueryData for Lagged<D> {
 }
 impl<D: ReadOnlyQueryData> ReadOnlyQueryData for Lagged<D> {}
 
-impl Sealed for Entity {}
+impl sealed::QueryData for Entity {}
+impl sealed::ReadOnlyQueryData for Entity {}
 impl QueryData for Entity {
     type Item<'u> = Entity;
 
-    fn fetch(entity: Entity, _: &Universe, _: u64) -> Option<Self::Item<'_>> {
+    fn fetch(entity: Entity, _: &Universe, _: u64, _: Internal) -> Option<Self::Item<'_>> {
         Some(entity)
     }
 
