@@ -1,0 +1,31 @@
+[package]
+name = "dirk_rhi"
+description = "DirkEngine's render hardware interface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Every target uses Vulkan until the Metal backend lands; Apple targets go
+# through MoltenVK's portability subset.
+ash.workspace = true
+
+# Unlike the workspace, which forbids `unsafe`, this crate is the audited boundary
+# between the native graphics API and its safe wrappers, so unsafe code is allowed
+# here. Every unsafe block states why its native call is valid.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"
