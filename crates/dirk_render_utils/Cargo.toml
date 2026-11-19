@@ -13,9 +13,13 @@ documentation.workspace = true
 [dependencies]
 dirk_rhi.workspace = true
 
+[dev-dependencies]
+bytemuck.workspace = true
+dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }
+
 # Unlike the workspace, which forbids `unsafe`, this crate records raw RHI
-# barriers, which are unsafe because they bypass the render graph. Every unsafe
-# block states why its barrier describes the resource's accesses.
+# barriers: the render graph derives them, and uploads hand resources over.
+# Every unsafe block states why its barrier describes the resource's accesses.
 [lints.rust]
 unsafe_code = "allow"
 missing_docs = "warn"
@@ -23,6 +27,3 @@ missing_docs = "warn"
 [lints.clippy]
 pedantic = "warn"
 unwrap_used = "warn"
-
-[dev-dependencies]
-dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }
