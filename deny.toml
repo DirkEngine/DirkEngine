@@ -99,7 +99,11 @@ allow-workspace = true
 deny = []
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
-skip = []
+skip = [
+    # `ash-window` needs it only on Apple targets, which use the Metal backend
+    # (and its newer `raw-window-metal`) instead, so it is never built.
+    { crate = "raw-window-metal@0.4.0", reason = "Apple-only dependency of the Vulkan backend's ash-window" },
+]
 
 # Like skip but with entire direct & transitive dependency tree of crate
 skip-tree = [
