@@ -3,4 +3,5 @@
 #![no_std]
 
 pub mod bindless;
+pub mod indirect;
 pub mod types;

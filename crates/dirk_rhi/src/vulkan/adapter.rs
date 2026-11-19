@@ -149,9 +149,7 @@ impl Adapter {
         if properties.api_version < vk::API_VERSION_1_3 {
             missing.push("Vulkan 1.3");
         }
-        if features.robust_buffer_access != vk::TRUE {
-            missing.push("robust_buffer_access");
-        }
+        missing.extend(Self::missing_core_features(&features));
         let (extensions, missing_extensions) = Self::extensions(&available, presentation);
         missing.extend(missing_extensions);
         missing.extend(supported.missing());
@@ -196,6 +194,7 @@ impl Adapter {
                 max_color_targets: limits.max_color_attachments,
                 max_push_data_size: limits.max_push_constants_size,
                 max_storage_buffer_size: u64::from(limits.max_storage_buffer_range),
+                max_draw_indirect_count: limits.max_draw_indirect_count,
             },
             features: optional,
             dedicated_copy_queue: families.copy != families.graphics,
@@ -223,6 +222,23 @@ impl Adapter {
 }
 
 impl Adapter {
+    /// Names of the required Vulkan 1.0 features `features` lacks. Indirect
+    /// draws make several draws per call, choosing their first instance.
+    fn missing_core_features(features: &vk::PhysicalDeviceFeatures) -> Vec<&'static str> {
+        [
+            (features.robust_buffer_access, "robust_buffer_access"),
+            (features.multi_draw_indirect, "multi_draw_indirect"),
+            (
+                features.draw_indirect_first_instance,
+                "draw_indirect_first_instance",
+            ),
+        ]
+        .into_iter()
+        .filter(|(supported, _)| *supported != vk::TRUE)
+        .map(|(_, name)| name)
+        .collect()
+    }
+
     /// How much a device of `device_type` is preferred.
     fn score(device_type: vk::PhysicalDeviceType) -> u32 {
         match device_type {

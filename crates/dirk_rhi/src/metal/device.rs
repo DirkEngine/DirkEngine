@@ -155,6 +155,8 @@ impl Device {
                 max_push_data_size: 4096,
                 // Shaders bound storage buffer reads with 32-bit lengths.
                 max_storage_buffer_size: max_buffer_size.min(u64::from(u32::MAX)),
+                // Each indirect draw is its own Metal draw.
+                max_draw_indirect_count: u32::MAX,
             },
             features: Features::all().difference(if timestamps {
                 Features::empty()
