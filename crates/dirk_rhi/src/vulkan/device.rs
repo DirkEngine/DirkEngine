@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, ffi::CString, mem::ManuallyDrop};
+use std::{collections::BTreeSet, ffi::CString, mem::ManuallyDrop, sync::Arc};
 
 use ash::{ext::debug_utils, vk};
 use gpu_allocator::{
@@ -16,7 +16,7 @@ use super::{
     queue::Queue,
 };
 use crate::{
-    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo,
+    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo, SurfaceTarget,
     command::Transition,
     graveyard::{Buried, Graveyard},
     heap::Reads,
@@ -31,13 +31,18 @@ pub(super) enum Garbage {
         slot: Option<Slot>,
     },
     Image {
-        raw: vk::Image,
+        /// `None` for swapchain images, which their swapchain owns.
+        raw: Option<vk::Image>,
         view: Option<vk::ImageView>,
         allocation: Allocation,
         slots: [Option<Slot>; 2],
     },
     Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
+    /// A retired swapchain and the semaphores of its presentation.
+    Swapchain(vk::SwapchainKHR, Vec<vk::Semaphore>),
+    /// A surface and the window it presents to, kept alive until now.
+    Surface(vk::SurfaceKHR, Arc<dyn SurfaceTarget>),
 }
 
 impl Buried for Garbage {
@@ -46,7 +51,7 @@ impl Buried for Garbage {
             Self::Buffer { slot, .. } => [*slot, None],
             Self::Image { slots, .. } => *slots,
             Self::Sampler(_, slot) => [Some(*slot), None],
-            Self::Pipeline(_) => [None; 2],
+            Self::Pipeline(_) | Self::Swapchain(..) | Self::Surface(..) => [None; 2],
         };
         slots.into_iter().flatten()
     }
@@ -56,6 +61,9 @@ impl Buried for Garbage {
 pub(crate) struct Device {
     pub(crate) capabilities: Capabilities,
     pub(super) raw: ash::Device,
+    pub(super) physical: vk::PhysicalDevice,
+    /// Swapchain functions, with presentation.
+    pub(super) swapchains: Option<ash::khr::swapchain::Device>,
     /// The bindless heap and the pipeline layout every pipeline shares.
     pub(super) heap: Heap,
     /// Size non-coherent host memory is flushed and invalidated in.
@@ -75,7 +83,7 @@ pub(crate) struct Device {
     /// access, recorded before the next graphics submission.
     initializations: Mutex<Vec<Transition>>,
     /// Destroyed after the device, which `Drop` destroys first.
-    instance: Instance,
+    pub(super) instance: Instance,
 }
 
 impl Device {
@@ -153,7 +161,12 @@ impl Device {
             debug: instance
                 .debug_utils()
                 .then(|| debug_utils::Device::new(&instance.raw, &raw)),
+            swapchains: instance
+                .surface
+                .is_some()
+                .then(|| ash::khr::swapchain::Device::new(&instance.raw, &raw)),
             raw,
+            physical: adapter.raw,
             heap,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
@@ -240,17 +253,43 @@ impl Device {
                     if let Some(view) = view {
                         self.raw.destroy_image_view(view, None);
                     }
-                    // No graphics submission recorded its first transition
-                    // since it was created; none will.
-                    self.forget_initialization(raw);
-                    self.raw.destroy_image(raw, None);
-                    self.free(allocation);
+                    if let Some(raw) = raw {
+                        // No graphics submission recorded its first
+                        // transition since it was created; none will.
+                        self.forget_initialization(raw);
+                        self.raw.destroy_image(raw, None);
+                        self.free(allocation);
+                    }
                 }
                 Garbage::Sampler(raw, slot) => {
                     self.remove_from_heap(slot);
                     self.raw.destroy_sampler(raw, None);
                 }
                 Garbage::Pipeline(raw) => self.raw.destroy_pipeline(raw, None),
+                Garbage::Swapchain(raw, semaphores) => {
+                    // Presentation signals no timeline, so only an idle queue
+                    // proves it is done with the swapchain and semaphores.
+                    // Retired swapchains are rare and their frames are done,
+                    // so this waits for at most the last frame's work.
+                    let queue = self.lock_queue(QueueType::Graphics);
+                    if let Err(error) = self.raw.queue_wait_idle(*queue) {
+                        error!(%error, "failed to wait for presentation to finish");
+                    }
+                    drop(queue);
+                    for semaphore in semaphores {
+                        self.raw.destroy_semaphore(semaphore, None);
+                    }
+                    if let Some(swapchains) = &self.swapchains {
+                        swapchains.destroy_swapchain(raw, None);
+                    }
+                }
+                Garbage::Surface(raw, target) => {
+                    if let Some((surfaces, _)) = &self.instance.surface {
+                        surfaces.destroy_surface(raw, None);
+                    }
+                    // The window may close now; see `Surface`.
+                    drop(target);
+                }
             }
         }
     }

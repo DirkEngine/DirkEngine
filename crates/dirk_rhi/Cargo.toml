@@ -21,10 +21,16 @@ tracing.workspace = true
 # Every target uses Vulkan until the Metal backend lands; Apple targets go
 # through MoltenVK's portability subset.
 ash.workspace = true
+ash-window.workspace = true
 gpu-allocator.workspace = true
+raw-window-handle = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 dirk_rhi_test_shaders = { version = "0.1.0", path = "test-shaders" }
+raw-window-handle.workspace = true
+# The presentation example opens a window and logs validation messages.
+tracing-subscriber = "0.3"
+winit.workspace = true
 
 # Unlike the workspace, which forbids `unsafe`, this crate is the audited boundary
 # between the native graphics API and its safe wrappers, so unsafe code is allowed

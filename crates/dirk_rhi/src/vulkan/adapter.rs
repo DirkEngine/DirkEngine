@@ -112,6 +112,7 @@ impl Adapter {
     /// Checks `raw` against the requirements. The inner error names the
     /// device and every requirement it misses.
     fn inspect(instance: &Instance, raw: vk::PhysicalDevice) -> Result<Result<Self, String>> {
+        let presentation = instance.surface.is_some();
         let instance = &instance.raw;
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Properties::default();
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Properties::default();
@@ -145,7 +146,7 @@ impl Adapter {
             missing.push("Vulkan 1.3");
         }
         missing.extend(Self::missing_core_features(&features));
-        let (extensions, missing_extensions) = Self::extensions(&available);
+        let (extensions, missing_extensions) = Self::extensions(&available, presentation);
         missing.extend(missing_extensions);
         missing.extend(supported.missing());
         if !Heap::fits(&vulkan12) {
@@ -249,17 +250,21 @@ impl Adapter {
     }
 
     /// The device extensions to enable: robustness2 for null descriptors,
-    /// and the portability subset whenever a device offers it. Also returns
-    /// the required ones `available` lacks.
+    /// swapchains with presentation, and the portability subset whenever a
+    /// device offers it. Also returns the required ones `available` lacks.
     fn extensions(
         available: &[vk::ExtensionProperties],
+        presentation: bool,
     ) -> (Vec<*const c_char>, Vec<&'static str>) {
         let has = |name: &CStr| {
             available
                 .iter()
                 .any(|extension| extension.extension_name_as_c_str() == Ok(name))
         };
-        let required = [Some(ash::ext::robustness2::NAME)];
+        let required = [
+            Some(ash::ext::robustness2::NAME),
+            presentation.then_some(ash::khr::swapchain::NAME),
+        ];
         let missing = required
             .iter()
             .flatten()
