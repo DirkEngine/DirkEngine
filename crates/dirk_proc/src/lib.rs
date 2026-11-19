@@ -102,12 +102,12 @@ pub fn derive_event(input: proc_macro::TokenStream) -> TokenStream {
 /// ```rust
 /// # extern crate self as dirk_universe;
 /// # pub mod components {
-/// #     pub trait Component { type Mutability; }
+/// #     pub trait Component: std::fmt::Debug + Send + 'static { type Mutability; }
 /// #     pub enum Mutable {}
 /// # }
 /// # use components::Component;
 /// # use dirk_proc::Component;
-/// #[derive(Component, Clone)]
+/// #[derive(Debug, Component)]
 /// struct Transform { position: (i32, i32) }
 /// # fn main() {}
 /// ```

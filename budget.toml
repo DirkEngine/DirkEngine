@@ -9,11 +9,12 @@ dirk_events = 4
 dirk_input = 3
 dirk_platform = 4
 dirk_player = 1
-dirk_proc = 1
-dirk_renderer = 54
+dirk_proc = 0
+dirk_renderer = 53
 dirk_shaders_gpu = 1
 dirk_threads = 1
-dirk_universe = 5
+dirk_universe = 2
 
 [wall-clock]
+dirk_assets = 1
 dirk_threads = 2
