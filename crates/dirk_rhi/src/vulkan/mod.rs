@@ -3,6 +3,7 @@
 mod adapter;
 mod buffer;
 mod command;
+mod compute;
 mod convert;
 mod device;
 mod heap;
@@ -17,6 +18,7 @@ mod timestamp;
 
 pub(crate) use buffer::{Buffer, BufferId};
 pub(crate) use command::{CommandBuffer, CommandPool};
+pub(crate) use compute::ComputePipeline;
 pub(crate) use device::Device;
 pub(crate) use image::Image;
 pub(crate) use pipeline::{GraphicsPipeline, PipelineId, ShaderModule};
@@ -42,4 +44,11 @@ impl<T> Check<T> for ash::prelude::VkResult<T> {
     }
 }
 
-device_children!(Buffer, Image, ShaderModule, GraphicsPipeline, Swapchain);
+device_children!(
+    Buffer,
+    Image,
+    ShaderModule,
+    GraphicsPipeline,
+    ComputePipeline,
+    Swapchain
+);

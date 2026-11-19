@@ -17,7 +17,7 @@ use cargo_gpu_install::{
 };
 use rspirv::{
     dr::{Instruction, Module, Operand},
-    spirv::{Decoration, ExecutionModel, Op, StorageClass},
+    spirv::{Decoration, ExecutionMode, ExecutionModel, Op, StorageClass},
 };
 
 /// Compiles the rust-gpu shader crate at `shader_crate` (relative to the
@@ -27,7 +27,8 @@ use rspirv::{
 ///
 /// The generated file declares a type per entry point, named after it in
 /// `PascalCase` (`main_vs` becomes `MainVs`), implementing `dirk_rhi::Shader`
-/// with the stage and push data size reflected from its module. Creating a
+/// with the stage, push data size and, for compute shaders, workgroup size
+/// reflected from its module. Creating a
 /// shader with push data of another size then fails the build. For Apple
 /// targets, which `dirk_rhi` runs on Metal, each module is translated to the
 /// Metal Shading Language; see [`msl`].
@@ -47,13 +48,17 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
     builder.multimodule = true;
     builder.spirv_metadata = SpirvMetadata::None;
     // Shaders read the bindless heap's runtime arrays with non-uniform
-    // indices; `dirk_rhi` enables these features on every device.
+    // indices, and its storage images, which declare no format;
+    // `dirk_rhi` enables these features on every device (Vulkan 1.3 allows
+    // formatless storage images on formats supporting them).
     builder.capabilities.extend([
         Capability::RuntimeDescriptorArray,
         Capability::ShaderNonUniform,
         Capability::SampledImageArrayNonUniformIndexing,
         Capability::StorageImageArrayNonUniformIndexing,
         Capability::StorageBufferArrayNonUniformIndexing,
+        Capability::StorageImageReadWithoutFormat,
+        Capability::StorageImageWriteWithoutFormat,
     ]);
     let ModuleResult::MultiModule(modules) = builder
         .build()
@@ -90,11 +95,13 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
                  const ENTRY_POINT: &'static str = {entry_point:?};\n    \
                  const STAGE: dirk_rhi::ShaderStage = dirk_rhi::ShaderStage::{stage:?};\n    \
                  const PUSH_SIZE: usize = {push_size};\n    \
+                 const WORKGROUP_SIZE: [u32; 3] = {workgroup_size:?};\n    \
                  const CODE: &'static [u8] = include_bytes!({path:?});\n\
              }}\n",
             name = type_name(&entry_point),
             stage = reflected.stage,
             push_size = reflected.push_size,
+            workgroup_size = reflected.workgroup_size,
         )?;
     }
     fs::write(out_dir.join("shaders.rs"), generated)?;
@@ -131,6 +138,9 @@ struct Reflected {
     stage: Stage,
     /// Size of the push data block, zero without one.
     push_size: u32,
+    /// Invocations per workgroup along each axis, for compute shaders;
+    /// zeros for other stages.
+    workgroup_size: [u32; 3],
 }
 
 impl Reflected {
@@ -151,7 +161,33 @@ impl Reflected {
         let push_size = Types(&module)
             .push_size()
             .with_context(|| format!("reflecting the push data of `{entry_point}`"))?;
-        Ok(Self { stage, push_size })
+        let workgroup_size = match stage {
+            Stage::Compute => Self::workgroup_size(&module)
+                .with_context(|| format!("`{entry_point}` declares no workgroup size"))?,
+            Stage::Vertex | Stage::Fragment => [0; 3],
+        };
+        Ok(Self {
+            stage,
+            push_size,
+            workgroup_size,
+        })
+    }
+
+    /// The `LocalSize` execution mode of `module`'s compute entry point.
+    fn workgroup_size(module: &Module) -> Option<[u32; 3]> {
+        module
+            .execution_modes
+            .iter()
+            .find_map(|mode| match mode.operands.as_slice() {
+                [
+                    _,
+                    Operand::ExecutionMode(ExecutionMode::LocalSize),
+                    Operand::LiteralBit32(x),
+                    Operand::LiteralBit32(y),
+                    Operand::LiteralBit32(z),
+                ] => Some([*x, *y, *z]),
+                _ => None,
+            })
     }
 }
 
