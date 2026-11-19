@@ -23,7 +23,8 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   #[cfg_attr(not(target_vendor = "apple"), path = "vulkan/mod.rs")]
   mod native;
   ```
-  Until the Metal PR lands, every target (Apple included, via MoltenVK) uses Vulkan.
+  Apple targets use Metal 3 (see [Metal](#metal)); every other target uses Vulkan 1.3.
+  MoltenVK is not supported.
 - There is **no** `Api`/`Backend`/`Native*` trait, **no** `B: Backend` type parameter,
   **no** `Object<B, T, M>` wrapper, **no** `pub type X = api::GpuX<Selected>` aliases.
 - Each native module exposes the same `pub(crate)` concrete types and inherent methods.
@@ -123,8 +124,9 @@ frame.finish();                               // closes the frame (also on Drop)
   list of dropped objects, locked to add and collect them, the bindless heap's slots,
   locked to assign, write and empty one (which also synchronizes descriptor writes), and
   the list of new images' first transitions, locked to add one and to take them at a
-  graphics submission; only
-  queue submission/present take that queue's lock, and waits hold none.
+  graphics submission; only queue submission/present take that queue's lock, and waits
+  hold none. On Metal, the heap's lock is also taken when a render pass begins, to
+  declare its resources, and blit pipelines are created under a lock on first use.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes (`Buffer::write`), and creating shaders from unvalidated bytes.
 - **Images have a resting access.** `ImageInfo::rest`, chosen by `ImageDesc::rest` or
@@ -167,8 +169,10 @@ frame.finish();                               // closes the frame (also on Drop)
 
 - Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
   shader crate from a build script into one SPIR-V module per entry point and generates a
-  type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (SPIR-V, stage,
-  reflected push data size, push data type). Implementing it is the only `unsafe` step; creating modules
+  type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (code, stage,
+  reflected push data size, push data type). The code is the backend's: SPIR-V, or for Apple targets the
+  Metal Shading Language that SPIRV-Cross translates it to at build time (see
+  [Metal](#metal)); only Apple hosts compile SPIRV-Cross. Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way
   (`crates/dirk_rhi/test-shaders`).
 - `rhi.create_shader::<S>() -> ShaderModule<S::Push>`, where `S::Push` is the push data
@@ -240,7 +244,10 @@ frame.finish();                               // closes the frame (also on Drop)
     sampler. Devices whose update-after-bind limits cannot hold the heap are rejected.
     Sampled descriptors use the `READ_ONLY_OPTIMAL` layout, which `ImageAccess::Sampled`
     now maps to; storage descriptors use `GENERAL`.
-  - Metal: one tier-2 argument buffer with the same arrays.
+  - Metal: one tier-2 argument buffer with the same arrays, laid out back to back in
+    binding order, eight bytes per element (see [Metal](#metal)). Empty slots hold a
+    zeroed 1x1 texture of the array's kind, the default sampler, or a buffer of zero
+    bytes, which shaders' bounds checks never read.
 - Every `ImageView`/`Sampler`/`Buffer` created with a shader-visible usage gets a slot at
   creation and returns it through the deferred free path, so a slot is reused only once
   the GPU is done with its frame. `view.index() -> Option<TextureIndex>` (sampled usage),
@@ -279,6 +286,60 @@ frame.finish();                               // closes the frame (also on Drop)
   descriptor or another live resource of its kind. Freed slots are reused first in, first
   out, so stale indices read the null descriptor for as long as possible. In debug builds
   a generation check may report them later.
+
+## Metal
+
+Metal 3 GPUs (Apple silicon, recent Intel and AMD Macs) with tier-2 argument buffers, on
+macOS 13 or later; other devices are rejected with the reason. Metal has no per-format queries, so
+format capabilities follow Apple's feature tables, conservatively.
+
+- **Queues.** Both RHI queues submit to one `MTLCommandQueue`, each signaling its own
+  `MTLSharedEvent` timeline, so `Capabilities::dedicated_copy_queue` is false. Metal
+  encodes event waits before the passes that follow them, and an encoder's waits are known
+  only at submission, so they go into a command buffer committed just before, and again
+  before the signal. Command buffers that fail mark the device lost: waits poll for that
+  every 100 ms, since a failed command buffer may never reach its value.
+- **Synchronization is Metal's hazard tracking.** Every resource is tracked, and each
+  render pass declares the heap's resources with `useResources` (read for sampled
+  textures, read-write for storage images and buffers), which also makes them resident.
+  Metal then orders conflicting accesses on its own, so barriers record nothing and queue
+  ownership transfers have no equivalent; they are still validated, and the encoder still
+  remembers where they leave images. Metal textures have no layouts, so resting accesses
+  move nothing: new images and acquisitions queue no first transition, and the safe
+  commands' moves to and from rest record nothing. Declaring every heap
+  resource costs O(resources) per pass and serializes passes using storage resources; a
+  residency set and explicit fences can replace it when that matters.
+- **Shaders.** `dirk_build::shaders` translates each entry point with SPIRV-Cross (MSL
+  3.0, argument buffers tier 2) and rewrites the heap's argument buffer struct so every
+  shader declares every array in binding order: slot `s` of binding `b` is element
+  `heap::first_element(b) + s`. An array read as several types, such as storage buffers
+  of different elements, is declared once and cast for the others. Storage buffer
+  lengths, which rust-gpu's bounds checks read, follow the arrays as a pointer to one
+  `u32` per element
+  (`heap::metal::BUFFER_LENGTHS`). The heap is buffer 0 and push data buffer 1
+  (`heap::metal`); push data is set with `setVertexBytes`/`setFragmentBytes`, padded to
+  16 bytes since MSL rounds structs up to their alignment. Vertex shaders flip y; front
+  faces stay in framebuffer coordinates. Libraries are compiled from source when a
+  `ShaderModule` is created.
+- **Resources.** Device memory is private, upload and readback memory shared (coherent);
+  resources are allocated by the device, without `gpu-allocator`, since its heaps are
+  untracked. Images are their own full view. Buffer↔image copies take any row pitch that
+  is a multiple of the texel size: tightly packed rows need no padding.
+- **Blits** draw: Metal's blit encoder cannot scale, so each destination layer or depth
+  slice is a small render pass sampling a view of the source mip and layer.
+- **Presentation.** Surfaces are `CAMetalLayer`s of the window's `AppKit`/`UIKit` view,
+  created on the main thread. Drawables are sized to the layer in pixels; each
+  acquisition wraps the drawable's texture as the swapchain's image, and is suboptimal
+  once the layer's size changed. Acquiring waits without timeout
+  (`allowsNextDrawableTimeout` is off), as the API promises; occluded windows on macOS
+  may then block until visible, so callers should skip frames while occluded.
+  Acquisitions and presentation need no semaphores: `frame.present` skips its empty
+  submission and commits one command buffer presenting every drawable after the work
+  committed before it on the same queue. FIFO and immediate presentation are supported;
+  the others fall back to FIFO.
+- **Validation** is Metal's API and shader validation (`MTL_DEBUG_LAYER=1`,
+  `MTL_SHADER_VALIDATION=1`), which stops the process on misuse;
+  `validation_error_count` counts command buffers that failed.
 
 ## Render graph (`dirk_render_utils`)
 
