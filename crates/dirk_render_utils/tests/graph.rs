@@ -353,6 +353,12 @@ fn imports_move_between_their_boundary_accesses() -> Result<()> {
         assert!(matches!(conflicting, Err(Error::Invalid { .. })));
         graph.execute(&frame, &mut encoder, &mut transients)?;
 
+        // A swapchain image no pass writes would be presented undefined.
+        let mut graph = RenderGraph::new();
+        graph.import_image(&texture, ImageAccess::Present, ImageAccess::Present)?;
+        let unwritten = graph.execute(&frame, &mut encoder, &mut transients);
+        assert!(matches!(unwritten, Err(Error::Invalid { .. })));
+
         // The next graph starts where the last one left the image.
         let mut graph = RenderGraph::new();
         let image = graph.import_image(&texture, ImageAccess::CopySource, sampled)?;

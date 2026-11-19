@@ -408,9 +408,24 @@ impl<'a, R: Resource> Resources<'a, R> {
     }
 
     /// Moves each import to its boundary access after the last pass, `end`.
-    pub(crate) fn finish(&mut self, end: usize) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if an import's boundary access cannot
+    /// follow its last one, such as a swapchain image no pass wrote, which
+    /// would be presented undefined.
+    pub(crate) fn finish(&mut self, end: usize) -> Result<()> {
         for (index, tracked) in self.list.iter_mut().enumerate() {
             if let Source::Imported { after, .. } = tracked.source {
+                for previous in tracked.states.accesses(&tracked.subresources) {
+                    after
+                        .check_follows(previous)
+                        .map_err(|reason| Error::Invalid {
+                            object: "render graph import",
+                            label: tracked.label.to_owned(),
+                            reason: reason.to_owned(),
+                        })?;
+                }
                 tracked.states.transition(
                     index,
                     end,
@@ -421,6 +436,7 @@ impl<'a, R: Resource> Resources<'a, R> {
                 );
             }
         }
+        Ok(())
     }
 
     /// The barriers recorded before pass `pass`.

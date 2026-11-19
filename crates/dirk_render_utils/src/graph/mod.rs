@@ -114,7 +114,7 @@ impl<'a> RenderGraph<'a> {
     ///
     /// A swapchain image is imported from and to
     /// [`ImageAccess::Present`]; its first pass must render to it or copy
-    /// into it.
+    /// into it, and executing a graph in which no pass does fails.
     ///
     /// # Errors
     ///
@@ -207,9 +207,9 @@ impl<'a> RenderGraph<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an error if a transient cannot be created, a render pass is
-    /// invalid, such as attachments of different extents, or a pass's
-    /// callback fails. The encoder's recording is then incomplete and should
+    /// Returns an error if a swapchain image is imported but no pass writes
+    /// it, a transient cannot be created, a render pass is invalid, such as
+    /// attachments of different extents, or a pass's callback fails. The encoder's recording is then incomplete and should
     /// be dropped.
     pub fn execute(
         mut self,
@@ -218,8 +218,8 @@ impl<'a> RenderGraph<'a> {
         transients: &mut Transients,
     ) -> Result<()> {
         let end = self.passes.len();
-        self.images.finish(end);
-        self.buffers.finish(end);
+        self.images.finish(end)?;
+        self.buffers.finish(end)?;
         let images = self.images.allocate(frame, &mut transients.images)?;
         let buffers = self.buffers.allocate(frame, &mut transients.buffers)?;
         let passes = std::mem::take(&mut self.passes);
