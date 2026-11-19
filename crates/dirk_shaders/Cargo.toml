@@ -8,7 +8,6 @@ version.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
-glam.workspace = true
 
 spirv-std = { workspace = true, optional = true }
 
