@@ -38,14 +38,6 @@ pub(super) struct Allocator {
     generation: AtomicU64,
 }
 
-/// The heaps encoders make resident, as of a generation of the allocator;
-/// by default none, of generation zero, which the allocator never has.
-#[derive(Default)]
-pub(super) struct Residency {
-    pub(super) generation: u64,
-    pub(super) heaps: Vec<Object<dyn MTLHeap>>,
-}
-
 impl Memory {
     /// The options of resources in this memory: private, or shared with the
     /// host and coherent; write-combined when only the host writes it.
@@ -164,11 +156,9 @@ impl Allocator {
     }
 
     /// Every heap, and their generation.
-    pub(super) fn residency(&self) -> Residency {
+    pub(super) fn heaps(&self) -> (u64, Vec<Object<dyn MTLHeap>>) {
         let blocks = self.blocks.lock();
-        Residency {
-            generation: self.generation(),
-            heaps: blocks.iter().map(|block| block.raw.clone()).collect(),
-        }
+        let heaps = blocks.iter().map(|block| block.raw.clone()).collect();
+        (self.generation(), heaps)
     }
 }

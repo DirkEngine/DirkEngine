@@ -3,8 +3,18 @@
 //! `dirk_build::shaders`): every array back to back in binding order, eight
 //! bytes per element, then a pointer to one `u32` byte length per element,
 //! which shaders bound their storage buffer reads with.
+//!
+//! Every resource lives in one of the device's heaps, which encoders make
+//! resident with `useHeap`. Metal makes heaps resident for reads only, and
+//! texture views apart from their heap, so encoders also declare what that
+//! does not cover with `useResources`: storage buffers and images, which
+//! shaders may write, and the subviews of images.
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    ptr::NonNull,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use dirk_shaders::bindless::heap::{self, CAPACITIES, first_element, metal::BUFFER_LENGTHS};
 use objc2::runtime::ProtocolObject;
@@ -12,7 +22,8 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLDevice, MTLOrigin, MTLPixelFormat, MTLResource, MTLResourceID, MTLResourceOptions,
-    MTLSamplerState, MTLSize, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    MTLResourceUsage, MTLSamplerState, MTLSize, MTLTexture, MTLTextureDescriptor, MTLTextureType,
+    MTLTextureUsage,
 };
 use parking_lot::Mutex;
 
@@ -24,6 +35,9 @@ use crate::{Error, Memory, Result, SamplerDesc};
 pub(super) struct Slot {
     pub(super) binding: u32,
     pub(super) index: u32,
+    /// The usage encoders declare its resource with, as an index into
+    /// [`USAGES`], if they do.
+    declared: Option<usize>,
 }
 
 /// The resource a slot holds.
@@ -33,7 +47,19 @@ pub(super) enum Descriptor<'a> {
     Buffer(&'a ProtocolObject<dyn MTLBuffer>),
 }
 
-/// Free slots of each array.
+/// How encoders declare resources `useHeap` does not cover, indexing
+/// [`Declared`]: storage resources for writes, subviews for reads.
+const USAGES: [MTLResourceUsage; 2] = [
+    MTLResourceUsage::Read,
+    MTLResourceUsage(MTLResourceUsage::Read.0 | MTLResourceUsage::Write.0),
+];
+
+/// Resources encoders declare with one `useResources` call per usage, by
+/// index into [`USAGES`]; contiguous for those calls.
+pub(super) type Declared = [Vec<NonNull<ProtocolObject<dyn MTLResource>>>; 2];
+
+/// Free slots of each array, and the resources of filled ones encoders
+/// declare.
 #[derive(Default)]
 struct Slots {
     /// Slots never used yet start here.
@@ -41,6 +67,70 @@ struct Slots {
     /// Slots freed since, reused first, oldest first, so a stale index
     /// reads the empty resource for as long as possible.
     free: [VecDeque<u32>; CAPACITIES.len()],
+    declared: Declared,
+    /// The slot each declared resource fills, alongside `declared`; `None`
+    /// for the heap's own empty storage images.
+    owners: [Vec<Option<Slot>>; 2],
+    /// Where each declared slot's resource is in `declared`, by binding
+    /// and slot.
+    positions: [Vec<usize>; CAPACITIES.len()],
+}
+
+// SAFETY: the declared pointers are thread-safe Metal resources, kept alive
+// by the objects owning their slots until the slot is emptied, or by the
+// heap.
+unsafe impl Send for Slots {}
+
+impl Slots {
+    /// Declares `resource`, filling `owner`, with usage `usage`.
+    fn declare(
+        &mut self,
+        resource: &ProtocolObject<dyn MTLResource>,
+        usage: usize,
+        owner: Option<Slot>,
+    ) {
+        if let Some(slot) = owner {
+            let positions = &mut self.positions[slot.binding as usize];
+            if positions.len() <= slot.index as usize {
+                positions.resize(slot.index as usize + 1, 0);
+            }
+            positions[slot.index as usize] = self.declared[usage].len();
+        }
+        self.declared[usage].push(NonNull::from(resource));
+        self.owners[usage].push(owner);
+    }
+
+    /// Stops declaring the resource filling `slot`, with usage `usage`.
+    fn forget(&mut self, slot: Slot, usage: usize) {
+        let position = self.positions[slot.binding as usize][slot.index as usize];
+        self.declared[usage].swap_remove(position);
+        self.owners[usage].swap_remove(position);
+        if let Some(Some(moved)) = self.owners[usage].get(position).copied() {
+            self.positions[moved.binding as usize][moved.index as usize] = position;
+        }
+    }
+}
+
+impl Descriptor<'_> {
+    /// The usage encoders declare the resource with, as an index into
+    /// [`USAGES`], filling a slot at `binding`; `None` if `useHeap` covers
+    /// it. Views are told apart by their parent texture.
+    fn declared(&self, binding: u32) -> Option<usize> {
+        match self {
+            Self::Buffer(_) => Some(1),
+            Self::Texture(_) if is_storage(binding) => Some(1),
+            Self::Texture(texture) => texture.parentTexture().map(|_| 0),
+            Self::Sampler(_) => None,
+        }
+    }
+}
+
+/// Whether the array at `binding` holds storage images.
+const fn is_storage(binding: u32) -> bool {
+    matches!(
+        binding,
+        heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D
+    )
 }
 
 /// The heap's argument buffer and what fills its empty slots.
@@ -56,6 +146,9 @@ pub(super) struct Heap {
     default_sampler: Object<dyn MTLSamplerState>,
     /// Locked to assign, write and empty slots.
     slots: Mutex<Slots>,
+    /// Changes whenever the declared resources do, so command buffers know
+    /// when to declare them again without locking.
+    generation: AtomicU64,
 }
 
 impl Heap {
@@ -80,12 +173,21 @@ impl Heap {
             .map(|(binding, _)| Self::empty_texture(device, allocator, binding))
             .collect::<Result<Vec<_>>>()?;
         Self::zero(queue, empty.iter().flatten())?;
+        let mut slots = Slots::default();
+        // Shaders may write the empty storage images through stale or
+        // forged indices.
+        for (binding, texture) in (0..).zip(&empty) {
+            if let Some(texture) = texture.as_ref().filter(|_| is_storage(binding)) {
+                slots.declare(ProtocolObject::from_ref(&**texture), 1, None);
+            }
+        }
         let heap = Self {
             arguments,
             lengths,
             empty,
             default_sampler: Sampler::create(device, &SamplerDesc::default())?,
-            slots: Mutex::default(),
+            slots: Mutex::new(slots),
+            generation: AtomicU64::new(1),
         };
         // SAFETY: the element after the arrays holds the lengths' address.
         unsafe {
@@ -94,7 +196,12 @@ impl Heap {
         }
         for (binding, capacity) in (0..).zip(CAPACITIES) {
             for index in 0..capacity {
-                heap.write(Slot { binding, index }, None);
+                let slot = Slot {
+                    binding,
+                    index,
+                    declared: None,
+                };
+                heap.write(slot, None);
             }
         }
         Ok(heap)
@@ -134,11 +241,7 @@ impl Heap {
         } else {
             MTLPixelFormat::RGBA8Unorm
         });
-        let storage = matches!(
-            binding,
-            heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D
-        );
-        desc.setUsage(if storage {
+        desc.setUsage(if is_storage(binding) {
             MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite
         } else {
             MTLTextureUsage::ShaderRead
@@ -267,6 +370,35 @@ impl Heap {
     }
 }
 
+impl Heap {
+    /// The generation of the declared resources, which changes whenever
+    /// they do. Lock-free, for checks before every draw.
+    pub(super) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The resources encoders declare, and their generation. They stay
+    /// alive until the slots they fill are emptied, which happens only
+    /// between frames, so until the open frame closes.
+    pub(super) fn declared(&self) -> (u64, Declared) {
+        let slots = self.slots.lock();
+        (self.generation(), slots.declared.clone())
+    }
+
+    /// Passes each usage's resources in `declared` to `declare`, as Metal's
+    /// `useResources` takes them: `count` at `resources`.
+    pub(super) fn declare(
+        declared: &Declared,
+        mut declare: impl FnMut(NonNull<NonNull<ProtocolObject<dyn MTLResource>>>, usize, MTLResourceUsage),
+    ) {
+        for (resources, usage) in declared.iter().zip(USAGES) {
+            if !resources.is_empty() {
+                declare(NonNull::from(resources.as_slice()).cast(), resources.len(), usage);
+            }
+        }
+    }
+}
+
 impl Device {
     /// Assigns `descriptor` a slot in the array at `binding`.
     pub(super) fn add_to_heap(&self, binding: u32, descriptor: &Descriptor<'_>) -> Result<Slot> {
@@ -287,8 +419,21 @@ impl Device {
                 ));
             }
         };
-        let slot = Slot { binding, index };
+        let slot = Slot {
+            binding,
+            index,
+            declared: descriptor.declared(binding),
+        };
         heap.write(slot, Some(descriptor));
+        let resource = match *descriptor {
+            Descriptor::Texture(texture) => ProtocolObject::from_ref(texture),
+            Descriptor::Buffer(buffer) => ProtocolObject::from_ref(buffer),
+            Descriptor::Sampler(_) => return Ok(slot),
+        };
+        if let Some(usage) = slot.declared {
+            slots.declare(resource, usage, Some(slot));
+            heap.generation.fetch_add(1, Ordering::Release);
+        }
         Ok(slot)
     }
 
@@ -298,5 +443,9 @@ impl Device {
         let mut slots = self.heap.slots.lock();
         self.heap.write(slot, None);
         slots.free[slot.binding as usize].push_back(slot.index);
+        if let Some(usage) = slot.declared {
+            slots.forget(slot, usage);
+            self.heap.generation.fetch_add(1, Ordering::Release);
+        }
     }
 }

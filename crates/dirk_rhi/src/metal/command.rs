@@ -27,13 +27,16 @@ use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferDescriptor,
     MTLCommandBufferErrorOption, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLDevice, MTLFence, MTLIndexType, MTLOrigin, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderStages, MTLSize,
+    MTLDevice, MTLFence, MTLHeap, MTLIndexType, MTLOrigin, MTLPrimitiveType,
+    MTLRenderCommandEncoder, MTLRenderStages, MTLSize,
 };
 use parking_lot::Mutex;
 
 use super::{
-    Buffer, Check, Device, Image, Object, allocator::Residency, compute::ComputePipelineId, usize,
+    Buffer, Check, Device, Image, Object,
+    compute::ComputePipelineId,
+    heap::{Declared, Heap},
+    usize,
 };
 use crate::{
     BufferBarrier, BufferCopy, BufferImageCopy, Format, ImageCopy, ImageRegion, QueueType, Result,
@@ -122,6 +125,18 @@ impl Encoder {
     }
 }
 
+/// What render and compute encoders make resident: every heap, and the
+/// resources the bindless heap declares, as of their generations.
+#[derive(Default)]
+struct Residency {
+    /// The generations of the heaps and of the declared resources; zeros,
+    /// which neither has, until fetched.
+    generations: [u64; 2],
+    heaps: Vec<Object<dyn MTLHeap>>,
+    /// Alive until the frame closes, which command buffers cannot outlive.
+    declared: Declared,
+}
+
 /// A command buffer being recorded.
 pub(crate) struct CommandBuffer {
     raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -135,9 +150,9 @@ pub(crate) struct CommandBuffer {
     /// The fences of the encoders begun since the last barrier; the open
     /// encoder updates the last one.
     since: Vec<Fence>,
-    /// The heaps the open render or compute encoder makes resident.
+    /// What render and compute encoders make resident.
     residency: Residency,
-    /// Whether the open encoder made `residency`'s heaps resident.
+    /// Whether the open encoder made `residency` resident.
     resident: bool,
     /// Primitives the bound pipeline draws.
     pub(super) primitive: MTLPrimitiveType,
@@ -319,26 +334,56 @@ impl CommandBuffer {
         }
     }
 
-    /// Makes every heap resident for the open render or compute encoder,
-    /// unless it did since heaps were last added or released: before every
-    /// draw and dispatch, since shaders reach resources created at any time
-    /// through the bindless heap. Costs one atomic load when nothing
-    /// changed.
+    /// Makes every heap, and the resources the bindless heap declares,
+    /// resident for the open render or compute encoder, unless it did since
+    /// they last changed: before every draw and dispatch, since shaders
+    /// reach resources created at any time through the bindless heap.
+    /// Costs two atomic loads when nothing changed.
     pub(super) fn make_resident(&mut self, device: &Device) {
-        if self.residency.generation != device.allocator.generation() {
-            self.residency = device.allocator.residency();
+        let generations = [device.allocator.generation(), device.heap.generation()];
+        if self.residency.generations != generations {
+            let (heaps, (declared_generation, declared)) =
+                (device.allocator.heaps(), device.heap.declared());
+            self.residency = Residency {
+                generations: [heaps.0, declared_generation],
+                heaps: heaps.1,
+                declared,
+            };
             self.resident = false;
         }
         if self.resident {
             return;
         }
-        for heap in &self.residency.heaps {
-            match &self.encoder {
-                Encoder::Render(encoder) => encoder.useHeap_stages(heap, RENDER_STAGES),
-                Encoder::Compute(encoder) => encoder.useHeap(heap),
-                Encoder::None | Encoder::Blit(_) => {
-                    unreachable!("only draws and dispatches reach the bindless heap")
+        let Residency { heaps, declared, .. } = &self.residency;
+        match &self.encoder {
+            Encoder::Render(encoder) => {
+                for heap in heaps {
+                    encoder.useHeap_stages(heap, RENDER_STAGES);
                 }
+                Heap::declare(declared, |resources, count, usage| {
+                    // SAFETY: `declared` holds live resources; see
+                    // `Residency`.
+                    unsafe {
+                        encoder.useResources_count_usage_stages(
+                            resources,
+                            count,
+                            usage,
+                            RENDER_STAGES,
+                        );
+                    }
+                });
+            }
+            Encoder::Compute(encoder) => {
+                for heap in heaps {
+                    encoder.useHeap(heap);
+                }
+                Heap::declare(declared, |resources, count, usage| {
+                    // SAFETY: as above.
+                    unsafe { encoder.useResources_count_usage(resources, count, usage) };
+                });
+            }
+            Encoder::None | Encoder::Blit(_) => {
+                unreachable!("only draws and dispatches reach the bindless heap")
             }
         }
         self.resident = true;
