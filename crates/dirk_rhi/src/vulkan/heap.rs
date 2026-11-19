@@ -1,5 +1,7 @@
 //! The bindless resource heap: one descriptor set every pipeline binds.
 
+use std::collections::VecDeque;
+
 use ash::vk;
 use dirk_shaders::bindless::heap;
 use parking_lot::Mutex;
@@ -104,8 +106,9 @@ pub(super) enum Descriptor {
 struct Slots {
     /// Slots never used yet start here.
     next: [u32; ARRAYS.len()],
-    /// Slots freed since, reused first.
-    free: [Vec<u32>; ARRAYS.len()],
+    /// Slots freed since, reused first, oldest first, so a stale index
+    /// reads the null descriptor for as long as possible.
+    free: [VecDeque<u32>; ARRAYS.len()],
 }
 
 /// The heap's descriptor set and the pipeline layout every pipeline shares.
@@ -341,7 +344,7 @@ impl Device {
         let heap = &self.heap;
         let mut slots = heap.slots.lock();
         let array = &ARRAYS[binding as usize];
-        let index = match slots.free[binding as usize].pop() {
+        let index = match slots.free[binding as usize].pop_front() {
             Some(index) => index,
             None if slots.next[binding as usize] < array.capacity => {
                 let index = slots.next[binding as usize];
@@ -366,7 +369,7 @@ impl Device {
     pub(super) fn remove_from_heap(&self, slot: Slot) {
         let mut slots = self.heap.slots.lock();
         self.heap.write(&self.raw, &[slot], None);
-        slots.free[slot.binding as usize].push(slot.index);
+        slots.free[slot.binding as usize].push_back(slot.index);
     }
 
     /// Binds the heap for work at `bind_point` recorded in `commands`.
