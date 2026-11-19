@@ -21,6 +21,7 @@ mod pipeline;
 mod presentation;
 mod queue;
 mod sampler;
+mod timestamp;
 
 pub(crate) use buffer::{Buffer, BufferId};
 pub(crate) use command::{CommandBuffer, CommandPool};
@@ -29,6 +30,7 @@ pub(crate) use image::{Image, ImageId};
 pub(crate) use pipeline::{GraphicsPipeline, PipelineId, ShaderModule};
 pub(crate) use presentation::{Presentation, Semaphore, Surface, Swapchain};
 pub(crate) use sampler::Sampler;
+pub(crate) use timestamp::Timestamps;
 
 use std::ops::Deref;
 
