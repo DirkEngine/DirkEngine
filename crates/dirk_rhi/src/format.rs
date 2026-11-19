@@ -66,6 +66,13 @@ impl Format {
         )
     }
 
+    /// Whether this format stores colors sRGB-encoded, encoding them when
+    /// written and decoding them when read, so shaders see linear colors.
+    #[must_use]
+    pub const fn is_srgb(self) -> bool {
+        matches!(self, Self::Rgba8Srgb | Self::Bgra8Srgb)
+    }
+
     /// Size of one texel in bytes.
     #[must_use]
     pub const fn bytes_per_texel(self) -> u32 {
