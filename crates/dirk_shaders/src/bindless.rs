@@ -20,6 +20,11 @@
 //! }
 //! ```
 //!
+//! Views of depth images live in their own arrays, which shaders declare as
+//! depth images so they can compare them against a reference through a
+//! comparison sampler, as shadow maps are filtered (see
+//! [`DepthTextureIndex`]).
+//!
 //! Indices are memory-safe whatever their value: shaders mask them to their
 //! array's capacity, every slot holds a valid descriptor (a null one once
 //! freed), and each array holds one kind and dimension of resource. A stale
@@ -52,6 +57,14 @@ pub mod heap {
     pub const SAMPLERS: u32 = 8;
     /// Storage buffers.
     pub const BUFFERS: u32 = 9;
+    /// Sampled 2D depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D: u32 = 10;
+    /// Sampled 2D array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D_ARRAY: u32 = 11;
+    /// Sampled cube depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE: u32 = 12;
+    /// Sampled cube array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE_ARRAY: u32 = 13;
 
     /// Slots in each texture array.
     pub const TEXTURE_CAPACITY: u32 = 1 << 14;
@@ -61,9 +74,11 @@ pub mod heap {
     pub const SAMPLER_CAPACITY: u32 = 1 << 10;
     /// Slots in the storage buffer array.
     pub const BUFFER_CAPACITY: u32 = 1 << 16;
+    /// Slots in each depth texture array.
+    pub const DEPTH_TEXTURE_CAPACITY: u32 = 1 << 10;
 
     /// Capacity of each array, indexed by binding.
-    pub const CAPACITIES: [u32; 10] = [
+    pub const CAPACITIES: [u32; 14] = [
         TEXTURE_CAPACITY,
         TEXTURE_CAPACITY,
         TEXTURE_CAPACITY,
@@ -74,6 +89,10 @@ pub mod heap {
         STORAGE_IMAGE_CAPACITY,
         SAMPLER_CAPACITY,
         BUFFER_CAPACITY,
+        DEPTH_TEXTURE_CAPACITY,
+        DEPTH_TEXTURE_CAPACITY,
+        DEPTH_TEXTURE_CAPACITY,
+        DEPTH_TEXTURE_CAPACITY,
     ];
 
     /// Index of the first element of the array at `binding` when the arrays
@@ -100,12 +119,13 @@ pub mod heap {
         /// Argument buffer element after the arrays: a pointer to one `u32`
         /// per element, the byte length of storage buffers, which shaders
         /// bound their reads with.
-        #[expect(clippy::cast_possible_truncation, reason = "there are ten arrays")]
+        #[expect(clippy::cast_possible_truncation, reason = "there are fourteen arrays")]
         pub const BUFFER_LENGTHS: u32 = super::first_element(super::CAPACITIES.len() as u32);
     }
 }
 
-/// Declares an index into one of the heap's arrays.
+/// Declares an index into one of the heap's arrays, and with the `gpu`
+/// feature its shader-side access.
 macro_rules! indices {
     ($($(#[$doc:meta])* $name:ident: $capacity:ident,)+) => {$(
         $(#[$doc])*
@@ -125,18 +145,38 @@ macro_rules! indices {
             pub const fn slot(self) -> u32 {
                 self.0 & (heap::$capacity - 1)
             }
+
+            /// This resource in `array`, the heap's array it indexes.
+            #[cfg(feature = "gpu")]
+            #[must_use]
+            #[expect(
+                unsafe_code,
+                reason = "array accesses are unchecked, but the index is masked to the array's capacity"
+            )]
+            pub fn get<R>(self, array: &spirv_std::RuntimeArray<R>) -> &R {
+                // SAFETY: the slot is masked to the array's capacity.
+                unsafe { array.index(self.slot() as usize) }
+            }
         }
     )+};
 }
 
 indices! {
     /// A sampled image view in the heap: in the texture array of its view
-    /// type, such as [`heap::TEXTURES_2D`].
+    /// type, such as [`heap::TEXTURES_2D`]. Views of depth images have a
+    /// [`DepthTextureIndex`] instead.
     TextureIndex: TEXTURE_CAPACITY,
+    /// A sampled depth image view in the heap: in the depth texture array of
+    /// its view type, such as [`heap::DEPTH_TEXTURES_2D`]. Shaders declare
+    /// these arrays as depth images (`Image!(2D, type = f32, sampled,
+    /// depth)`), which they can sample, load, or compare against a
+    /// reference with a comparison sampler (`sample_depth_reference`).
+    DepthTextureIndex: DEPTH_TEXTURE_CAPACITY,
     /// A storage image view in the heap: in the storage image array of its
     /// view type, such as [`heap::STORAGE_IMAGES_2D`].
     StorageImageIndex: STORAGE_IMAGE_CAPACITY,
-    /// A sampler in the heap, at [`heap::SAMPLERS`].
+    /// A sampler in the heap, at [`heap::SAMPLERS`]. Comparison samplers
+    /// share the array; shaders use them only with depth comparisons.
     SamplerIndex: SAMPLER_CAPACITY,
 }
 
@@ -198,7 +238,7 @@ impl<T> fmt::Debug for BufferIndex<T> {
     }
 }
 
-/// Shader-side access to the heap's arrays.
+/// Shader-side access to storage buffers.
 #[cfg(feature = "gpu")]
 #[expect(
     unsafe_code,
@@ -207,34 +247,7 @@ impl<T> fmt::Debug for BufferIndex<T> {
 mod gpu {
     use spirv_std::{RuntimeArray, TypedBuffer};
 
-    use super::{BufferIndex, SamplerIndex, StorageImageIndex, TextureIndex};
-
-    impl TextureIndex {
-        /// This texture in `textures`, the heap's array of its view type.
-        #[must_use]
-        pub fn get<I>(self, textures: &RuntimeArray<I>) -> &I {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { textures.index(self.slot() as usize) }
-        }
-    }
-
-    impl StorageImageIndex {
-        /// This image in `images`, the heap's array of its view type.
-        #[must_use]
-        pub fn get<I>(self, images: &RuntimeArray<I>) -> &I {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { images.index(self.slot() as usize) }
-        }
-    }
-
-    impl SamplerIndex {
-        /// This sampler in `samplers`, the heap's sampler array.
-        #[must_use]
-        pub fn get<S>(self, samplers: &RuntimeArray<S>) -> &S {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { samplers.index(self.slot() as usize) }
-        }
-    }
+    use super::BufferIndex;
 
     impl<T> BufferIndex<T> {
         /// This buffer's elements in `buffers`, the heap's storage buffer

@@ -193,7 +193,8 @@ frame.finish();                               // closes the frame (also on Drop)
   for it. Bindings and power-of-two capacities are constants in
   `dirk_shaders::bindless::heap`: textures 2D, 2D array, cube, cube array and 3D (16384
   each), storage images 2D, 2D array and 3D (4096 each, declared without a format; cubes
-  have no storage index), samplers (1024) and storage buffers (65536).
+  have no storage index), samplers (1024), storage buffers (65536), and depth textures
+  2D, 2D array, cube and cube array (1024 each; see [Depth comparison](#depth-comparison)).
   - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND |
     UPDATE_UNUSED_WHILE_PENDING` arrays (Vulkan 1.2 descriptor indexing). Every slot is
     written at creation, and rewritten when freed, to a null descriptor
@@ -207,7 +208,9 @@ frame.finish();                               // closes the frame (also on Drop)
     bytes, which shaders' bounds checks never read.
 - Every `ImageView`/`Sampler`/`Buffer` created with a shader-visible usage gets a slot at
   creation and returns it through the deferred free path, so a slot is reused only once
-  the GPU is done with its frame. `view.index() -> Option<TextureIndex>` (sampled usage),
+  the GPU is done with its frame. `view.index() -> Option<TextureIndex>` (sampled usage,
+  color formats), `view.depth_index() -> Option<DepthTextureIndex>` (sampled usage, depth
+  formats),
   `view.storage_index() -> Option<StorageImageIndex>`, `sampler.index() -> SamplerIndex`,
   `buffer.index::<T>() -> Option<BufferIndex<T>>` (storage usage; `T` is chosen by the
   reader and memory-safe whatever it is). Storage buffers are limited to the device's
@@ -230,6 +233,24 @@ frame.finish();                               // closes the frame (also on Drop)
 - Stale indices are memory-safe: shaders mask every index to its array's capacity, and
   each slot holds a null descriptor or a live resource of the array's kind and
   dimension. In debug builds a generation check may report them later.
+
+## Depth comparison
+
+Shadow maps are filtered by comparing a reference depth with each texel and filtering
+the results (percentage-closer filtering), in hardware:
+
+- `SamplerDesc::compare: Option<CompareOp>` makes a comparison sampler, which returns
+  how many filtered texels pass `reference op texel`. It lives in the one sampler array:
+  Vulkan and Metal samplers are the same descriptor either way. Shaders use comparison
+  samplers only with depth comparisons (`sample_depth_reference`), and other samplers
+  never with them; Vulkan leaves mixing them undefined, though memory-safe.
+- Metal compares only textures declared as depth textures (`depth2d<float>`), and SPIR-V
+  only declares an image as depth on its type, so sampled views of depth formats go into
+  their own arrays, `DEPTH_TEXTURES_*`, which shaders declare as depth images
+  (`Image!(2D, type = f32, sampled, depth)`); these can also be sampled and loaded as
+  plain depth. Their views have a `DepthTextureIndex` and no `TextureIndex`, and 3D depth
+  images are rejected. Every sampled depth format supports comparison on both APIs,
+  with linear filtering.
 
 ## Metal
 
@@ -365,5 +386,5 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Compute pipelines and dispatch, indirect draws, timestamp queries, comparison samplers,
-render-graph subresource ranges, async compute. Each adds API without breaking the above.
+Compute pipelines and dispatch, indirect draws, timestamp queries, render-graph
+subresource ranges, async compute. Each adds API without breaking the above.

@@ -31,6 +31,14 @@ impl Array {
         )
     }
 
+    const fn depth_texture(binding: u32) -> Self {
+        Self::new(
+            binding,
+            vk::DescriptorType::SAMPLED_IMAGE,
+            heap::DEPTH_TEXTURE_CAPACITY,
+        )
+    }
+
     const fn storage_image(binding: u32) -> Self {
         Self::new(
             binding,
@@ -41,7 +49,7 @@ impl Array {
 }
 
 /// Every array of the heap, indexed by binding.
-const ARRAYS: [Array; 10] = [
+const ARRAYS: [Array; heap::CAPACITIES.len()] = [
     Array::texture(heap::TEXTURES_2D),
     Array::texture(heap::TEXTURES_2D_ARRAY),
     Array::texture(heap::TEXTURES_CUBE),
@@ -60,13 +68,18 @@ const ARRAYS: [Array; 10] = [
         vk::DescriptorType::STORAGE_BUFFER,
         heap::BUFFER_CAPACITY,
     ),
+    Array::depth_texture(heap::DEPTH_TEXTURES_2D),
+    Array::depth_texture(heap::DEPTH_TEXTURES_2D_ARRAY),
+    Array::depth_texture(heap::DEPTH_TEXTURES_CUBE),
+    Array::depth_texture(heap::DEPTH_TEXTURES_CUBE_ARRAY),
 ];
 
-// Arrays are looked up by binding.
+// Arrays are looked up by binding, and have the shared capacities.
 const _: () = {
     let mut index = 0;
     while index < ARRAYS.len() {
         assert!(ARRAYS[index].binding as usize == index);
+        assert!(ARRAYS[index].capacity == heap::CAPACITIES[index]);
         index += 1;
     }
 };

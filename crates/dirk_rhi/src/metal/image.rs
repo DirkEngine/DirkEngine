@@ -73,13 +73,15 @@ impl Image {
             slots: [None; 2],
         };
         if let Some(view_type) = view {
-            let (sampled, storage) = view_type.heap_bindings();
             let descriptor = Descriptor::Texture(&image.raw);
-            if desc.usage.contains(ImageUsage::SAMPLED) {
-                image.slots[0] = Some(device.add_to_heap(sampled, &descriptor)?);
-            }
-            if let Some(storage) = storage.filter(|_| desc.usage.contains(ImageUsage::STORAGE)) {
-                image.slots[1] = Some(device.add_to_heap(storage, &descriptor)?);
+            for ((usage, binding), slot) in view_type
+                .heap_bindings(desc.format)
+                .into_iter()
+                .zip(&mut image.slots)
+            {
+                if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
+                    *slot = Some(device.add_to_heap(binding, &descriptor)?);
+                }
             }
         }
         Ok(image)
