@@ -55,7 +55,7 @@ impl ModelRegistry {
         uploads: &mut Uploads<'_>,
         events: &dirk_events::EventManager,
     ) -> Result<Self> {
-        let fallback = Mips::generate(1, 1, vec![255; 4]).upload(uploads, "fallback texture")?;
+        let fallback = Model::upload_texture(uploads, "fallback texture", 1, 1, &[255; 4])?;
         let max_anisotropy = rhi.capabilities().limits.max_sampler_anisotropy;
         let sampler = rhi.create_sampler(&SamplerDesc {
             label: "model textures",
@@ -125,17 +125,17 @@ impl Model {
             .iter()
             .map(|image| {
                 let pixels = match image.format {
-                    gltf::image::Format::R8G8B8 => image
+                    gltf::image::Format::R8G8B8 => &image
                         .pixels
                         .as_chunks::<3>()
                         .0
                         .iter()
                         .flat_map(|&[r, g, b]| [r, g, b, 255])
                         .collect(),
-                    gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+                    gltf::image::Format::R8G8B8A8 => &image.pixels,
                     format => return Err(Error::UnsupportedImageFormat(format)),
                 };
-                Mips::generate(image.width, image.height, pixels).upload(uploads, "model texture")
+                Self::upload_texture(uploads, "model texture", image.width, image.height, pixels)
             })
             .collect::<Result<Vec<_>>>()?;
         let fallback = fallback.texture()?;
@@ -172,6 +172,32 @@ impl Model {
             _textures: textures,
             primitives,
         })
+    }
+
+    /// Uploads the `width` by `height` sRGB RGBA `texels` as a texture
+    /// fragment shaders sample, with its mips generated on the GPU.
+    fn upload_texture(
+        uploads: &mut Uploads<'_>,
+        label: &str,
+        width: u32,
+        height: u32,
+        texels: &[u8],
+    ) -> Result<Image> {
+        Ok(uploads.mipmapped_image(
+            &ImageDesc {
+                label,
+                dimension: ImageDimension::D2,
+                extent: Extent3d::new_2d(width, height),
+                format: Format::Rgba8Srgb,
+                usage: ImageUsage::SAMPLED,
+                // Down to one texel: one level per bit of the larger side.
+                mip_levels: width.max(height).bit_width(),
+                array_layers: 1,
+                samples: SampleCount::X1,
+                rest: None,
+            },
+            texels,
+        )?)
     }
 }
 
@@ -226,120 +252,5 @@ impl Primitive {
             })?,
             texture,
         }))
-    }
-}
-
-/// The mip chain of an sRGB RGBA image, down to one texel.
-struct Mips {
-    width: u32,
-    height: u32,
-    /// Texels of each level, from the full image down.
-    levels: Vec<Vec<u8>>,
-}
-
-impl Mips {
-    /// Generates the chain of the `width` by `height` image `pixels`, each
-    /// level averaging 2x2 texels of the previous one in linear space.
-    fn generate(width: u32, height: u32, pixels: Vec<u8>) -> Self {
-        let decode: Vec<f32> = (0..=u8::MAX)
-            .map(|value| Self::linear_from_srgb(f32::from(value) / 255.0))
-            .collect();
-        let mut levels = vec![pixels];
-        let (full_width, full_height) = (width, height);
-        let (mut width, mut height) = (width as usize, height as usize);
-        while width > 1 || height > 1 {
-            let previous = levels.last().map_or(&[][..], Vec::as_slice);
-            let (next_width, next_height) = ((width / 2).max(1), (height / 2).max(1));
-            let mut next = Vec::with_capacity(next_width * next_height * 4);
-            for y in 0..next_height {
-                for x in 0..next_width {
-                    let texels = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dx, dy)| {
-                        let texel =
-                            (2 * y + dy).min(height - 1) * width + (2 * x + dx).min(width - 1);
-                        &previous[texel * 4..texel * 4 + 4]
-                    });
-                    for channel in 0..4 {
-                        let sum: f32 = texels
-                            .iter()
-                            .map(|texel| match channel {
-                                3 => f32::from(texel[3]) / 255.0,
-                                _ => decode[usize::from(texel[channel])],
-                            })
-                            .sum();
-                        let average = sum / 4.0;
-                        let encoded = if channel == 3 {
-                            average
-                        } else {
-                            Self::srgb_from_linear(average)
-                        };
-                        // Rounded and clamped to `0.0..=255.0` first.
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "the value is rounded and clamped to a byte"
-                        )]
-                        next.push((encoded * 255.0).round().clamp(0.0, 255.0) as u8);
-                    }
-                }
-            }
-            levels.push(next);
-            (width, height) = (next_width, next_height);
-        }
-        Self {
-            width: full_width,
-            height: full_height,
-            levels,
-        }
-    }
-
-    /// Uploads the chain as a texture fragment shaders sample.
-    fn upload(&self, uploads: &mut Uploads<'_>, label: &str) -> Result<Image> {
-        let levels: Vec<&[u8]> = self.levels.iter().map(Vec::as_slice).collect();
-        Ok(uploads.image(
-            &ImageDesc {
-                label,
-                dimension: ImageDimension::D2,
-                extent: Extent3d::new_2d(self.width, self.height),
-                format: Format::Rgba8Srgb,
-                usage: ImageUsage::SAMPLED,
-                // One level per bit of the larger side, as generated.
-                mip_levels: self.width.max(self.height).bit_width(),
-                array_layers: 1,
-                samples: SampleCount::X1,
-                rest: None,
-            },
-            &levels,
-        )?)
-    }
-
-    /// Decodes an sRGB-encoded channel in `0.0..=1.0`.
-    fn linear_from_srgb(value: f32) -> f32 {
-        if value <= 0.040_45 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    /// Encodes a linear channel in `0.0..=1.0` with the sRGB curve.
-    fn srgb_from_linear(value: f32) -> f32 {
-        if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Mips;
-
-    #[test]
-    fn mips_average_colors_in_linear_space() {
-        let black_and_white = vec![0, 0, 0, 255, 255, 255, 255, 255];
-        let mips = Mips::generate(2, 1, black_and_white);
-        // Half the light of white is sRGB 188, not 128.
-        assert_eq!(mips.levels[1..], [vec![188, 188, 188, 255]]);
     }
 }
