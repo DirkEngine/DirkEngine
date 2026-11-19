@@ -159,7 +159,7 @@ mod apple {
         fn every_shader_declares_the_whole_heap_in_binding_order() {
             let msl = "struct spvDescriptorSetBuffer0\n{\n    \
                        const device uint* m_4 [[id(95232)]][65536];\n    \
-                       constant uint* spvBufferSizeConstants [[id(160768)]];\n    \
+                       constant uint* spvBufferSizeConstants [[id(164864)]];\n    \
                        array<sampler, 1024> m_5 [[id(94208)]];\n};\nvoid f();\n";
             let laid_out = lay_out_heap(msl).expect("the heap is laid out");
             let ids: Vec<_> = laid_out
@@ -171,7 +171,7 @@ mod apple {
                 ids,
                 [
                     "0", "16384", "32768", "49152", "65536", "81920", "86016", "90112", "94208",
-                    "95232", "160768"
+                    "95232", "160768", "161792", "162816", "163840", "164864"
                 ]
             );
             assert!(
