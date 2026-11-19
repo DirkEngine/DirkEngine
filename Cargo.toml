@@ -12,10 +12,11 @@ version.workspace = true
 homepage.workspace = true
 authors.workspace = true
 documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 glam.workspace = true
 piquel-log.workspace = true
@@ -82,7 +83,6 @@ categories = ["game-engines", "graphics", "rendering", "vulkan"]
 
 [workspace.dependencies]
 # Basic stuff
-time = { version = "0.3", features = ["formatting", "macros"] }
 tracing = "0.1"
 piquel-log = { version = "0.0.6", features = ["log", "file"] }
 parking_lot = "0.12"

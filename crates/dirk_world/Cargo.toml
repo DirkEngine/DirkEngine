@@ -16,9 +16,7 @@ glam.workspace = true
 tracing.workspace = true
 
 dirk_engine.workspace = true
-dirk_events.workspace = true
 dirk_utils.workspace = true
-dirk_platform.workspace = true
 dirk_assets.workspace = true
 dirk_universe.workspace = true
 

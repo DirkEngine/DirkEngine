@@ -662,7 +662,6 @@ dependencies = [
  "dirk_input",
  "dirk_platform",
  "dirk_universe",
- "dirk_utils",
  "dirk_world",
  "glam",
  "parking_lot",
@@ -760,8 +759,6 @@ dependencies = [
  "anyhow",
  "dirk_assets",
  "dirk_engine",
- "dirk_events",
- "dirk_platform",
  "dirk_universe",
  "dirk_utils",
  "glam",
@@ -789,7 +786,6 @@ dependencies = [
  "dirk_world",
  "glam",
  "piquel-log",
- "thiserror 2.0.18",
  "tracing",
 ]
 

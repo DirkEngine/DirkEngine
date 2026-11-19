@@ -1,6 +1,7 @@
 # Continuous integration for DirkEngine.
 #
-#   checks -> formatting and the dependency audit, which compile nothing
+#   checks -> formatting, unused dependencies and the dependency audit,
+#             which compile nothing
 #   rust   -> clippy on every target (tests included), tests, and the debug
 #             build, with every feature and with no default features, on
 #             Linux and macOS (the platform layer differs); Linux also runs
@@ -80,6 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: cargo fmt --all --check
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-machete
+      # Dependencies a crate declares but never names.
+      - run: cargo machete
       - if: needs.changes.outputs.deny == 'true'
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
