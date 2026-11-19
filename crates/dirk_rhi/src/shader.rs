@@ -47,7 +47,7 @@ impl ShaderStage {
 ///
 /// # Safety
 ///
-/// [`SPIRV`](Self::SPIRV) is a valid SPIR-V module for Vulkan 1.3 declaring
+/// [`CODE`](Self::CODE) is a valid SPIR-V module for Vulkan 1.3 declaring
 /// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE). The entry
 /// point only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
@@ -71,7 +71,7 @@ pub unsafe trait Shader {
     /// Whether the entry point may write storage buffers or images.
     const WRITES_STORAGE: bool;
     /// The SPIR-V module, as bytes.
-    const SPIRV: &'static [u8];
+    const CODE: &'static [u8];
 }
 
 /// A shader entry point ready for pipelines whose push data is `P`, the
@@ -90,7 +90,7 @@ pub unsafe trait Shader {
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
 ///     const WRITES_STORAGE: bool = false;
-///     const SPIRV: &'static [u8] = &[];
+///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
 ///     let rhi = Rhi::new(&Default::default())?;
@@ -113,7 +113,7 @@ pub unsafe trait Shader {
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
 ///     const WRITES_STORAGE: bool = false;
-///     const SPIRV: &'static [u8] = &[];
+///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
 ///     let rhi = Rhi::new(&Default::default())?;
@@ -164,7 +164,7 @@ impl Rhi {
             ));
         }
         Ok(ShaderModule {
-            raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::SPIRV)?,
+            raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::CODE)?,
             stage: S::STAGE,
             writes_storage: S::WRITES_STORAGE,
             entry_point: S::ENTRY_POINT,
