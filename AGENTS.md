@@ -26,6 +26,8 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   Apple targets, the only crate that uses `objc2-metal`, and Vulkan
   elsewhere. Its native tests' shaders are `crates/dirk_rhi/test-shaders`,
   built like the engine's.
+- `dirk_render_utils`: rendering utilities built on `dirk_rhi`: staged
+  uploads.
 - `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
   that use `ash`; `docs/dev/rust-conventions.md` says which use `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
@@ -86,9 +88,10 @@ uses it too. Before anything destructive, ask what else it touches.
 - Running the engine opens a window and needs a Vulkan device; debug builds
   also need the Khronos validation layer (see the README). Tests never need a
   GPU or a window, since CI can't count on either: test the logic around GPU
-  code, as the frame graph's tests do. `dirk_rhi`'s integration tests are the
-  exception: they use a device when there is one and skip otherwise;
-  `DIRK_REQUIRE_GPU=1` makes a missing device fail them (see its README).
+  code, as the frame graph's tests do. The native tests of `dirk_rhi` and
+  `dirk_render_utils` are the exception: they use a device when there is one
+  and skip otherwise; `DIRK_REQUIRE_GPU=1` makes a missing device fail them
+  (see `dirk_rhi`'s README).
 
 ## Conventions
 

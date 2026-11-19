@@ -1,6 +1,6 @@
 [package]
 name = "dirk_rhi_test_shaders"
-description = "Shaders for dirk_rhi's native tests, built like the engine's"
+description = "Shaders and setup for the native tests of dirk_rhi and the crates built on it"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,11 +10,6 @@ publish = false
 [dependencies]
 dirk_rhi = { version = "0.1.0", path = ".." }
 dirk_rhi_test_shaders_gpu = { version = "0.1.0", path = "gpu" }
-
-# Only the generated `Shader` implementations name `dirk_rhi`, which
-# cargo-machete does not see.
-[package.metadata.cargo-machete]
-ignored = ["dirk_rhi"]
 
 [build-dependencies]
 anyhow.workspace = true

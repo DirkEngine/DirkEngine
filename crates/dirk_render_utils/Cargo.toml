@@ -1,0 +1,44 @@
+[package]
+name = "dirk_render_utils"
+description = "Rendering utilities built on DirkEngine's RHI"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+dirk_rhi.workspace = true
+
+[dev-dependencies]
+dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }
+
+# The workspace lints (../../Cargo.toml), except that `unsafe_code` is denied
+# rather than forbidden: uploads record raw RHI barriers to hand resources
+# over, and the native tests raw barriers and host accesses. Each expects it
+# where it does, and every unsafe block states why it is sound.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Production code propagates errors; tests may panic (see clippy.toml).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+# Every exception names its lint with `#[expect]` and says why.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Every unsafe block says why it is sound.
+undocumented_unsafe_blocks = "warn"
+# Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
+self_named_module_files = "warn"
