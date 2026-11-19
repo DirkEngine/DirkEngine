@@ -15,9 +15,10 @@ use objc2_metal::{
 use parking_lot::Mutex;
 
 use objc2_foundation::NSString;
+use objc2_quartz_core::CAMetalDrawable;
 
-use super::{Check, CommandBuffer, Device, Object, Presentation};
-use crate::{QueueType, Result};
+use super::{Check, CommandBuffer, Device, Object, Presentation, command::Fence};
+use crate::{Error, QueueType, Result};
 
 /// How long a wait blocks before checking whether submitted work failed,
 /// which may leave a timeline short of its value forever.
@@ -28,6 +29,10 @@ const WAIT_SLICE: Duration = Duration::from_millis(100);
 pub(super) struct Queue {
     pub(super) raw: Object<dyn MTLCommandQueue>,
     event: Object<dyn MTLSharedEvent>,
+    /// Updated at the end of each command buffer once all its work and the
+    /// queue's earlier work is done; every command buffer's first encoders
+    /// wait for it. See `command`.
+    pub(super) join: Fence,
     /// The value the last submission signals. Advanced while holding
     /// `submitting`, read without it.
     submitted: AtomicU64,
@@ -50,6 +55,7 @@ impl Queue {
         Ok(Self {
             raw,
             event: device.newSharedEvent().check("newSharedEvent")?.into(),
+            join: device.newFence().check("newFence")?.into(),
             submitted: AtomicU64::new(0),
             submitting: Mutex::new(()),
         })
@@ -61,13 +67,15 @@ impl Device {
     /// reaches each queue's value in `waits`, and returns the value the
     /// submission signals. Only this queue's lock is held, and the heap's
     /// while committing, so no slot the commands read is written meanwhile.
-    /// Presentation needs no semaphores: drawables are presented after the
-    /// work committed before them.
+    /// Presentation needs no semaphores: drawables are presented after
+    /// waiting for the graphics queue's timeline.
     ///
-    /// Metal waits for events only before the passes encoded after the wait,
-    /// and `waits` are known only now, after the passes. So they are encoded
-    /// in a command buffer committed just before: a queue blocks at a wait
-    /// until the event reaches its value, holding back what follows.
+    /// Each command buffer ends with its queue's join (see `command`), so
+    /// the value is signaled once the submission and everything submitted
+    /// to the queue before it completed. Metal waits for events only before
+    /// the passes encoded after the wait, and `waits` are known only now,
+    /// after the passes, so they go into a command buffer committed just
+    /// before, whose own join the submission's first encoders wait for.
     pub(crate) fn submit(
         &self,
         queue: QueueType,
@@ -76,29 +84,38 @@ impl Device {
         _presentation: Presentation<'_>,
     ) -> Result<u64> {
         let mut commands: Vec<_> = commands.into_iter().collect();
-        for commands in &mut commands {
-            commands.end_encoding();
-        }
         let target = &self.queues[queue as usize];
-        // A submission without commands still signals its value.
-        let empty;
-        let raws: Vec<_> = if commands.is_empty() {
-            empty = autoreleasepool(|_| target.raw.commandBuffer()).check("commandBuffer")?;
-            vec![&*empty]
-        } else {
-            commands.iter().map(CommandBuffer::raw).collect()
+        let new = |label: &str| {
+            let commands =
+                autoreleasepool(|_| target.raw.commandBuffer()).check("commandBuffer")?;
+            commands.setLabel(Some(&NSString::from_str(label)));
+            Ok::<_, Error>(commands)
         };
+        // Joins are encoded in the order command buffers are committed.
         let _submitting = target.submitting.lock();
         if waits.iter().any(|&value| value > 0) {
-            let wait = autoreleasepool(|_| target.raw.commandBuffer()).check("commandBuffer")?;
-            wait.setLabel(Some(&NSString::from_str("waits")));
+            let wait = new("waits")?;
             for (queue, value) in self.queues.iter().zip(waits) {
                 if value > 0 {
                     wait.encodeWaitForEvent_value(ProtocolObject::from_ref(&*queue.event), value);
                 }
             }
-            wait.commit();
+            self.join(&wait, std::slice::from_ref(&target.join), &target.join)?;
+            self.commit(&wait);
         }
+        // A submission without commands still signals its value once the
+        // queue's earlier work is done.
+        let empty;
+        let raws: Vec<_> = if commands.is_empty() {
+            empty = new("empty submission")?;
+            self.join(&empty, std::slice::from_ref(&target.join), &target.join)?;
+            vec![&*empty]
+        } else {
+            for commands in &mut commands {
+                commands.finish(self, &target.join)?;
+            }
+            commands.iter().map(CommandBuffer::raw).collect()
+        };
         let value = target.submitted.load(Ordering::Relaxed) + 1;
         let last = raws.last().expect("a submission has a command buffer");
         last.encodeSignalEvent_value(ProtocolObject::from_ref(&*target.event), value);
@@ -109,6 +126,28 @@ impl Device {
         });
         target.submitted.store(value, Ordering::Release);
         Ok(value)
+    }
+
+    /// Presents `drawables` with one graphics command buffer, which first
+    /// waits for the graphics queue's timeline to reach its last
+    /// submission: Metal presents drawables once the command buffer
+    /// presenting them is scheduled, which the wait holds back until the
+    /// work rendering them is done.
+    pub(super) fn present_drawables(
+        &self,
+        drawables: impl IntoIterator<Item = Object<dyn CAMetalDrawable>>,
+    ) -> Result<()> {
+        let graphics = &self.queues[QueueType::Graphics as usize];
+        let commands = autoreleasepool(|_| graphics.raw.commandBuffer()).check("commandBuffer")?;
+        commands.setLabel(Some(&NSString::from_str("present")));
+        let _submitting = graphics.submitting.lock();
+        let rendered = graphics.submitted.load(Ordering::Relaxed);
+        commands.encodeWaitForEvent_value(ProtocolObject::from_ref(&*graphics.event), rendered);
+        for drawable in drawables {
+            commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
+        }
+        self.commit(&commands);
+        Ok(())
     }
 
     /// Commits `raw`, recording its failure in the device's health.

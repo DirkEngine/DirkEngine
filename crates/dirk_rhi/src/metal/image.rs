@@ -2,13 +2,10 @@ use std::sync::Arc;
 
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
-use objc2_metal::{
-    MTLDevice, MTLResource, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage,
-};
+use objc2_metal::{MTLResource, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage};
 
 use super::{
-    Check, Device, Object,
+    Device, Object,
     device::Garbage,
     heap::{Descriptor, Slot},
 };
@@ -52,7 +49,6 @@ impl Image {
         };
         texture.setTextureType(texture_type);
         texture.setPixelFormat(desc.format.mtl());
-        texture.setStorageMode(MTLStorageMode::Private);
         texture.setUsage(desc.usage.mtl(desc.format.is_depth_stencil()));
         // SAFETY: the description was validated against the device's limits.
         unsafe {
@@ -63,11 +59,7 @@ impl Image {
             texture.setArrayLength(layers as usize);
             texture.setSampleCount(desc.samples.count());
         }
-        let raw: Object<_> = device
-            .raw
-            .newTextureWithDescriptor(&texture)
-            .check("newTextureWithDescriptor")?
-            .into();
+        let raw: Object<_> = device.allocator.texture(&device.raw, &texture)?.into();
         raw.setLabel(Some(&NSString::from_str(desc.label)));
         // Owned from here on, so a failure below frees the slots taken.
         let mut image = Self {

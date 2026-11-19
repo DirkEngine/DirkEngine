@@ -4,13 +4,12 @@
 
 use std::ptr::NonNull;
 
-use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLFunction, MTLLibrary, MTLLoadAction,
     MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLRenderStages, MTLResourceUsage,
-    MTLSamplerState, MTLStoreAction, MTLTexture, MTLTextureType, MTLViewport,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLSamplerState, MTLStoreAction,
+    MTLTexture, MTLTextureType, MTLViewport,
 };
 use parking_lot::Mutex;
 
@@ -199,14 +198,6 @@ impl CommandBuffer {
                     });
                     encoder.setLabel(Some(&NSString::from_str("blit")));
                     encoder.setRenderPipelineState(&pipeline);
-                    // Views are tracked apart from their texture, so the
-                    // texture itself is declared for Metal to order this
-                    // read after earlier writes.
-                    encoder.useResource_usage_stages(
-                        ProtocolObject::from_ref(&*src.raw),
-                        MTLResourceUsage::Read,
-                        MTLRenderStages::Fragment,
-                    );
                     // Primitives are clipped to the viewport, the region.
                     encoder.setViewport(MTLViewport {
                         originX: f64::from(destination.origin.x),
