@@ -55,6 +55,9 @@ impl Sampler {
         sampler.setSupportArgumentBuffers(true);
         sampler.setLabel(Some(&NSString::from_str(desc.label)));
         sampler.setMaxAnisotropy(usize::from(desc.max_anisotropy));
+        if let Some(compare) = desc.compare {
+            sampler.setCompareFunction(compare.mtl());
+        }
         Ok(device
             .newSamplerStateWithDescriptor(&sampler)
             .check("newSamplerStateWithDescriptor")?

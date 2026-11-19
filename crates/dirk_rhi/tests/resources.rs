@@ -257,6 +257,14 @@ fn images_are_validated_at_creation() -> Result<()> {
         reject(
             rhi,
             ImageDesc {
+                dimension: ImageDimension::D3,
+                ..image_2d(Format::Depth16Unorm, ImageUsage::SAMPLED)
+            },
+            "not 3D",
+        );
+        reject(
+            rhi,
+            ImageDesc {
                 samples: SampleCount::X4,
                 ..color
             },

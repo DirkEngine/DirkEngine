@@ -13,7 +13,10 @@ use dirk_rhi::{
     ImageUsage, ImageView, IndexFormat, Indices, LoadOp, Memory, PushData, Rect, RenderPassDesc,
     Result, Rhi, SampleCount, SamplerDesc, Shader, ShaderStages, StoreOp, Topology,
 };
-use dirk_rhi_test_shaders::{Fill, FillFs, FillVs, Textured, TexturedFs, TexturedVs, Vertex};
+use dirk_rhi_test_shaders::{
+    CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Textured, TexturedFs,
+    TexturedVs, Vertex,
+};
 use support::with_rhi;
 
 const SIZE: u32 = 8;
@@ -666,6 +669,139 @@ fn draws_pull_vertices_and_sample_textures_through_the_heap() -> Result<()> {
                 usize::from(x >= SIZE as usize / 2) + 2 * usize::from(y >= SIZE as usize / 2);
             assert_eq!(*pixel, texels[texel], "pixel ({x}, {y})");
         }
+        Ok(())
+    })
+}
+
+/// A depth-only pipeline writing the depth of fills to targets of `format`.
+fn depth_only_pipeline(rhi: &Rhi, format: Format) -> Result<GraphicsPipeline<Fill>> {
+    let vertex = rhi.create_shader::<FillVs, Fill>()?;
+    rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+        label: "depth only",
+        vertex: &vertex,
+        fragment: None,
+        topology: Topology::default(),
+        cull_mode: CullMode::default(),
+        front_face: FrontFace::default(),
+        color_targets: &[],
+        depth: Some(DepthState {
+            format,
+            write: true,
+            compare: CompareOp::Always,
+            bias: DepthBias::default(),
+        }),
+        samples: SampleCount::X1,
+    })
+}
+
+/// Renders the 2x2 depth texture `shadow_map` with `depth_only`: `near` on
+/// its diagonal from the top left, `far` off it, then leaves it sampled.
+fn render_shadow_map(
+    encoder: &mut CommandEncoder<'_>,
+    shadow_map: &Image,
+    depth_only: &GraphicsPipeline<Fill>,
+    (near, far): (f32, f32),
+) -> Result<()> {
+    transition(
+        encoder,
+        shadow_map,
+        ImageAccess::Undefined,
+        ImageAccess::DepthStencilAttachment,
+    )?;
+    let mut pass = encoder.render_pass(&RenderPassDesc {
+        label: "shadow map",
+        colors: &[],
+        depth: Some(DepthAttachment {
+            image: shadow_map,
+            load: LoadOp::Clear(far),
+            store: StoreOp::Store,
+        }),
+    })?;
+    for texel in 0..2 {
+        pass.set_scissor(Rect {
+            x: texel,
+            y: texel,
+            width: 1,
+            height: 1,
+        })?;
+        let fill = Fill {
+            color: RED,
+            depth: near,
+        };
+        pass.draw(depth_only, &fill, 0..3, 0..1)?;
+    }
+    pass.end();
+    transition(
+        encoder,
+        shadow_map,
+        ImageAccess::DepthStencilAttachment,
+        ImageAccess::Sampled(ShaderStages::FRAGMENT),
+    )
+}
+
+#[test]
+fn comparison_samplers_filter_depth_comparisons() -> Result<()> {
+    with_rhi(|rhi| {
+        let (near, far) = (0.25, 0.75);
+        let shadow_map = rhi.create_image(&ImageDesc {
+            label: "shadow map",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(2, 2),
+            format: Format::Depth32Float,
+            usage: ImageUsage::SAMPLED | ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+        })?;
+        let view = shadow_map.view().expect("sampled images have a view");
+        assert!(view.index().is_none(), "depth views are not color textures");
+        let depth_only = depth_only_pipeline(rhi, Format::Depth32Float)?;
+        let pipeline = graphics_pipeline::<CoveringVs, DepthCompareFs, DepthCompare>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let mut compare = |filter| {
+            let sampler = rhi.create_sampler(&SamplerDesc {
+                label: "shadow",
+                mag_filter: filter,
+                min_filter: filter,
+                compare: Some(CompareOp::Less),
+                ..SamplerDesc::default()
+            })?;
+            let push = DepthCompare {
+                texture: view
+                    .depth_index()
+                    .expect("sampled depth images have an index"),
+                sampler: sampler.index(),
+                reference: 0.5,
+            };
+            render(rhi, |encoder, target| {
+                render_shadow_map(encoder, &shadow_map, &depth_only, (near, far))?;
+                let mut pass = encoder.render_pass(&RenderPassDesc {
+                    label: "depth comparison",
+                    colors: &[cleared(target)],
+                    depth: None,
+                })?;
+                pass.draw(&pipeline, &push, 0..3, 0..1)
+            })
+        };
+
+        // Pixels pass where the reference is nearer than their texel: off
+        // the diagonal.
+        let nearest = compare(Filter::Nearest)?;
+        for (index, pixel) in nearest.iter().enumerate() {
+            let (x, y) = (index % SIZE as usize, index / SIZE as usize);
+            let diagonal = (x < SIZE as usize / 2) == (y < SIZE as usize / 2);
+            assert_eq!(pixel[0], if diagonal { 0 } else { 255 }, "pixel ({x}, {y})");
+        }
+        // Linear filtering blends the comparisons of neighbouring texels.
+        let linear = compare(Filter::Linear)?;
+        assert!(
+            (1..255).contains(&linear[3 * SIZE as usize + 3][0]),
+            "pixel (3, 3) blends passing and failing texels"
+        );
         Ok(())
     })
 }

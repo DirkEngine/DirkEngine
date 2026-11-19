@@ -4,7 +4,7 @@
 #![no_std]
 
 use bytemuck::NoUninit;
-use dirk_shaders::bindless::{BufferIndex, SamplerIndex, TextureIndex};
+use dirk_shaders::bindless::{BufferIndex, DepthTextureIndex, SamplerIndex, TextureIndex};
 use spirv_std::{
     Image, RuntimeArray, Sampler, TypedBuffer,
     glam::{Vec2, Vec4, vec4},
@@ -94,4 +94,51 @@ pub fn textured_fs(
         .texture
         .get(textures)
         .sample(*push.sampler.get(samplers), uv);
+}
+
+/// Covers the render area with one triangle whose texture coordinates run
+/// from zero to one across it; draw three vertices. Reads no push data, so
+/// it pairs with fragment shaders of any.
+#[spirv(vertex)]
+pub fn covering_vs(
+    #[spirv(vertex_index)] index: i32,
+    #[spirv(position)] position: &mut Vec4,
+    uv: &mut Vec2,
+) {
+    // Texture coordinates (0, 0), (2, 0) and (0, 2).
+    let corner = |bit: i32| if index & bit == 0 { 0.0 } else { 2.0 };
+    *uv = Vec2::new(corner(1), corner(2));
+    *position = vec4(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0, 1.0);
+}
+
+/// Push data of the depth comparison shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit)]
+pub struct DepthCompare {
+    /// A 2D depth texture.
+    pub texture: DepthTextureIndex,
+    /// The comparison sampler reading it.
+    pub sampler: SamplerIndex,
+    /// The depth compared with the texture's.
+    pub reference: f32,
+}
+
+/// Writes the share of `push.texture`'s filtered texels passing the
+/// comparison of `push.reference` with them to every channel.
+#[spirv(fragment)]
+pub fn depth_compare_fs(
+    #[spirv(push_constant)] push: &DepthCompare,
+    #[spirv(descriptor_set = 0, binding = 10)] textures: &RuntimeArray<
+        Image!(2D, type = f32, sampled, depth),
+    >,
+    #[spirv(descriptor_set = 0, binding = 8)] samplers: &RuntimeArray<Sampler>,
+    uv: Vec2,
+    color: &mut Vec4,
+) {
+    let passed = push.texture.get(textures).sample_depth_reference(
+        *push.sampler.get(samplers),
+        uv,
+        push.reference,
+    );
+    *color = Vec4::splat(passed);
 }

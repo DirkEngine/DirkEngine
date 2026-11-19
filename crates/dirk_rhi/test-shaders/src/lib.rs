@@ -2,7 +2,7 @@
 //! the engine's, so the tests also cover the shader build and its push data
 //! check.
 
-pub use dirk_rhi_test_shaders_gpu::{Fill, Textured, Vertex};
+pub use dirk_rhi_test_shaders_gpu::{DepthCompare, Fill, Textured, Vertex};
 
 #[expect(
     unsafe_code,
