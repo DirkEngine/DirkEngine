@@ -11,12 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferDesc, CommandEncoder, Frame, Graphics, Image,
-    ImageAccess, ImageBarrier, ImageDesc, ImageRange, Result, StoreOp,
+    ImageAccess, ImageBarrier, ImageDesc, ImageRange, Result, StoreOp, Subresource,
 };
 
 pub use pass::{Commands, PassBuilder, PassContext, Rendering};
-pub use resources::{Handle, Transients};
+pub use resources::{Handle, ImageSlice, Transients};
 
+use access::Subresources;
 use pass::Pass;
 use resources::{Resources, Source, Table};
 
@@ -24,7 +25,9 @@ use resources::{Resources, Source, Table};
 ///
 /// Passes declare each access, and the graph derives every barrier from the
 /// declarations: read after write, write after read and write after write,
-/// per mip level. Reads that can share a state, such as sampling in more
+/// per mip level and array layer. Passes may declare an [`ImageSlice`] of an
+/// image instead of the whole of it, such as a cube face, a shadow cascade
+/// or a mip, and render to one mip of one layer. Reads that can share a state, such as sampling in more
 /// shader stages, share one barrier. Passes record through the RHI's safe
 /// commands when the graph executes, all into one encoder, with one barrier
 /// call before each pass.
@@ -125,9 +128,9 @@ impl<'a> RenderGraph<'a> {
         before: ImageAccess,
         after: ImageAccess,
     ) -> Result<Handle<Image>> {
-        let mips = image.info().mip_levels;
-        self.images
-            .import(image, image.label(), mips, before, after)
+        let info = image.info();
+        let all = Subresources::all(info.mip_levels, info.array_layers);
+        self.images.import(image, image.label(), all, before, after)
     }
 
     /// Imports `image` like [`import_image`](Self::import_image), but its
@@ -171,8 +174,13 @@ impl<'a> RenderGraph<'a> {
         before: BufferAccess,
         after: BufferAccess,
     ) -> Result<Handle<Buffer>> {
-        self.buffers
-            .import(buffer, buffer.label(), 1, before, after)
+        self.buffers.import(
+            buffer,
+            buffer.label(),
+            Subresources::all(1, 1),
+            before,
+            after,
+        )
     }
 
     /// Adds a transient image described by `desc`, whose usage gains what
@@ -180,7 +188,8 @@ impl<'a> RenderGraph<'a> {
     /// frame. It is created, or reused from an earlier frame, when the graph
     /// executes, unless no pass declares it; the RHI then validates `desc`.
     pub fn create_image(&mut self, desc: &ImageDesc<'a>) -> Handle<Image> {
-        self.images.create(*desc, desc.label, desc.mip_levels)
+        let all = Subresources::all(desc.mip_levels, desc.array_layers);
+        self.images.create(*desc, desc.label, all)
     }
 
     /// Adds a transient buffer described by `desc`, whose usage gains what
@@ -188,7 +197,8 @@ impl<'a> RenderGraph<'a> {
     /// frame. It is created, or reused from an earlier frame, when the graph
     /// executes, unless no pass declares it; the RHI then validates `desc`.
     pub fn create_buffer(&mut self, desc: &BufferDesc<'a>) -> Handle<Buffer> {
-        self.buffers.create(*desc, desc.label, 1)
+        self.buffers
+            .create(*desc, desc.label, Subresources::all(1, 1))
     }
 
     /// Records every pass into `encoder`, which belongs to `frame`, then
@@ -261,9 +271,12 @@ impl<'a> RenderGraph<'a> {
             .map(|barrier| ImageBarrier {
                 image: objects.images.get(barrier.resource),
                 range: ImageRange {
-                    base_mip_level: barrier.mips.start,
-                    mip_level_count: barrier.mips.end - barrier.mips.start,
-                    ..ImageRange::ALL
+                    base_mip_level: barrier.subresources.mips.start,
+                    mip_level_count: barrier.subresources.mips.end
+                        - barrier.subresources.mips.start,
+                    base_layer: barrier.subresources.layers.start,
+                    layer_count: barrier.subresources.layers.end
+                        - barrier.subresources.layers.start,
                 },
                 before: barrier.before,
                 after: barrier.after,
@@ -294,6 +307,23 @@ impl<'a> RenderGraph<'a> {
 }
 
 impl Resources<'_, Image> {
+    /// The one mip of one layer `range` of the image at `index` covers, as
+    /// attachments render to, or why it covers several or none.
+    fn attachment(&self, index: usize, range: ImageRange) -> Result<Subresource, String> {
+        let Subresources { mips, layers } = self.list[index].resolve(range)?;
+        if mips.len() != 1 || layers.len() != 1 {
+            return Err(format!(
+                "image `{}` is attached in mips {mips:?} of layers {layers:?}, not one mip of \
+                 one layer",
+                self.list[index].label
+            ));
+        }
+        Ok(Subresource {
+            mip_level: mips.start,
+            layer: layers.start,
+        })
+    }
+
     /// What pass `pass` does with what it renders to attachment `image`:
     /// stores it unless the image is a transient or scratch import no later
     /// pass accesses.

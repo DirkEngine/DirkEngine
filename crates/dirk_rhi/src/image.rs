@@ -98,6 +98,36 @@ impl ImageRange {
             ..Self::ALL
         }
     }
+
+    /// Every mip of layer `layer`.
+    #[must_use]
+    pub const fn layer(layer: u32) -> Self {
+        Self {
+            base_layer: layer,
+            layer_count: 1,
+            ..Self::ALL
+        }
+    }
+}
+
+/// One mip level of one array layer of an image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Subresource {
+    /// The mip level.
+    pub mip_level: u32,
+    /// The array layer; a cube's faces are six consecutive layers.
+    pub layer: u32,
+}
+
+impl From<Subresource> for ImageRange {
+    fn from(subresource: Subresource) -> Self {
+        Self {
+            base_mip_level: subresource.mip_level,
+            mip_level_count: 1,
+            base_layer: subresource.layer,
+            layer_count: 1,
+        }
+    }
 }
 
 /// Shape of an image.
@@ -200,17 +230,41 @@ const VIEW_USAGE: ImageUsage = ImageUsage::SAMPLED
     .union(ImageUsage::COLOR_ATTACHMENT)
     .union(ImageUsage::DEPTH_STENCIL_ATTACHMENT);
 
-/// A GPU image. Destroyed, with its view, when dropped.
+/// Usages that render to or store an image, which give 2D and cube images of
+/// several mips or layers a view of each.
+const SUBVIEW_USAGE: ImageUsage = ImageUsage::STORAGE
+    .union(ImageUsage::COLOR_ATTACHMENT)
+    .union(ImageUsage::DEPTH_STENCIL_ATTACHMENT);
+
+/// One of an image's views, holding one subresource alone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ViewOf {
+    /// The view of every mip and layer of a single-mip, single-layer image.
+    Full,
+    /// The subview at this index.
+    Subview(usize),
+}
+
+/// A GPU image. Destroyed, with its views, when dropped.
+///
+/// Its [view](Image::view) covers every mip and layer. A 2D or cube image of
+/// several mips or layers that is rendered to or stored, by attachment or
+/// storage usage, also owns a single-mip, single-layer 2D view of each mip
+/// and layer, its [subviews](Image::subview), so passes can render to a cube
+/// face, a shadow cascade or a mip, or sample one mip while rendering the
+/// next.
 pub struct Image {
     pub(crate) raw: native::Image,
     info: ImageInfo,
     view: Option<ImageView>,
+    /// Layer by layer, mip by mip.
+    subviews: Box<[ImageView]>,
     label: Box<str>,
 }
 
-/// A view of every mip and layer of an [`Image`], used by shaders and as an
-/// attachment. The image owns its view, so a view never outlives the memory
-/// it reads.
+/// A view of an [`Image`], used by shaders and as an attachment: of every mip
+/// and layer, or of one of each. The image owns its views, so a view never
+/// outlives the memory it reads.
 pub struct ImageView {
     view_type: ViewType,
     texture: Option<TextureIndex>,
@@ -231,15 +285,21 @@ impl Rhi {
     pub fn create_image(&self, desc: &ImageDesc<'_>) -> Result<Image> {
         let view_type = desc.check(self.capabilities())?;
         let raw = native::Image::new(&self.device, desc, view_type)?;
-        let [sampled, storage] = raw.slots();
-        let depth = desc.format.is_depth_stencil();
-        Ok(Image {
-            view: view_type.map(|view_type| ImageView {
+        let view = |view_type, [sampled, storage]: [Option<u32>; 2]| {
+            let depth = desc.format.is_depth_stencil();
+            ImageView {
                 view_type,
                 texture: sampled.filter(|_| !depth).map(TextureIndex::new),
                 depth_texture: sampled.filter(|_| depth).map(DepthTextureIndex::new),
                 storage: storage.map(StorageImageIndex::new),
-            }),
+            }
+        };
+        Ok(Image {
+            view: view_type.map(|view_type| view(view_type, raw.slots())),
+            subviews: raw
+                .subview_slots()
+                .map(|slots| view(ViewType::D2, slots))
+                .collect(),
             raw,
             info: ImageInfo {
                 dimension: desc.dimension,
@@ -273,6 +333,7 @@ impl Image {
                 depth_texture: None,
                 storage: None,
             }),
+            subviews: Box::default(),
             label: label.into(),
         }
     }
@@ -404,6 +465,19 @@ impl ImageDesc<'_> {
     fn invalid(&self, reason: impl Into<String>) -> Error {
         Error::invalid("image", self.label, reason)
     }
+
+    /// The range of each subview the image owns, layer by layer, mip by
+    /// mip; none unless it is a 2D or cube image of several mips or layers
+    /// with attachment or storage usage.
+    pub(crate) fn subview_ranges(&self) -> impl Iterator<Item = ImageRange> + use<> {
+        let (mips, layers) = (self.mip_levels, self.array_layers);
+        let subviews = self.dimension != ImageDimension::D3
+            && self.usage.intersects(SUBVIEW_USAGE)
+            && (mips > 1 || layers > 1);
+        (0..if subviews { layers } else { 0 }).flat_map(move |layer| {
+            (0..mips).map(move |mip_level| ImageRange::from(Subresource { mip_level, layer }))
+        })
+    }
 }
 
 impl ImageInfo {
@@ -507,10 +581,39 @@ impl Image {
         &self.label
     }
 
-    /// The image's view, or `None` if its usage needs no view.
+    /// The image's view of every mip and layer, or `None` if its usage
+    /// needs no view.
     #[must_use]
     pub fn view(&self) -> Option<&ImageView> {
         self.view.as_ref()
+    }
+
+    /// The image's single-mip, single-layer 2D view of `subresource`: its
+    /// full view if it has one mip and layer, or the subview it owns,
+    /// rendered to or stored per mip or layer. `None` if it has neither.
+    #[must_use]
+    pub fn subview(&self, subresource: Subresource) -> Option<&ImageView> {
+        match self.view_of(subresource)? {
+            ViewOf::Full => self.view(),
+            ViewOf::Subview(index) => self.subviews.get(index),
+        }
+    }
+
+    /// Which of the image's views holds `subresource` alone, if one does.
+    pub(crate) fn view_of(&self, subresource: Subresource) -> Option<ViewOf> {
+        let info = &self.info;
+        let Subresource { mip_level, layer } = subresource;
+        if mip_level >= info.mip_levels || layer >= info.array_layers {
+            return None;
+        }
+        if self.subviews.is_empty() {
+            (info.dimension == ImageDimension::D2 && info.mip_levels == 1 && info.array_layers == 1)
+                .then_some(ViewOf::Full)
+        } else {
+            Some(ViewOf::Subview(
+                (layer * info.mip_levels + mip_level) as usize,
+            ))
+        }
     }
 }
 

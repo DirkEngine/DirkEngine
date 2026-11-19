@@ -3,8 +3,8 @@ use std::ops::Range;
 use dirk_shaders::indirect::{DrawArguments, DrawIndexedArguments};
 
 use crate::{
-    Buffer, BufferUsage, CommandEncoder, Error, Graphics, GraphicsPipeline, Image, ImageDimension,
-    ImageUsage, MAX_COLOR_TARGETS, PushData, Result, SampleCount, native, pipeline::Targets,
+    Buffer, BufferUsage, CommandEncoder, Error, Graphics, GraphicsPipeline, Image, ImageUsage,
+    MAX_COLOR_TARGETS, PushData, Result, SampleCount, Subresource, native, pipeline::Targets,
 };
 
 /// What a render pass does with an attachment's contents when it begins.
@@ -27,34 +27,42 @@ pub enum StoreOp {
     Discard,
 }
 
-/// A color attachment of a render pass: a single-mip, single-layer 2D image
-/// with [`ImageUsage::COLOR_ATTACHMENT`], in the
+/// A color attachment of a render pass: one subresource of an image with
+/// [`ImageUsage::COLOR_ATTACHMENT`], in the
 /// [`ImageAccess::ColorAttachment`](crate::ImageAccess::ColorAttachment)
-/// layout.
+/// layout, rendered to through the image's
+/// [view of it](Image::subview).
 #[derive(Clone, Copy)]
 pub struct ColorAttachment<'a> {
     /// The image rendered to.
     pub image: &'a Image,
+    /// The mip and layer rendered to; the default for single-mip,
+    /// single-layer images.
+    pub subresource: Subresource,
     /// What happens to its contents when the pass begins; clear colors are
     /// linear RGBA.
     pub load: LoadOp<[f32; 4]>,
     /// What happens to them when it ends.
     pub store: StoreOp,
-    /// A single-sample image of the same format and extent that the
-    /// multisampled `image` is averaged into when the pass ends, in the
-    /// color attachment layout too.
+    /// A single-mip, single-layer, single-sample image of the same format
+    /// and extent that the multisampled `image` is averaged into when the
+    /// pass ends, in the color attachment layout too.
     pub resolve: Option<&'a Image>,
 }
 
-/// The depth attachment of a render pass: a single-mip, single-layer 2D
-/// depth image with [`ImageUsage::DEPTH_STENCIL_ATTACHMENT`], in the
+/// The depth attachment of a render pass: one subresource of a depth image
+/// with [`ImageUsage::DEPTH_STENCIL_ATTACHMENT`], in the
 /// [`ImageAccess::DepthStencilAttachment`](crate::ImageAccess::DepthStencilAttachment)
-/// layout. Stencil, if the format has it, is loaded and stored like depth
-/// and cleared to zero.
+/// layout, rendered to through the image's [view of it](Image::subview).
+/// Stencil, if the format has it, is loaded and stored like depth and
+/// cleared to zero.
 #[derive(Clone, Copy)]
 pub struct DepthAttachment<'a> {
     /// The image rendered to.
     pub image: &'a Image,
+    /// The mip and layer rendered to; the default for single-mip,
+    /// single-layer images.
+    pub subresource: Subresource,
     /// What happens to its depth when the pass begins; clear values are in
     /// `0.0..=1.0`.
     pub load: LoadOp<f32>,
@@ -219,8 +227,8 @@ impl<'f> CommandEncoder<'f, Graphics> {
     ///
     /// Returns [`Error::Invalid`] if the pass has no attachment or too many,
     /// or an attachment is from another device, lacks the attachment usage,
-    /// is not a single-mip, single-layer 2D image of a fitting format, a
-    /// clear depth is outside `0.0..=1.0`, or the attachments differ in
+    /// has no view of its subresource alone or a format that does not fit,
+    /// a clear depth is outside `0.0..=1.0`, or the attachments differ in
     /// extent or sample count, or a resolve target does not match its
     /// attachment.
     pub fn render_pass<'e>(&'e mut self, desc: &RenderPassDesc<'_>) -> Result<RenderPass<'e, 'f>> {
@@ -244,25 +252,26 @@ impl<'f> CommandEncoder<'f, Graphics> {
                 desc.colors.len()
             ));
         }
-        let mut images = desc
+        // Each attachment's image and the extent and samples it renders.
+        let mut attachments = desc
             .colors
             .iter()
-            .map(|color| color.image)
-            .chain(desc.depth.map(|depth| depth.image));
-        let Some(first) = images.next() else {
+            .map(|color| (color.image, color.subresource))
+            .chain(desc.depth.map(|depth| (depth.image, depth.subresource)))
+            .map(|(image, subresource)| {
+                let info = image.info();
+                let extent = info.extent.mip(subresource.mip_level);
+                (image, (extent.width, extent.height), info.samples)
+            });
+        let Some((first, extent, samples)) = attachments.next() else {
             return invalid("a render pass needs an attachment".to_owned());
         };
-        let extent = (first.info().extent.width, first.info().extent.height);
-        let samples = first.info().samples;
-        if let Some(image) = images.find(|image| {
-            let info = image.info();
-            (info.extent.width, info.extent.height) != extent || info.samples != samples
-        }) {
+        if let Some((image, other, other_samples)) = attachments
+            .find(|&(_, other, other_samples)| (other, other_samples) != (extent, samples))
+        {
             return invalid(format!(
-                "`{}` is {:?} with {:?} samples, unlike `{}`",
+                "`{}` renders {other:?} with {other_samples:?} samples, unlike `{}`",
                 image.label(),
-                image.info().extent,
-                image.info().samples,
                 first.label()
             ));
         }
@@ -271,9 +280,19 @@ impl<'f> CommandEncoder<'f, Graphics> {
             ..Targets::default()
         };
         for (slot, color) in targets.colors.iter_mut().zip(desc.colors) {
-            self.check_attachment(desc, color.image, ImageUsage::COLOR_ATTACHMENT)?;
+            self.check_attachment(
+                desc,
+                color.image,
+                color.subresource,
+                ImageUsage::COLOR_ATTACHMENT,
+            )?;
             if let Some(resolve) = color.resolve {
-                self.check_attachment(desc, resolve, ImageUsage::COLOR_ATTACHMENT)?;
+                self.check_attachment(
+                    desc,
+                    resolve,
+                    Subresource::default(),
+                    ImageUsage::COLOR_ATTACHMENT,
+                )?;
                 let (info, target) = (color.image.info(), resolve.info());
                 if info.samples == SampleCount::X1
                     || target.samples != SampleCount::X1
@@ -291,7 +310,12 @@ impl<'f> CommandEncoder<'f, Graphics> {
             *slot = Some(color.image.info().format);
         }
         if let Some(depth) = desc.depth {
-            self.check_attachment(desc, depth.image, ImageUsage::DEPTH_STENCIL_ATTACHMENT)?;
+            self.check_attachment(
+                desc,
+                depth.image,
+                depth.subresource,
+                ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            )?;
             if let LoadOp::Clear(value) = depth.load
                 && !(0.0..=1.0).contains(&value)
             {
@@ -302,26 +326,24 @@ impl<'f> CommandEncoder<'f, Graphics> {
         Ok((targets, extent))
     }
 
-    /// Checks that `image` can be an attachment with `usage`.
+    /// Checks that `subresource` of `image` can be an attachment with
+    /// `usage`.
     fn check_attachment(
         &self,
         desc: &RenderPassDesc<'_>,
         image: &Image,
+        subresource: Subresource,
         usage: ImageUsage,
     ) -> Result<()> {
         self.check_image(image, usage)?;
-        let info = image.info();
         let depth = usage == ImageUsage::DEPTH_STENCIL_ATTACHMENT;
-        if info.dimension != ImageDimension::D2
-            || info.mip_levels != 1
-            || info.array_layers != 1
-            || info.format.is_depth_stencil() != depth
-        {
+        if image.view_of(subresource).is_none() || image.info().format.is_depth_stencil() != depth {
             return Err(Error::invalid(
                 "render pass",
                 desc.label,
                 format!(
-                    "`{}` is not a single-mip, single-layer 2D {} image",
+                    "`{}` is not a {} image with a view of {subresource:?} alone: a \
+                     single-mip, single-layer 2D image, or a 2D or cube image with subviews",
                     image.label(),
                     if depth { "depth" } else { "color" }
                 ),

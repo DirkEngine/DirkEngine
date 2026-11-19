@@ -1,16 +1,18 @@
 use std::{ops::Range, ptr::NonNull};
 
 use dirk_shaders::bindless::heap::metal::{HEAP_BUFFER, PUSH_BUFFER};
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLIndexType, MTLLoadAction,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLScissorRect, MTLStoreAction, MTLViewport,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLScissorRect, MTLStoreAction, MTLTexture,
+    MTLViewport,
 };
 
 use super::{Buffer, CommandBuffer, Device, GraphicsPipeline, usize};
 use crate::{
-    DrawArguments, DrawIndexedArguments, IndexFormat, LoadOp, MAX_PUSH_DATA_SIZE, Rect,
-    RenderPassDesc, StoreOp, Viewport,
+    DrawArguments, DrawIndexedArguments, Image, IndexFormat, LoadOp, MAX_PUSH_DATA_SIZE, Rect,
+    RenderPassDesc, StoreOp, Subresource, Viewport, image::ViewOf,
 };
 
 // Render pass recording. Inputs were validated by the render pass, and every
@@ -30,7 +32,7 @@ impl CommandBuffer {
         for (index, color) in desc.colors.iter().enumerate() {
             // SAFETY: the index is below the color attachment limit.
             let attachment = unsafe { pass.colorAttachments().objectAtIndexedSubscript(index) };
-            attachment.setTexture(Some(&color.image.raw.raw));
+            attachment.setTexture(Some(color.image.attachment_texture(color.subresource)));
             let (load, clear) = color.load.mtl();
             attachment.setLoadAction(load);
             let [red, green, blue, alpha] = clear.unwrap_or_default().map(f64::from);
@@ -45,18 +47,23 @@ impl CommandBuffer {
                 (Some(_), StoreOp::Store) => MTLStoreAction::StoreAndMultisampleResolve,
                 (Some(_), StoreOp::Discard) => MTLStoreAction::MultisampleResolve,
             });
-            attachment.setResolveTexture(color.resolve.map(|resolve| &*resolve.raw.raw));
+            attachment.setResolveTexture(
+                color
+                    .resolve
+                    .map(|resolve| resolve.attachment_texture(Subresource::default())),
+            );
         }
         if let Some(depth) = desc.depth {
             let (load, clear) = depth.load.mtl();
             let attachment = pass.depthAttachment();
-            attachment.setTexture(Some(&depth.image.raw.raw));
+            let texture = depth.image.attachment_texture(depth.subresource);
+            attachment.setTexture(Some(texture));
             attachment.setLoadAction(load);
             attachment.setStoreAction(depth.store.mtl());
             attachment.setClearDepth(f64::from(clear.unwrap_or_default()));
             if depth.image.info().format.has_stencil() {
                 let stencil = pass.stencilAttachment();
-                stencil.setTexture(Some(&depth.image.raw.raw));
+                stencil.setTexture(Some(texture));
                 stencil.setLoadAction(load);
                 stencil.setStoreAction(depth.store.mtl());
                 stencil.setClearStencil(0);
@@ -304,6 +311,15 @@ impl Push {
     /// The padded bytes, for `setBytes` calls.
     pub(super) fn bytes(&self) -> NonNull<std::ffi::c_void> {
         NonNull::from(&self.padded).cast()
+    }
+}
+
+impl Image {
+    /// The texture of `subresource` alone, which the render pass checked the
+    /// image has.
+    fn attachment_texture(&self, subresource: Subresource) -> &ProtocolObject<dyn MTLTexture> {
+        self.raw
+            .attachment_texture(self.view_of(subresource).unwrap_or(ViewOf::Full))
     }
 }
 

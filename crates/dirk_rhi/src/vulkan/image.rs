@@ -8,25 +8,34 @@ use super::{
     device::Garbage,
     heap::{Descriptor, Slot},
 };
-use crate::{Format, ImageDesc, ImageDimension, ImageUsage, SampleCount, ViewType};
+use crate::{
+    Format, ImageDesc, ImageDimension, ImageRange, ImageUsage, SampleCount, ViewType, image::ViewOf,
+};
 
-/// A Vulkan image, its memory and its view of every mip and layer.
+/// A Vulkan image, its memory, its view of every mip and layer and, when
+/// rendered to or stored per mip or layer, its view of each mip and layer.
 pub(crate) struct Image {
     pub(super) device: Arc<Device>,
     pub(super) raw: vk::Image,
     allocation: Allocation,
-    view: Option<vk::ImageView>,
+    view: Option<View>,
+    /// Single-mip, single-layer 2D views, layer by layer, mip by mip.
+    subviews: Vec<View>,
     /// Whether the image is destroyed with this object; swapchain images
     /// belong to their swapchain.
     owned: bool,
-    /// The view's slots in the heap: sampled with sampled usage, and storage
-    /// with storage usage when its view type has a storage array.
-    slots: [Option<Slot>; 2],
+}
+
+/// An image view and its slots in the heap: sampled with sampled usage, and
+/// storage with storage usage when its view type has a storage array.
+pub(super) struct View {
+    pub(super) raw: vk::ImageView,
+    pub(super) slots: [Option<Slot>; 2],
 }
 
 impl Image {
     /// Creates an image for a validated description, with a view of type
-    /// `view` if given.
+    /// `view` if given, and subviews if the description has them.
     pub(crate) fn new(
         device: &Arc<Device>,
         desc: &ImageDesc<'_>,
@@ -65,8 +74,8 @@ impl Image {
             raw,
             allocation: Allocation::default(),
             view: None,
+            subviews: Vec::new(),
             owned: true,
-            slots: [None; 2],
         };
         // SAFETY: `raw` was created from this device.
         let requirements = unsafe { device.raw.get_image_memory_requirements(raw) };
@@ -83,16 +92,11 @@ impl Image {
         device.name(raw, desc.label);
 
         if let Some(view_type) = view {
-            let view = image.create_view(view_type, desc.format, desc.label)?;
-            for ((usage, binding), slot) in view_type
-                .heap_bindings(desc.format)
-                .into_iter()
-                .zip(&mut image.slots)
-            {
-                if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
-                    *slot = Some(device.add_to_heap(binding, Descriptor::Image(view))?);
-                }
-            }
+            image.view = Some(image.create_view(desc, view_type, ImageRange::ALL)?);
+        }
+        for range in desc.subview_ranges() {
+            let view = image.create_view(desc, ViewType::D2, range)?;
+            image.subviews.push(view);
         }
         Ok(image)
     }
@@ -111,18 +115,54 @@ impl Image {
             raw,
             allocation: Allocation::default(),
             view: None,
+            subviews: Vec::new(),
             owned: false,
-            slots: [None; 2],
         };
-        image.create_view(ViewType::D2, format, label)?;
+        image.view = Some(View {
+            raw: image.create_raw_view(format, ViewType::D2, ImageRange::ALL, label)?,
+            slots: [None; 2],
+        });
         Ok(image)
     }
 
-    /// Creates the image's view of every mip and layer, as `view_type`.
+    /// Creates a view of `range` as `view_type`, in the heap arrays the
+    /// usage of `desc` needs.
     fn create_view(
-        &mut self,
+        &self,
+        desc: &ImageDesc<'_>,
         view_type: ViewType,
+        range: ImageRange,
+    ) -> crate::Result<View> {
+        let raw = self.create_raw_view(desc.format, view_type, range, desc.label)?;
+        let mut view = View {
+            raw,
+            slots: [None; 2],
+        };
+        for ((usage, binding), slot) in view_type
+            .heap_bindings(desc.format)
+            .into_iter()
+            .zip(&mut view.slots)
+        {
+            if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
+                match self.device.add_to_heap(binding, Descriptor::Image(raw)) {
+                    Ok(added) => *slot = Some(added),
+                    Err(error) => {
+                        // Nothing uses the view yet; bury it with its slots.
+                        self.device.bury(Garbage::View(view));
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(view)
+    }
+
+    /// Creates a native view of `range` as `view_type`.
+    fn create_raw_view(
+        &self,
         format: Format,
+        view_type: ViewType,
+        range: ImageRange,
         label: &str,
     ) -> crate::Result<vk::ImageView> {
         let info = vk::ImageViewCreateInfo::default()
@@ -131,27 +171,40 @@ impl Image {
             .format(format.vk())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: format.vk_aspects(),
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
+                base_mip_level: range.base_mip_level,
+                level_count: range.mip_level_count,
+                base_array_layer: range.base_layer,
+                layer_count: range.layer_count,
             });
         // SAFETY: the image is bound to memory and the view matches it.
         let view =
             unsafe { self.device.raw.create_image_view(&info, None) }.check("vkCreateImageView")?;
         self.device.name(view, label);
-        self.view = Some(view);
         Ok(view)
     }
 
-    /// The view rendered to when the image is an attachment, which its
-    /// attachment usage gave it.
-    pub(super) fn attachment_view(&self) -> vk::ImageView {
-        self.view.unwrap_or_default()
+    /// The view rendered to, which the image's usage and shape gave it.
+    pub(super) fn attachment_view(&self, view: ViewOf) -> vk::ImageView {
+        match view {
+            ViewOf::Full => self.view.as_ref().map_or_default(|view| view.raw),
+            ViewOf::Subview(index) => self.subviews[index].raw,
+        }
     }
 
-    /// The heap slots of the image's view: sampled and storage.
+    /// The heap slots of the image's full view: sampled and storage.
     pub(crate) fn slots(&self) -> [Option<u32>; 2] {
+        self.view.as_ref().map_or([None; 2], View::slot_indices)
+    }
+
+    /// The heap slots of each subview, in order.
+    pub(crate) fn subview_slots(&self) -> impl Iterator<Item = [Option<u32>; 2]> {
+        self.subviews.iter().map(View::slot_indices)
+    }
+}
+
+impl View {
+    /// The indices of the view's slots.
+    fn slot_indices(&self) -> [Option<u32>; 2] {
         self.slots.map(|slot| slot.map(|slot| slot.index))
     }
 }
@@ -160,9 +213,13 @@ impl Drop for Image {
     fn drop(&mut self) {
         self.device.bury(Garbage::Image {
             raw: self.owned.then_some(self.raw),
-            view: self.view,
+            views: self
+                .view
+                .take()
+                .into_iter()
+                .chain(self.subviews.drain(..))
+                .collect(),
             allocation: std::mem::take(&mut self.allocation),
-            slots: self.slots,
         });
     }
 }
