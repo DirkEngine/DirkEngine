@@ -197,16 +197,13 @@ impl Adapter {
                 viewport_bounds: limits.viewport_bounds_range,
                 max_storage_buffer_size: u64::from(limits.max_storage_buffer_range),
                 max_draw_indirect_count: limits.max_draw_indirect_count,
+                max_compute_workgroup_size: limits.max_compute_work_group_size,
+                max_compute_workgroup_invocations: limits.max_compute_work_group_invocations,
+                max_compute_workgroups: limits.max_compute_work_group_count,
             },
             features: optional,
             dedicated_copy_queue: families.copy != families.graphics,
-            formats: std::array::from_fn(|index| {
-                let format = Format::ALL[index];
-                // SAFETY: `raw` belongs to this instance.
-                let properties =
-                    unsafe { instance.get_physical_device_format_properties(raw, format.vk()) };
-                FormatCapabilities::new(format, properties.optimal_tiling_features, limits)
-            }),
+            formats: Self::formats(instance, raw, limits),
         };
         Ok(Ok(Self {
             raw,
@@ -239,6 +236,24 @@ impl Adapter {
         .filter(|(supported, _)| *supported != vk::TRUE)
         .map(|(_, name)| name)
         .collect()
+    }
+
+    /// What `raw` supports for every format.
+    fn formats(
+        instance: &ash::Instance,
+        raw: vk::PhysicalDevice,
+        limits: &vk::PhysicalDeviceLimits,
+    ) -> [FormatCapabilities; Format::COUNT] {
+        std::array::from_fn(|index| {
+            let format = Format::ALL[index];
+            let mut features = vk::FormatProperties3::default();
+            let mut properties = vk::FormatProperties2::default().push_next(&mut features);
+            // SAFETY: `raw` belongs to this instance, which is Vulkan 1.3.
+            unsafe {
+                instance.get_physical_device_format_properties2(raw, format.vk(), &mut properties);
+            }
+            FormatCapabilities::new(format, features.optimal_tiling_features, limits)
+        })
     }
 
     /// How much a device of `device_type` is preferred.
@@ -329,23 +344,26 @@ impl QueueFamilies {
 
 impl FormatCapabilities {
     /// Support for `format` given its optimal-tiling features and the device
-    /// limits that bound attachment sample counts.
+    /// limits that bound attachment sample counts. Storage images are
+    /// declared without a format, so storage usage needs formatless reads
+    /// and writes.
     fn new(
         format: Format,
-        features: vk::FormatFeatureFlags,
+        features: vk::FormatFeatureFlags2,
         limits: &vk::PhysicalDeviceLimits,
     ) -> Self {
+        use vk::FormatFeatureFlags2 as F;
         let usage = [
-            (vk::FormatFeatureFlags::TRANSFER_SRC, ImageUsage::COPY_SRC),
-            (vk::FormatFeatureFlags::TRANSFER_DST, ImageUsage::COPY_DST),
-            (vk::FormatFeatureFlags::SAMPLED_IMAGE, ImageUsage::SAMPLED),
-            (vk::FormatFeatureFlags::STORAGE_IMAGE, ImageUsage::STORAGE),
+            (F::TRANSFER_SRC, ImageUsage::COPY_SRC),
+            (F::TRANSFER_DST, ImageUsage::COPY_DST),
+            (F::SAMPLED_IMAGE, ImageUsage::SAMPLED),
             (
-                vk::FormatFeatureFlags::COLOR_ATTACHMENT,
-                ImageUsage::COLOR_ATTACHMENT,
+                F::STORAGE_IMAGE | F::STORAGE_READ_WITHOUT_FORMAT | F::STORAGE_WRITE_WITHOUT_FORMAT,
+                ImageUsage::STORAGE,
             ),
+            (F::COLOR_ATTACHMENT, ImageUsage::COLOR_ATTACHMENT),
             (
-                vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
+                F::DEPTH_STENCIL_ATTACHMENT,
                 ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             ),
         ]
@@ -354,17 +372,11 @@ impl FormatCapabilities {
         .fold(ImageUsage::empty(), |all, (_, usage)| all | usage);
         let feature_flags = [
             (
-                vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+                F::SAMPLED_IMAGE_FILTER_LINEAR,
                 FormatFeatures::FILTER_LINEAR,
             ),
-            (
-                vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
-                FormatFeatures::BLEND,
-            ),
-            (
-                vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST,
-                FormatFeatures::BLIT,
-            ),
+            (F::COLOR_ATTACHMENT_BLEND, FormatFeatures::BLEND),
+            (F::BLIT_SRC | F::BLIT_DST, FormatFeatures::BLIT),
         ]
         .into_iter()
         .filter(|(feature, _)| features.contains(*feature))

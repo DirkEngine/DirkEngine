@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use dirk_shaders::bindless::heap::metal::HEAP_BUFFER;
 use objc2::{
     rc::{Retained, autoreleasepool},
     runtime::ProtocolObject,
@@ -25,13 +26,15 @@ use objc2::{
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferDescriptor,
-    MTLCommandBufferErrorOption, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLFence, MTLHeap,
-    MTLIndexType, MTLOrigin, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderStages, MTLSize,
+    MTLCommandBufferErrorOption, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLDevice, MTLFence, MTLHeap, MTLIndexType, MTLOrigin, MTLPrimitiveType,
+    MTLRenderCommandEncoder, MTLRenderStages, MTLSize,
 };
 use parking_lot::Mutex;
 
 use super::{
     Buffer, Check, Device, Image, Object,
+    compute::ComputePipelineId,
     heap::{Declared, Heap, Usage},
     usize,
 };
@@ -80,12 +83,13 @@ pub(crate) struct CommandPool {
     fences: Arc<Mutex<Fences>>,
 }
 
-/// The encoder a command buffer records with. Metal records copies and
-/// render passes with separate encoders, one at a time.
+/// The encoder a command buffer records with. Metal records copies, render
+/// passes and dispatches with separate encoders, one at a time.
 pub(super) enum Encoder {
     None,
     Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
     Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
 }
 
 impl Encoder {
@@ -95,6 +99,7 @@ impl Encoder {
             Self::None => {}
             Self::Blit(encoder) => encoder.waitForFence(fence),
             Self::Render(encoder) => encoder.waitForFence_beforeStages(fence, RENDER_STAGES),
+            Self::Compute(encoder) => encoder.waitForFence(fence),
         }
     }
 
@@ -108,6 +113,10 @@ impl Encoder {
             }
             Self::Render(encoder) => {
                 encoder.updateFence_afterStages(fence, RENDER_STAGES);
+                encoder.endEncoding();
+            }
+            Self::Compute(encoder) => {
+                encoder.updateFence(fence);
                 encoder.endEncoding();
             }
         }
@@ -128,7 +137,7 @@ struct Order {
     since: Vec<Fence>,
 }
 
-/// What render encoders make resident: every heap, and the
+/// What render and compute encoders make resident: every heap, and the
 /// resources the bindless heap declares, as of their generations.
 #[derive(Default)]
 struct Residency {
@@ -157,6 +166,8 @@ pub(crate) struct CommandBuffer {
     pub(super) usage: Usage,
     /// The bound index buffer, its offset and type.
     pub(super) indices: Option<(Object<dyn MTLBuffer>, u64, MTLIndexType)>,
+    /// The compute pipeline bound to the open compute encoder.
+    pub(super) compute_pipeline: Option<ComputePipelineId>,
 }
 
 impl CommandPool {
@@ -211,6 +222,7 @@ impl CommandPool {
             primitive: MTLPrimitiveType::Triangle,
             usage: Usage::Read,
             indices: None,
+            compute_pipeline: None,
         })
     }
 }
@@ -239,6 +251,7 @@ impl CommandBuffer {
         if let Some(fence) = self.order.since.last() {
             encoder.end(fence);
         }
+        self.compute_pipeline = None;
     }
 
     /// Orders every encoder begun from now on after every encoder begun so
@@ -281,6 +294,37 @@ impl CommandBuffer {
         }
     }
 
+    /// The open compute encoder, beginning one, which binds the heap, if
+    /// needed, with every heap resident and resources declared up to
+    /// `usage`.
+    pub(super) fn compute(
+        &mut self,
+        device: &Device,
+        usage: Usage,
+    ) -> &ProtocolObject<dyn MTLComputeCommandEncoder> {
+        if !matches!(self.encoder, Encoder::Compute(_)) {
+            self.open(|commands| {
+                let encoder = commands
+                    .computeCommandEncoder()
+                    .expect("Metal creates encoders for command buffers without an open one");
+                // SAFETY: the heap outlives the work of every frame.
+                unsafe {
+                    encoder.setBuffer_offset_atIndex(
+                        Some(&device.heap.arguments),
+                        0,
+                        HEAP_BUFFER as usize,
+                    );
+                }
+                Encoder::Compute(encoder)
+            });
+        }
+        self.make_resident(device, usage);
+        match &self.encoder {
+            Encoder::Compute(encoder) => encoder,
+            _ => unreachable!("a compute encoder was just begun"),
+        }
+    }
+
     /// Begins a render pass with `encoder`, ending the open encoder.
     pub(super) fn begin_render(
         &mut self,
@@ -305,10 +349,10 @@ impl CommandBuffer {
     }
 
     /// Makes every heap, and the resources the bindless heap declares up to
-    /// `usage`, resident for the open render encoder, unless it did since
-    /// they last changed: before every draw, since shaders reach resources
-    /// created at any time through the bindless heap. Costs two atomic loads
-    /// when nothing changed.
+    /// `usage`, resident for the open render or compute encoder, unless it
+    /// did since they last changed: before every draw and dispatch, since
+    /// shaders reach resources created at any time through the bindless
+    /// heap. Costs two atomic loads when nothing changed.
     pub(super) fn make_resident(&mut self, device: &Device, usage: Usage) {
         let generations = [device.allocator.generation(), device.heap.generation()];
         if self.residency.generations != generations {
@@ -325,29 +369,46 @@ impl CommandBuffer {
         if resident >= Some(usage) {
             return;
         }
-        let Encoder::Render(encoder) = &self.encoder else {
-            unreachable!("only draws reach the bindless heap")
-        };
+        let Residency {
+            heaps, declared, ..
+        } = &*self.residency;
         // The heaps, unless resident already, and the usages not declared
         // yet.
-        if resident.is_none() {
-            for heap in &self.residency.heaps {
-                encoder.useHeap_stages(heap, RENDER_STAGES);
-            }
-        }
+        let heaps = if resident.is_none() { &heaps[..] } else { &[] };
         let usages = Usage::ALL
             .into_iter()
             .filter(|declare| Some(*declare) > resident && *declare <= usage);
-        Heap::declare(
-            &self.residency.declared,
-            usages,
-            |resources, count, usage| {
-                // SAFETY: `declared` holds live resources; see `Residency`.
-                unsafe {
-                    encoder.useResources_count_usage_stages(resources, count, usage, RENDER_STAGES);
+        match &self.encoder {
+            Encoder::Render(encoder) => {
+                for heap in heaps {
+                    encoder.useHeap_stages(heap, RENDER_STAGES);
                 }
-            },
-        );
+                Heap::declare(declared, usages, |resources, count, usage| {
+                    // SAFETY: `declared` holds live resources; see
+                    // `Residency`.
+                    unsafe {
+                        encoder.useResources_count_usage_stages(
+                            resources,
+                            count,
+                            usage,
+                            RENDER_STAGES,
+                        );
+                    }
+                });
+            }
+            Encoder::Compute(encoder) => {
+                for heap in heaps {
+                    encoder.useHeap(heap);
+                }
+                Heap::declare(declared, usages, |resources, count, usage| {
+                    // SAFETY: as above.
+                    unsafe { encoder.useResources_count_usage(resources, count, usage) };
+                });
+            }
+            Encoder::None | Encoder::Blit(_) => {
+                unreachable!("only draws and dispatches reach the bindless heap")
+            }
+        }
         self.residency.resident = Some(usage);
     }
 }

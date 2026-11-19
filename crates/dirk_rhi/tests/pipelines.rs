@@ -8,16 +8,17 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ColorAttachment,
-    ColorTarget, CommandEncoder, CompareOp, CullMode, DepthAttachment, DepthBias, DepthState,
-    DrawArguments, DrawIndexedArguments, Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format,
-    FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, HeapIndices, Image, ImageDesc,
-    ImageDimension, ImageUsage, ImageView, IndexBuffer, IndexFormat, Indices, IndirectDraws,
-    LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi, SampleCount, Sampler, SamplerDesc,
-    SamplerIndex, Shader, StoreOp, Topology, Viewport,
+    ColorTarget, CommandEncoder, CompareOp, ComputePipelineDesc, CullMode, DepthAttachment,
+    DepthBias, DepthState, DrawArguments, DrawIndexedArguments, Error, Extent3d, FRAMES_IN_FLIGHT,
+    Filter, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, HeapIndices,
+    Image, ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageUsage, ImageView, IndexBuffer,
+    IndexFormat, Indices, IndirectDraws, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result,
+    Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, Shader, ShaderStages, StoreOp, Topology,
+    Viewport,
 };
 use dirk_rhi_test_shaders::{
-    ColorFs, CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Sliced, SlicedVs,
-    Textured, TexturedFs, TexturedVs, Vertex,
+    ColorFs, Count, CountCs, CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Paint,
+    PaintCs, Sliced, SlicedVs, Stored, StoredFs, Textured, TexturedFs, TexturedVs, Vertex,
 };
 use support::with_rhi;
 
@@ -1148,6 +1149,102 @@ fn shaders_read_frame_allocations_through_the_heap() -> Result<()> {
             pass.draw(&pipeline, &push, 0..6, 1..2)
         })?;
         assert!(pixels.iter().all(|&pixel| pixel == unorm(GREEN)));
+        Ok(())
+    })
+}
+
+#[test]
+fn read_only_draws_read_storage_that_dispatches_wrote() -> Result<()> {
+    with_rhi(|rhi| {
+        // Pipelines writing storage declare it to Metal encoders;
+        // read-only draws reach it through the heaps alone.
+        let (count, paint) = (
+            rhi.create_shader::<CountCs>()?,
+            rhi.create_shader::<PaintCs>()?,
+        );
+        assert!(count.writes_storage() && paint.writes_storage());
+        let shaders = (
+            rhi.create_shader::<CoveringVs>()?.with_push(),
+            rhi.create_shader::<StoredFs>()?,
+        );
+        assert!(!shaders.0.writes_storage() && !shaders.1.writes_storage());
+        let stored = pipeline(
+            rhi,
+            shaders,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let count = rhi.create_compute_pipeline(&ComputePipelineDesc {
+            label: "count",
+            shader: &count,
+        })?;
+        let paint = rhi.create_compute_pipeline(&ComputePipelineDesc {
+            label: "paint",
+            shader: &paint,
+        })?;
+        let numbers = upload(rhi, "numbers", BufferUsage::STORAGE, &[0; 8])?;
+        let image = rhi.create_image(&ImageDesc {
+            label: "painted",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(1, 1),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::STORAGE,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let image_index = image
+            .view()
+            .and_then(ImageView::storage_index)
+            .expect("storage images have an index");
+        let numbers_index = numbers.index().expect("storage buffers have an index");
+
+        let pixels = render(rhi, |encoder, target| {
+            let push = Count {
+                output: numbers_index,
+                base: 0,
+            };
+            encoder.dispatch(&count, &push, [1, 1, 1])?;
+            let push = Paint {
+                image: image_index,
+                color: RED,
+            };
+            encoder.dispatch(&paint, &push, [1, 1, 1])?;
+            let written = ShaderStages::COMPUTE;
+            // SAFETY: the dispatches wrote both last; the image stays in its
+            // resting access.
+            unsafe {
+                encoder.barrier(
+                    &[BufferBarrier {
+                        buffer: &numbers,
+                        before: BufferAccess::ShaderWrite(written),
+                        after: BufferAccess::ShaderRead(ShaderStages::FRAGMENT),
+                        transfer: None,
+                    }],
+                    &[ImageBarrier {
+                        image: &image,
+                        range: ImageRange::ALL,
+                        before: image.info().rest,
+                        after: image.info().rest,
+                        transfer: None,
+                    }],
+                )?;
+            }
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "stored",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            let push = Stored {
+                image: image_index,
+                numbers: numbers_index,
+            };
+            pass.draw(&stored, &push, 0..3, 0..1)
+        })?;
+        // Red from the image, blue from the buffer's second number.
+        assert!(pixels.iter().all(|&pixel| pixel == [255, 0, 255, 255]));
         Ok(())
     })
 }

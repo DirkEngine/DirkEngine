@@ -12,6 +12,7 @@
 mod access;
 mod buffer;
 mod command;
+mod compute;
 mod device;
 mod error;
 mod format;
@@ -49,6 +50,7 @@ pub use buffer::{Buffer, BufferDesc, BufferInfo, BufferUsage, Memory};
 pub use command::{
     BufferBarrier, BufferCopy, BufferImageCopy, CommandEncoder, ImageBarrier, ImageCopy,
 };
+pub use compute::{ComputePipeline, ComputePipelineDesc};
 pub use device::{Capabilities, Features, Limits, Rhi, RhiCreateInfo};
 pub use dirk_shaders::bindless::{
     BufferIndex, BufferSlice, DepthTextureIndex, HeapIndex, HeapIndices, SamplerIndex,

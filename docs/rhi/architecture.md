@@ -196,7 +196,8 @@ frame.finish();                               // closes the frame (also on Drop)
 - Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
   shader crate from a build script into one SPIR-V module per entry point and generates a
   type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (code, stage,
-  reflected push data size, whether it writes storage buffers or images, push data type). The code is the backend's: SPIR-V, or for Apple targets the
+  push data type, reflected push data size, whether it writes storage buffers or images and, for
+  compute shaders, workgroup size). The code is the backend's: SPIR-V, or for Apple targets the
   Metal Shading Language that SPIRV-Cross translates it to at build time (see
   [Metal](#metal)); only Apple hosts compile SPIRV-Cross. Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way
@@ -225,6 +226,43 @@ frame.finish();                               // closes the frame (also on Drop)
   recreation on the next acquisition, and a frame whose acquisitions no submission waited
   for waits for them in an empty submission when it closes, so acquire semaphores are
   always consumed within their frame. One image per swapchain and frame.
+
+## Compute
+
+```rust
+let pipeline = rhi.create_compute_pipeline(&ComputePipelineDesc { label, shader: &module })?;
+encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder<Graphics>
+```
+
+- `ComputePipeline<P>` is typed by its push data like `GraphicsPipeline<P>`, created from
+  one `ShaderModule<P>` of the compute stage. The shader declares its workgroup size
+  (`#[spirv(compute(threads(64)))]`), which the shader build reflects into
+  `Shader::WORKGROUP_SIZE`; creation checks it against `Limits::max_compute_workgroup_size`
+  and `max_compute_workgroup_invocations` (and, on Metal, the pipeline's own
+  `maxTotalThreadsPerThreadgroup`), dispatch checks the counts against
+  `max_compute_workgroups`. Rebinding an unchanged pipeline is skipped.
+- Dispatches run on the graphics queue, outside render passes; async compute is out of
+  scope. Shaders reach resources through the heap: storage buffers through
+  `BufferIndex::get_mut` (`gpu` feature), storage images through their storage arrays.
+  Their accesses are `BufferAccess::ShaderWrite(ShaderStages::COMPUTE)` and
+  `ImageAccess::StorageWrite(ShaderStages::COMPUTE)` (or the reads), which barriers and the
+  render graph already translate; a compute-written buffer then feeds indirect draws
+  through `BufferAccess::Indirect`. Storage images rest in storage reads and writes by
+  every stage unless also sampled, so dispatches find them in place, and copies of what a
+  dispatch wrote move them from there, after its writes. The render graph needs no new
+  pass kind: passes
+  without attachments record on the frame's `CommandEncoder<Graphics>` and dispatch there.
+- Storage images are declared without a format, so the shader build declares
+  `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat` (allowed by Vulkan
+  1.3), and Vulkan grants `ImageUsage::STORAGE` only to formats supporting formatless reads
+  and writes (`VkFormatProperties3`).
+- Vulkan: one `vkCreateComputePipelines` with the global layout; the first dispatch in a
+  command buffer binds the heap at the compute bind point.
+- Metal: an `MTLComputePipelineState` per pipeline; dispatches share a compute encoder,
+  opened with the heap bound at `HEAP_BUFFER` and made resident like render passes, and
+  ordered with fences like every encoder (see [Metal](#metal)). Push data
+  is set with `setBytes`, padded like render push data, and threadgroups take the
+  shader's workgroup size.
 
 ## Presentation
 
@@ -288,7 +326,7 @@ frame.finish();                               // closes the frame (also on Drop)
   its length.
 - **Slots live until their last use.** Indices are `Copy` numbers, so they may be used
   after their owner dropped. The RHI records, per slot, the last frame whose work may read
-  it, whenever it sees an index: in the push data of every draw, and in the
+  it, whenever it sees an index: in the push data of every draw and dispatch, and in the
   elements of frame allocations. Both list their indices through the `unsafe` trait
   `dirk_shaders::bindless::HeapIndices`, which `PushData` and `frame.alloc` require;
   `#[derive(HeapIndices)]` lists the indices of every field (each field's type implements
@@ -414,26 +452,27 @@ format capabilities follow Apple's feature tables, conservatively.
 - **Memory and residency.** Every buffer and texture is allocated from an untracked
   `MTLHeap` (automatic placement; 64 MiB heaps per memory kind, a heap of its own for
   larger resources; empty heaps are released when garbage is collected, but one spare per
-  memory kind), so Metal tracks no hazards at all. Before each draw, render encoders make
-  every heap resident with one `useHeap` each, O(heaps). Metal makes heaps resident for
-  reads only and does not cover texture views, which shader validation enforces, so
-  encoders also declare, with one `useResources` per usage, the resources that needs:
-  texture views in the heap read, before every draw, and storage buffers and storage
-  images read-write, once a bound pipeline writes storage (the shader build reflects
-  which shaders do: `Shader::WRITES_STORAGE`); read-only passes rely on `useHeap`. Storage
-  subviews are in both lists. The bindless heap keeps the lists as slots are filled and
-  emptied. Both the heap list and the declared list carry a generation; command buffers keep a snapshot and check both
-  generations (two atomic loads) before every draw, so resources created while an encoder
-  records, even in a new heap, are resident before the commands using them, with no lock
-  while recording. Residency sets (macOS 15) would drop the storage resources from that
-  list.
+  memory kind), so Metal tracks no hazards at all. Before each draw and dispatch, render
+  and compute encoders make every heap resident with one `useHeap` each, O(heaps). Metal
+  makes heaps resident for reads only and does not cover texture views, which shader
+  validation enforces, so encoders also declare, with one `useResources` per usage, the
+  resources that needs: texture views in the heap read, before every draw and dispatch,
+  and storage buffers and storage images read-write, once a bound pipeline writes storage
+  (the shader build reflects which shaders do: `Shader::WRITES_STORAGE`); read-only passes
+  rely on `useHeap`. Storage subviews are in both lists. The bindless heap keeps the lists
+  as slots are filled and emptied.
+  Both the heap list and the declared list carry a generation; command buffers keep a
+  snapshot and check both generations (two atomic loads) before every draw and dispatch,
+  so resources created while an encoder records, even in a new heap, are resident before
+  the commands using them, with no lock while recording. Residency sets (macOS 15) would
+  drop the storage resources from that list.
 - **Synchronization is fences.** RHI barriers, explicit or implied, become fences:
-  - Each encoder (blit or render) waits, when it begins, for the fences of the encoders
-    between the last two barriers, and updates a fence of its own when it ends (render
-    encoders at and after both stages). A barrier ends the open encoder, and the encoders
-    begun since the previous barrier become the ones later encoders wait for. Each of
-    those waited for the ones before it, so every encoder after a barrier runs after
-    every encoder before it, like a Vulkan barrier at encoder granularity; encoders
+  - Each encoder (blit, render or compute) waits, when it begins, for the fences of the
+    encoders between the last two barriers, and updates a fence of its own when it ends
+    (render encoders at and after both stages). A barrier ends the open encoder, and the
+    encoders begun since the previous barrier become the ones later encoders wait for.
+    Each of those waited for the ones before it, so every encoder after a barrier runs
+    after every encoder before it, like a Vulkan barrier at encoder granularity; encoders
     between two barriers overlap freely. Barriers' accesses only matter for validation:
     Metal textures have no layouts and queues need no ownership transfers.
   - Implicit transitions are barriers too: the safe commands' moves from rest and back,
@@ -596,4 +635,4 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Compute pipelines and dispatch, render-graph subresource ranges, async compute. Each adds API without breaking the above.
+Render-graph subresource ranges, async compute. Each adds API without breaking the above.
