@@ -119,6 +119,61 @@ impl Access for BufferAccess {
     }
 }
 
+/// Mip levels and array layers of a resource. Buffers have one of each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Subresources {
+    pub(crate) mips: Range<u32>,
+    pub(crate) layers: Range<u32>,
+}
+
+impl Subresources {
+    /// Every one of `mips` levels and `layers` layers.
+    pub(crate) const fn all(mips: u32, layers: u32) -> Self {
+        Self {
+            mips: 0..mips,
+            layers: 0..layers,
+        }
+    }
+
+    /// Whether these share a subresource with `other`.
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
+        let overlap = |a: &Range<u32>, b: &Range<u32>| a.start < b.end && b.start < a.end;
+        overlap(&self.mips, &other.mips) && overlap(&self.layers, &other.layers)
+    }
+
+    /// Whether every subresource of `other` is one of these.
+    fn contains(&self, other: &Self) -> bool {
+        let contains = |a: &Range<u32>, b: &Range<u32>| a.start <= b.start && b.end <= a.end;
+        contains(&self.mips, &other.mips) && contains(&self.layers, &other.layers)
+    }
+
+    /// Splits these where a bound of `other` cuts through them, keeping the
+    /// first part and returning the rest, if one does.
+    fn cut(&mut self, other: &Self) -> Option<Self> {
+        let inside = |range: &Range<u32>, at: u32| range.start < at && at < range.end;
+        if let Some(at) = [other.mips.start, other.mips.end]
+            .into_iter()
+            .find(|&at| inside(&self.mips, at))
+        {
+            let rest = Self {
+                mips: at..self.mips.end,
+                layers: self.layers.clone(),
+            };
+            self.mips.end = at;
+            return Some(rest);
+        }
+        let at = [other.layers.start, other.layers.end]
+            .into_iter()
+            .find(|&at| inside(&self.layers, at))?;
+        let rest = Self {
+            mips: self.mips.clone(),
+            layers: at..self.layers.end,
+        };
+        self.layers.end = at;
+        Some(rest)
+    }
+}
+
 /// A barrier recorded before pass `pass`, or after the last pass for the
 /// boundaries of imported resources.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,70 +181,70 @@ pub(crate) struct Barrier<A> {
     pub(crate) pass: usize,
     /// Index of the resource in the graph.
     pub(crate) resource: usize,
-    /// The mip levels; `0..1` for buffers.
-    pub(crate) mips: Range<u32>,
+    pub(crate) subresources: Subresources,
     pub(crate) before: A,
     pub(crate) after: A,
 }
 
-/// The access of each span of mips of one resource. Buffers have one span of
-/// one level.
+/// The access of each block of mips and layers of one resource. Buffers
+/// have one block of one subresource.
 pub(crate) struct States<A> {
-    /// Sorted spans covering every mip level.
-    spans: Vec<Span<A>>,
+    /// Disjoint blocks covering every subresource.
+    blocks: Vec<Block<A>>,
 }
 
-/// Mips in the same access, and the barrier that put them there.
+/// Subresources in the same access, and the barrier that put them there.
 #[derive(Clone, Debug)]
-struct Span<A> {
-    mips: Range<u32>,
+struct Block<A> {
+    subresources: Subresources,
     access: A,
     /// Index of the barrier that established `access`, if one did.
     origin: Option<usize>,
 }
 
 impl<A: Access> States<A> {
-    /// `mips` levels, all in `access`.
-    pub(crate) fn new(mips: u32, access: A) -> Self {
+    /// `subresources`, all in `access`.
+    pub(crate) fn new(subresources: Subresources, access: A) -> Self {
         Self {
-            spans: vec![Span {
-                mips: 0..mips,
+            blocks: vec![Block {
+                subresources,
                 access,
                 origin: None,
             }],
         }
     }
 
-    /// The access of each span.
-    pub(crate) fn accesses(&self) -> impl Iterator<Item = A> {
-        self.spans.iter().map(|span| span.access)
+    /// The access of each block sharing a subresource with `subresources`.
+    pub(crate) fn accesses(&self, subresources: &Subresources) -> impl Iterator<Item = A> {
+        self.blocks
+            .iter()
+            .filter(|block| block.subresources.overlaps(subresources))
+            .map(|block| block.access)
     }
 
-    /// Moves `mips` of `resource` to `access` in pass `pass`, adding the
-    /// barriers this needs to `barriers`.
+    /// Moves `subresources` of `resource` to `access` in pass `pass`, adding
+    /// the barriers this needs to `barriers`.
     ///
     /// Writes always need a barrier, even after the same write. A read that
     /// can share a state with the previous read widens it instead: the
     /// barrier that established the previous read is widened to cover this
     /// one too, so later reads need no barrier of their own. Only when no
     /// barrier established it, as for an import's initial access, is a
-    /// read-to-read barrier added. At a `boundary`, the mips end in exactly
-    /// `access`.
+    /// read-to-read barrier added. At a `boundary`, the subresources end in
+    /// exactly `access`.
     pub(crate) fn transition(
         &mut self,
         resource: usize,
         pass: usize,
-        mips: Range<u32>,
+        subresources: &Subresources,
         access: A,
         boundary: bool,
         barriers: &mut Vec<Barrier<A>>,
     ) {
-        self.split(mips.start);
-        self.split(mips.end);
-        let inside =
-            |span: &&mut Span<A>| mips.start <= span.mips.start && span.mips.end <= mips.end;
-        for span in self.spans.iter_mut().filter(inside) {
-            let old = span.access;
+        self.split(subresources);
+        let inside = |block: &&mut Block<A>| subresources.contains(&block.subresources);
+        for block in self.blocks.iter_mut().filter(inside) {
+            let old = block.access;
             let new = if boundary {
                 access
             } else {
@@ -198,43 +253,49 @@ impl<A: Access> States<A> {
             if new == old && (boundary || !old.writes()) {
                 continue;
             }
+            // Widening a barrier that also covers other blocks, split off
+            // since, would change their access too.
             if old.merge(new) == Some(new)
-                && let Some(origin) = span.origin
+                && let Some(origin) = block.origin
                 && barriers[origin].after == old
+                && barriers[origin].subresources == block.subresources
             {
                 barriers[origin].after = new;
             } else if old.orders() {
-                span.origin = Some(barriers.len());
+                block.origin = Some(barriers.len());
                 barriers.push(Barrier {
                     pass,
                     resource,
-                    mips: span.mips.clone(),
+                    subresources: block.subresources.clone(),
                     before: old,
                     after: new,
                 });
             } else {
-                span.origin = None;
+                block.origin = None;
             }
-            span.access = new;
+            block.access = new;
         }
     }
 
-    /// Splits the span containing mip `at` so that a span starts there.
-    fn split(&mut self, at: u32) {
-        let Some(index) = self
-            .spans
-            .iter()
-            .position(|span| span.mips.start < at && at < span.mips.end)
-        else {
-            return;
-        };
-        let span = &mut self.spans[index];
-        let tail = Span {
-            mips: at..span.mips.end,
-            ..span.clone()
-        };
-        span.mips.end = at;
-        self.spans.insert(index + 1, tail);
+    /// Splits blocks so that each is inside `subresources` or apart from
+    /// them.
+    fn split(&mut self, subresources: &Subresources) {
+        let mut index = 0;
+        while index < self.blocks.len() {
+            let block = &mut self.blocks[index];
+            if block.subresources.overlaps(subresources)
+                && let Some(rest) = block.subresources.cut(subresources)
+            {
+                // The block keeps its first part, which may need another cut.
+                let rest = Block {
+                    subresources: rest,
+                    ..block.clone()
+                };
+                self.blocks.push(rest);
+            } else {
+                index += 1;
+            }
+        }
     }
 }
 

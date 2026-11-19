@@ -1,8 +1,6 @@
 //! Shaders, graphics pipelines, render passes, and draws reading the
 //! bindless heap.
 
-use dirk_rhi_test_shaders::support;
-
 use std::time::Duration;
 
 use bytemuck::NoUninit;
@@ -14,13 +12,13 @@ use dirk_rhi::{
     HeapIndices, Image, ImageAccess, ImageBarrier, ImageDesc, ImageDimension, ImageRange,
     ImageUsage, ImageView, IndexBuffer, IndexFormat, Indices, IndirectDraws, LoadOp, Memory,
     PushData, Rect, RenderPassDesc, Result, Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex,
-    Shader, ShaderStages, StoreOp, Topology, Viewport,
+    Shader, ShaderStages, StoreOp, Subresource, Topology, Viewport,
 };
+use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{
     ColorFs, Count, CountCs, CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Paint,
     PaintCs, Sliced, SlicedVs, Stored, StoredFs, Textured, TexturedFs, TexturedVs, Vertex,
 };
-use support::with_rhi;
 
 const SIZE: u32 = 8;
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -132,10 +130,16 @@ fn unorm(color: [f32; 4]) -> [u8; 4] {
     color.map(|channel| if channel > 0.5 { 255 } else { 0 })
 }
 
+/// Mip `mip_level` of layer `layer`.
+const fn at(mip_level: u32, layer: u32) -> Subresource {
+    Subresource { mip_level, layer }
+}
+
 /// A color attachment cleared to black.
 fn cleared(image: &Image) -> ColorAttachment<'_> {
     ColorAttachment {
         image,
+        subresource: Subresource::default(),
         load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
         store: StoreOp::Store,
         resolve: None,
@@ -416,6 +420,7 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
                 colors: &[cleared(target)],
                 depth: Some(DepthAttachment {
                     image: &depth,
+                    subresource: Subresource::default(),
                     load: LoadOp::Clear(1.0),
                     store: StoreOp::Discard,
                 }),
@@ -498,6 +503,7 @@ fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
                 label: "resolve",
                 colors: &[ColorAttachment {
                     image: &multisampled,
+                    subresource: Subresource::default(),
                     load: LoadOp::Discard,
                     store: StoreOp::Discard,
                     resolve: Some(target),
@@ -605,8 +611,9 @@ fn draws_and_passes_are_validated() -> Result<()> {
             extent: Extent3d::new_2d(SIZE / 2, SIZE / 2),
             ..desc_of(&target)
         })?;
-        let mipped = rhi.create_image(&ImageDesc {
-            mip_levels: 2,
+        // 3D images have no 2D view to render to.
+        let volume = rhi.create_image(&ImageDesc {
+            dimension: ImageDimension::D3,
             ..desc_of(&target)
         })?;
         let indices: Buffer = rhi.create_buffer(&BufferDesc {
@@ -635,12 +642,12 @@ fn draws_and_passes_are_validated() -> Result<()> {
         assert_invalid(
             encoder
                 .render_pass(&RenderPassDesc {
-                    label: "mipped",
-                    colors: &[cleared(&mipped)],
+                    label: "volume",
+                    colors: &[cleared(&volume)],
                     depth: None,
                 })
                 .map(|_| ()),
-            "single-mip",
+            "with a view of",
         );
         let mut pass = encoder.render_pass(&RenderPassDesc {
             label: "valid",
@@ -705,6 +712,10 @@ fn render_passes_attach_each_image_once() -> Result<()> {
             })
         };
         let multisampled = [multisampled()?, multisampled()?];
+        let layered = rhi.create_image(&ImageDesc {
+            array_layers: 2,
+            ..desc_of(&target)
+        })?;
         let frame = rhi.begin_frame()?;
         let mut encoder = frame.encoder::<Graphics>("attached twice")?;
         assert_invalid(
@@ -731,7 +742,71 @@ fn render_passes_attach_each_image_once() -> Result<()> {
                 .map(|_| ()),
             "attached twice",
         );
+        // Each layer of one image is a subresource of its own.
+        let layer = |layer| ColorAttachment {
+            subresource: Subresource {
+                mip_level: 0,
+                layer,
+            },
+            ..cleared(&layered)
+        };
+        encoder
+            .render_pass(&RenderPassDesc {
+                label: "layers",
+                colors: &[layer(0), layer(1)],
+                depth: None,
+            })?
+            .end();
+        assert_invalid(
+            encoder
+                .render_pass(&RenderPassDesc {
+                    label: "layer twice",
+                    colors: &[layer(1), layer(1)],
+                    depth: None,
+                })
+                .map(|_| ()),
+            "attached twice",
+        );
+        frame.submit(encoder)?;
         frame.finish();
+        Ok(())
+    })
+}
+
+#[test]
+fn resolve_targets_have_one_mip_and_one_layer() -> Result<()> {
+    with_rhi(|rhi| {
+        let target = attachment(
+            rhi,
+            Format::Rgba8Unorm,
+            ImageUsage::COLOR_ATTACHMENT,
+            SampleCount::X1,
+        )?;
+        let multisampled = rhi.create_image(&ImageDesc {
+            samples: SampleCount::X4,
+            ..desc_of(&target)
+        })?;
+        let layered = rhi.create_image(&ImageDesc {
+            array_layers: 2,
+            ..desc_of(&target)
+        })?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("resolves")?;
+        // Its first layer has a view of its own, but resolve targets have
+        // only one subresource.
+        assert_invalid(
+            encoder
+                .render_pass(&RenderPassDesc {
+                    label: "resolved into layers",
+                    colors: &[ColorAttachment {
+                        resolve: Some(&layered),
+                        ..cleared(&multisampled)
+                    }],
+                    depth: None,
+                })
+                .map(|_| ()),
+            "cannot be resolved",
+        );
         Ok(())
     })
 }
@@ -1069,6 +1144,7 @@ fn render_shadow_map(
         colors: &[],
         depth: Some(DepthAttachment {
             image: shadow_map,
+            subresource: Subresource::default(),
             load: LoadOp::Clear(far),
             store: StoreOp::Store,
         }),
@@ -1159,6 +1235,117 @@ fn comparison_samplers_filter_depth_comparisons() -> Result<()> {
         assert!(
             (1..255).contains(&linear[3 * SIZE as usize + 3][0]),
             "pixel (3, 3) blends passing and failing texels"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn subviews_render_to_and_sample_single_mips_and_layers() -> Result<()> {
+    with_rhi(|rhi| {
+        let image = rhi.create_image(&ImageDesc {
+            label: "layered",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            mip_levels: 2,
+            array_layers: 2,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let subresources = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+        let colors = [RED, GREEN, BLUE, [1.0; 4]];
+        let subviews = subresources.map(|subresource| {
+            image
+                .subview(subresource)
+                .and_then(ImageView::index)
+                .expect("sampled images rendered per layer have subviews")
+        });
+        for (index, texture) in subviews.iter().enumerate() {
+            assert!(
+                !subviews[..index].contains(texture),
+                "each subview has a slot of its own"
+            );
+        }
+        let fill = graphics_pipeline::<FillVs, FillFs, Fill>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let textured = graphics_pipeline::<TexturedVs, TexturedFs, Textured>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        // One triangle covering the target.
+        let triangle = [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)].map(|(x, y)| Vertex {
+            position: [x, y],
+            uv: [f32::midpoint(x, 1.0), f32::midpoint(y, 1.0)],
+        });
+        let vertices = upload(
+            rhi,
+            "triangle",
+            BufferUsage::STORAGE,
+            bytemuck::cast_slice(&triangle),
+        )?;
+        let sampler = rhi.create_sampler(&SamplerDesc::default())?;
+        for (texture, color) in subviews.into_iter().zip(colors) {
+            let pixels = render(rhi, |encoder, target| {
+                for (subresource, color) in subresources.into_iter().zip(colors) {
+                    let mut pass = encoder.render_pass(&RenderPassDesc {
+                        label: "subresource",
+                        colors: &[ColorAttachment {
+                            image: &image,
+                            subresource,
+                            ..cleared(&image)
+                        }],
+                        depth: None,
+                    })?;
+                    pass.draw(&fill, &Fill { color, depth: 0.5 }, 0..3, 0..1)?;
+                }
+                let mut pass = encoder.render_pass(&RenderPassDesc {
+                    label: "sampled subview",
+                    colors: &[cleared(target)],
+                    depth: None,
+                })?;
+                let push = Textured {
+                    vertices: vertices.index().expect("storage buffers have an index"),
+                    texture,
+                    sampler: sampler.index(),
+                };
+                pass.draw(&textured, &push, 0..3, 0..1)
+            })?;
+            assert!(pixels.iter().all(|pixel| *pixel == unorm(color)));
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn depth_subviews_take_no_sampled_slot() -> Result<()> {
+    with_rhi(|rhi| {
+        let cascades = rhi.create_image(&ImageDesc {
+            label: "cascades",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            format: Format::Depth32Float,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            mip_levels: 1,
+            array_layers: 2,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let view = cascades.view().expect("sampled images have a view");
+        assert!(view.depth_index().is_some());
+        let cascade = cascades
+            .subview(at(0, 1))
+            .expect("depth images rendered per layer have subviews");
+        assert!(
+            cascade.depth_index().is_none(),
+            "shaders sample the full view"
         );
         Ok(())
     })

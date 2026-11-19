@@ -2,7 +2,8 @@
 
 use dirk_rhi::{
     Buffer, BufferAccess, BufferDesc, BufferUsage, Error, Extent3d, Format, Image, ImageAccess,
-    ImageDesc, ImageDimension, ImageUsage, LoadOp, Memory, SampleCount, ShaderStages, StoreOp,
+    ImageDesc, ImageDimension, ImageRange, ImageUsage, LoadOp, Memory, SampleCount, ShaderStages,
+    StoreOp, Subresource,
 };
 
 use super::{Handle, RenderGraph};
@@ -283,4 +284,100 @@ fn transients_store_attachments_only_for_later_passes() {
     assert_eq!(graph.images.store(image.index, 1), StoreOp::Discard);
     // Transients no pass declares are never created.
     assert!(graph.images.list[unused.index].usage.is_empty());
+}
+
+/// Mip `mip_level` of layer `layer`.
+const fn at(mip_level: u32, layer: u32) -> Subresource {
+    Subresource { mip_level, layer }
+}
+
+#[test]
+fn passes_render_one_mip_while_sampling_the_previous() {
+    let mut graph = RenderGraph::new();
+    let image = graph.create_image(&ImageDesc {
+        mip_levels: 3,
+        ..color_desc()
+    });
+    graph
+        .pass("mip 0")
+        .color(image.subresource(at(0, 0)), CLEAR)
+        .record(|_| Ok(()))
+        .expect("rendering one mip is valid");
+    for mip in 1..3 {
+        graph
+            .pass("next mip")
+            .sampled(image.slice(ImageRange::mip(mip - 1)), FRAGMENT)
+            .color(image.subresource(at(mip, 0)), CLEAR)
+            .record(|_| Ok(()))
+            .expect("sampling one mip while rendering the next is valid");
+    }
+    let barriers: Vec<_> = graph
+        .images
+        .barriers
+        .iter()
+        .map(|barrier| {
+            (
+                barrier.pass,
+                barrier.subresources.mips.clone(),
+                barrier.after,
+            )
+        })
+        .collect();
+    let sampled = ImageAccess::Sampled(FRAGMENT);
+    let color = ImageAccess::ColorAttachment;
+    assert_eq!(
+        barriers,
+        [
+            (0, 0..1, color),
+            (1, 0..1, sampled),
+            (1, 1..2, color),
+            (2, 1..2, sampled),
+            (2, 2..3, color),
+        ]
+    );
+}
+
+#[test]
+fn slices_are_validated() {
+    let mut graph = RenderGraph::new();
+    let image = graph.create_image(&ImageDesc {
+        mip_levels: 2,
+        array_layers: 6,
+        dimension: ImageDimension::Cube,
+        ..color_desc()
+    });
+    let reason = rejection(
+        graph
+            .pass("whole cube")
+            .color(image, CLEAR)
+            .record(|_| Ok(())),
+    );
+    assert!(reason.contains("not one mip of one layer"), "{reason}");
+    let reason = rejection(
+        graph
+            .pass("outside")
+            .image(image.slice(ImageRange::layer(6)), ImageAccess::CopySource)
+            .record(|_| Ok(())),
+    );
+    assert!(reason.contains("no subresources"), "{reason}");
+    let reason = rejection(
+        graph
+            .pass("overlapping")
+            .image(image.slice(ImageRange::layer(2)), ImageAccess::CopySource)
+            .image(
+                image.slice(ImageRange::mip(0)),
+                ImageAccess::CopyDestination,
+            )
+            .record(|_| Ok(())),
+    );
+    assert!(reason.contains("overlapping"), "{reason}");
+    graph
+        .pass("faces")
+        .color(image.subresource(at(0, 2)), CLEAR)
+        .image(
+            image.slice(ImageRange::layer(3)),
+            ImageAccess::CopyDestination,
+        )
+        .record(|_| Ok(()))
+        .expect("rendering one face while copying into another is valid");
 }

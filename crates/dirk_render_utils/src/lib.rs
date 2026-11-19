@@ -3,5 +3,7 @@
 mod graph;
 mod upload;
 
-pub use graph::{Commands, Handle, PassBuilder, PassContext, RenderGraph, Rendering, Transients};
+pub use graph::{
+    Commands, Handle, ImageSlice, PassBuilder, PassContext, RenderGraph, Rendering, Transients,
+};
 pub use upload::Uploads;
