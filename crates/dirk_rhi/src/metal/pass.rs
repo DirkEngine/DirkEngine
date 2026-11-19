@@ -15,8 +15,7 @@ use crate::{IndexFormat, LoadOp, MAX_PUSH_DATA_SIZE, Rect, RenderPassDesc, Store
 // destruction.
 impl CommandBuffer {
     /// Begins rendering to the attachments of `desc`, which cover `extent`,
-    /// with viewport and scissor covering it too, and the heap's resources
-    /// resident.
+    /// with viewport and scissor covering it too.
     pub(crate) fn begin_rendering(
         &mut self,
         device: &Device,
@@ -75,7 +74,6 @@ impl CommandBuffer {
                 HEAP_BUFFER as usize,
             );
         }
-        device.heap.use_resources(encoder);
         #[expect(
             clippy::cast_precision_loss,
             reason = "image extents are far below f32's exact integer range"
@@ -120,6 +118,7 @@ impl CommandBuffer {
         let bias = pipeline.bias;
         encoder.setDepthBias_slopeScale_clamp(bias.constant, bias.slope, bias.clamp);
         self.primitive = pipeline.primitive;
+        self.usage = pipeline.usage;
     }
 
     /// Pushes `data` to every stage; nothing when it is empty. Metal checks
@@ -177,7 +176,8 @@ impl CommandBuffer {
         self.indices = Some((buffer.raw.clone(), offset, format));
     }
 
-    pub(crate) fn draw(&mut self, _device: &Device, vertices: Range<u32>, instances: Range<u32>) {
+    pub(crate) fn draw(&mut self, device: &Device, vertices: Range<u32>, instances: Range<u32>) {
+        self.make_resident(device, self.usage);
         // SAFETY: see the recording note above.
         unsafe {
             self.render()
@@ -193,11 +193,12 @@ impl CommandBuffer {
 
     pub(crate) fn draw_indexed(
         &mut self,
-        _device: &Device,
+        device: &Device,
         indices: Range<u32>,
         base_vertex: i32,
         instances: Range<u32>,
     ) {
+        self.make_resident(device, self.usage);
         let (buffer, offset, format) = self
             .indices
             .as_ref()

@@ -1,14 +1,13 @@
 //! Metal 3 backend, for Apple targets.
 //!
-//! Synchronization relies on Metal's hazard tracking: every resource is
-//! tracked, and render passes declare the heap's resources with
-//! `useResources` (which also makes them resident), so Metal orders every
-//! conflicting access on its own. Barriers therefore record nothing, and
-//! queue ownership transfers have no Metal equivalent. Each queue is a
-//! command queue with an `MTLSharedEvent` timeline; Metal's tracking stops at
-//! the queue, so work on another queue is ordered by waiting for its
-//! completion, as on Vulkan.
+//! Every resource is allocated from an untracked heap (see `allocator`),
+//! so Metal tracks no hazards: barriers become fences between encoders
+//! (see `command`), and each queue is a command queue with an
+//! `MTLSharedEvent` timeline, so work on another queue is ordered by
+//! waiting for its completion, as on Vulkan. Queue ownership transfers have
+//! no Metal equivalent.
 
+mod allocator;
 mod blit;
 mod buffer;
 mod command;
