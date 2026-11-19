@@ -1,8 +1,6 @@
 //! Compute pipelines and dispatches writing storage buffers and images
 //! through the bindless heap.
 
-mod support;
-
 use std::time::Duration;
 
 use dirk_rhi::{
@@ -11,8 +9,8 @@ use dirk_rhi::{
     ImageDimension, ImageRange, ImageUsage, ImageView, Memory, PushData, Result, Rhi, SampleCount,
     Shader, ShaderStages,
 };
+use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{Count, CountCs, FillVs, Paint, PaintCs};
-use support::with_rhi;
 
 /// A compute pipeline running shader `S`.
 fn compute_pipeline<S: Shader, P: PushData>(rhi: &Rhi) -> Result<ComputePipeline<P>> {
