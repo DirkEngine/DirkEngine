@@ -133,6 +133,37 @@ and `InWorld` are read-only: queries can read them, but only the engine writes
 them. Because worlds are entities, `Query<Entity>` includes them; add
 `With<InWorld>` to match only entities inside worlds.
 
+## Derived components
+
+Some components are just functions of others. `with_derived` computes them:
+
+```rust
+use dirk_universe::prelude::*;
+
+#[derive(Debug, Component)]
+struct Velocity(f64);
+#[derive(Debug, Component)]
+struct Mass(f64);
+#[derive(Debug, PartialEq, Component)]
+#[component(derived)]
+struct Momentum(f64);
+
+fn momentum(velocity: &Velocity, mass: &Mass) -> Momentum {
+    Momentum(velocity.0 * mass.0)
+}
+
+let universe = Universe::builder().with_derived(momentum).build();
+assert!(universe.is_ok());
+```
+
+Every entity with the inputs gets the output, and loses it with them. The
+first argument is a required `&C`; later `Option<&C>` arguments are not
+required. The function reruns only for entities
+whose inputs changed, and the output is written only when its value changes.
+Outputs are `#[component(derived)]`, so no system, command or other
+derivation can write them and they never drift out of sync. Derivations are scheduled like systems, so
+readers of `Momentum` see it updated in the same tick as `Velocity`.
+
 Structural changes use `Commands` or submitted command buffers and apply at the
 start of the next tick. Buffers execute in submission order and commands in
 insertion order. Destroying or despawning a world despawns its entities too.
@@ -175,8 +206,9 @@ label. Explicit orders replace derived ones between the same pair.
 
 `UniverseBuilder::build` reports every problem as a `ScheduleError`: borrows
 that conflict within one system, writers in no defined order, dependency
-cycles (naming each system and component involved), and orders against
-systems that were never registered. `universe.schedule()` returns the final
+cycles (naming each system and component involved), orders against
+systems that were never registered, and two derivations of one component.
+`universe.schedule()` returns the final
 order with the reason for each dependency, and displays as a readable list.
 
 Commands do not order systems, since their changes apply on the next tick.

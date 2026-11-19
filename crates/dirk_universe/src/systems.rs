@@ -233,7 +233,7 @@ impl IntoSystem<()> for SystemConfig {
 #[doc(hidden)]
 pub trait ErasedSystem: 'static {
     /// Runs a system once and advances its change-detection counter.
-    fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
+    fn run(&mut self, universe: &mut Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
 }
 
 /// Fetches parameters from a context and invokes a system's body.
@@ -257,6 +257,7 @@ impl<R: Run> Runner<R> {
             system: Box::new(Self { inner, last_run: 0 }),
             id,
             access,
+            derives: None,
             before: Vec::new(),
             after: Vec::new(),
         }
@@ -264,7 +265,8 @@ impl<R: Run> Runner<R> {
 }
 
 impl<R: Run> ErasedSystem for Runner<R> {
-    fn run(&mut self, universe: &Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
+    fn run(&mut self, universe: &mut Universe, delta_time: f64, commands: &RefCell<CommandBuffer>) {
+        let universe = &*universe;
         let this_run = universe.advance_change_tick();
         self.inner.run(&SystemContext {
             universe,
