@@ -90,7 +90,9 @@ impl Access for BufferAccess {
     fn merge(self, other: Self) -> Option<Self> {
         match (self, other) {
             (Self::ShaderRead(a), Self::ShaderRead(b)) => Some(Self::ShaderRead(a | b)),
-            (Self::CopySource, Self::CopySource) | (Self::Index, Self::Index) => Some(self),
+            (Self::CopySource, Self::CopySource)
+            | (Self::Index, Self::Index)
+            | (Self::Indirect, Self::Indirect) => Some(self),
             _ => None,
         }
     }
