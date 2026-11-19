@@ -3,7 +3,9 @@ use std::sync::Arc;
 use bitflags::bitflags;
 use raw_window_handle::DisplayHandle;
 
-use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
+use crate::{
+    Error, FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native,
+};
 
 /// Application information and policy used to create an [`Rhi`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,9 +37,17 @@ impl Rhi {
     /// # Errors
     ///
     /// Returns [`Error::NoSuitableDevice`](crate::Error::NoSuitableDevice)
-    /// listing why each device was rejected, or a native error if the
+    /// listing why each device was rejected, [`Error::Invalid`] if the
+    /// application name contains a NUL byte, or a native error if the
     /// graphics API cannot be loaded or initialized.
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
+        if info.application_name.contains('\0') {
+            return Err(Error::invalid(
+                "application name",
+                info.application_name,
+                "contains a NUL byte",
+            ));
+        }
         Ok(Self {
             device: Arc::new(native::Device::new(info)?),
             frame: 0,

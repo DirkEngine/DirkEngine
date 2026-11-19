@@ -265,6 +265,110 @@ fn copies_within_one_buffer_or_image_need_disjoint_regions() -> Result<()> {
 }
 
 #[test]
+fn blits_scale_regions_with_filtering() -> Result<()> {
+    with_rhi(|rhi| {
+        // A 4x4 image of four quadrants: red, green, blue and white.
+        let quadrant = |x, y| match (x < 2, y < 2) {
+            (true, true) => [255, 0, 0, 255],
+            (false, true) => [0, 255, 0, 255],
+            (true, false) => [0, 0, 255, 255],
+            (false, false) => [255; 4],
+        };
+        let texels: Vec<[u8; 4]> = (0..16)
+            .map(|index| quadrant(index % 4, index / 4))
+            .collect();
+        let mut staging = buffer(rhi, 64, BufferUsage::COPY_SRC, Memory::Upload)?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { staging.write(0, texels.as_flattened())? };
+        let texture = image(rhi, Extent3d::new_2d(4, 4), 3)?;
+        let readback = buffer(rhi, 20, BufferUsage::COPY_DST, Memory::Readback)?;
+        let info = *texture.info();
+        let mip = |level| ImageCopy {
+            src: info.mip_region(level - 1),
+            dst: info.mip_region(level),
+        };
+        let barrier = |level, before, after| ImageBarrier {
+            image: &texture,
+            range: ImageRange::mip(level),
+            before,
+            after,
+            transfer: None,
+        };
+        let packed = |offset, level| {
+            BufferImageCopy::packed(Format::Rgba8Unorm, offset, info.mip_region(level))
+        };
+
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("blits")?;
+        // SAFETY: the barriers describe each mip's accesses in order.
+        unsafe {
+            encoder.barrier(
+                &[],
+                &[barrier(
+                    0,
+                    ImageAccess::Undefined,
+                    ImageAccess::CopyDestination,
+                )],
+            )?;
+            encoder.copy_buffer_to_image(&staging, &texture, &[packed(0, 0)])?;
+            encoder.barrier(
+                &[],
+                &[
+                    barrier(0, ImageAccess::CopyDestination, ImageAccess::CopySource),
+                    barrier(1, ImageAccess::Undefined, ImageAccess::CopyDestination),
+                ],
+            )?;
+            encoder.blit_image(&texture, &texture, &[mip(1)], Filter::Linear)?;
+            encoder.barrier(
+                &[],
+                &[
+                    barrier(1, ImageAccess::CopyDestination, ImageAccess::CopySource),
+                    barrier(2, ImageAccess::Undefined, ImageAccess::CopyDestination),
+                ],
+            )?;
+            encoder.blit_image(&texture, &texture, &[mip(2)], Filter::Linear)?;
+            encoder.barrier(
+                &[],
+                &[barrier(
+                    2,
+                    ImageAccess::CopyDestination,
+                    ImageAccess::CopySource,
+                )],
+            )?;
+            encoder.copy_image_to_buffer(&texture, &readback, &[packed(0, 1), packed(16, 2)])?;
+            encoder.barrier(
+                &[BufferBarrier {
+                    buffer: &readback,
+                    before: BufferAccess::CopyDestination,
+                    after: BufferAccess::HostRead,
+                    transfer: None,
+                }],
+                &[],
+            )?;
+        }
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, TIMEOUT)?;
+
+        // Each texel of mip 1 filters one quadrant, and mip 2 all of them.
+        let pixels = read(&readback, 0, 20)?;
+        let expected: Vec<u8> = (0..4)
+            .flat_map(|index| quadrant(index % 2 * 2, index / 2 * 2))
+            .collect();
+        assert_eq!(pixels[..16], expected);
+        let average = &pixels[16..];
+        assert!(
+            average[..3]
+                .iter()
+                .all(|channel| channel.abs_diff(128) <= 1)
+                && average[3] == 255,
+            "{average:?} is not the average of the quadrants"
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn recording_rejects_invalid_requests() -> Result<()> {
     with_rhi(|rhi| {
         let source = buffer(rhi, 64, BufferUsage::COPY_SRC, Memory::Device)?;

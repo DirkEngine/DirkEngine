@@ -152,7 +152,9 @@ impl Frame<'_> {
 
     /// The commands and waits of `encoder`, checking it belongs to this
     /// frame.
-    #[expect(
+    // Only Vulkan's command buffers are `Copy`, which the lint needs, so it
+    // cannot be expected on every target.
+    #[allow(
         clippy::needless_pass_by_value,
         reason = "submitting consumes the encoder so its commands cannot be submitted twice"
     )]

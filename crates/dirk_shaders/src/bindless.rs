@@ -100,6 +100,7 @@ pub mod heap {
         /// Argument buffer element after the arrays: a pointer to one `u32`
         /// per element, the byte length of storage buffers, which shaders
         /// bound their reads with.
+        #[expect(clippy::cast_possible_truncation, reason = "there are ten arrays")]
         pub const BUFFER_LENGTHS: u32 = super::first_element(super::CAPACITIES.len() as u32);
     }
 }

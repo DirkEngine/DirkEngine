@@ -135,6 +135,7 @@ egui-ash-renderer = "0.13"
 # Metal, on Apple targets
 block2 = "0.6"
 objc2 = "0.6"
+objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
 objc2-metal = "0.3"
 objc2-quartz-core = "0.3"
