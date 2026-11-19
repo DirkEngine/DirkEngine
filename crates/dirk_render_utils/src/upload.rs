@@ -258,10 +258,7 @@ impl Uploads<'_> {
             info.format.copy_offset_alignment(),
         )?;
         let copy = BufferImageCopy::packed(info.format, offset, region);
-        let encoder = match Recording::get(&mut self.recording, self.frame)? {
-            Recording::Transfer { acquires, .. } => acquires,
-            Recording::Graphics(encoder) => encoder,
-        };
+        let encoder = Recording::get(&mut self.recording, self.frame)?.graphics();
         let range = ImageRange {
             base_mip_level: region.mip_level,
             mip_level_count: 1,
