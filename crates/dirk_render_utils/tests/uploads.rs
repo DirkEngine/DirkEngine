@@ -6,8 +6,8 @@ use dirk_render_utils::Uploader;
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, BufferUsage,
     Completion, Error, Extent3d, FRAMES_IN_FLIGHT, Format, Frame, Graphics, Image, ImageAccess,
-    ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageUsage, Memory, Result, Rhi,
-    SampleCount, ShaderStages,
+    ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageRegion, ImageUsage, Memory, Origin3d,
+    Result, Rhi, SampleCount, ShaderStages,
 };
 use dirk_rhi_test_shaders::support::with_rhi;
 
@@ -363,6 +363,70 @@ fn the_copy_queue_hands_uploads_to_graphics_work() -> Result<()> {
 
         assert_eq!(buffer.wait(rhi)?, [vertices]);
         assert_eq!(image.wait(rhi)?, [texels]);
+        Ok(())
+    })
+}
+
+#[test]
+fn image_writes_replace_regions_of_new_and_sampled_images() -> Result<()> {
+    with_rhi(|rhi| {
+        let mut uploader = Uploader::new(rhi, 256)?;
+        let sampled = ImageAccess::Sampled(ShaderStages::FRAGMENT);
+        let desc = ImageDesc {
+            label: "written",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(4, 4),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED | ImageUsage::COPY_SRC,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+        };
+        let region = |x, y, width, height| ImageRegion {
+            mip_level: 0,
+            base_layer: 0,
+            layer_count: 1,
+            origin: Origin3d { x, y, z: 0 },
+            extent: Extent3d::new_2d(width, height),
+        };
+        let mut expected = pattern(64, 1);
+        // Writes `width` by `height` texels of `seed`'s pattern at `x`, `y`
+        // into `expected`, returning them.
+        let mut patch = |x: usize, y: usize, width: usize, height: usize, seed| {
+            let texels = pattern(width * height * 4, seed);
+            for (row, source) in texels.chunks_exact(width * 4).enumerate() {
+                let start = ((y + row) * 4 + x) * 4;
+                expected[start..start + width * 4].copy_from_slice(source);
+            }
+            texels
+        };
+        let writes = [
+            (region(0, 0, 2, 2), patch(0, 0, 2, 2, 2)),
+            (region(1, 1, 3, 2), patch(1, 1, 3, 2, 3)),
+            (region(2, 0, 1, 4), patch(2, 0, 1, 4, 4)),
+        ];
+
+        // Written in the batch creating it, then twice in a later frame.
+        let frame = rhi.begin_frame()?;
+        let mut uploads = uploader.begin(&frame);
+        let image = uploads.image(&desc, sampled, &[&pattern(64, 1)])?;
+        uploads.write_image(&image, sampled, writes[0].0, &writes[0].1)?;
+        assert_invalid(
+            uploads.write_image(&image, sampled, writes[1].0, &writes[1].1[1..]),
+            "the region holds 23 bytes instead of 24",
+        );
+        uploads.submit()?;
+        frame.finish();
+        let frame = rhi.begin_frame()?;
+        let mut uploads = uploader.begin(&frame);
+        for (region, texels) in &writes[1..] {
+            uploads.write_image(&image, sampled, *region, texels)?;
+        }
+        uploads.submit()?;
+        let readback = Readback::image(&frame, &image, sampled)?;
+        frame.finish();
+
+        assert_eq!(readback.wait(rhi)?, [expected]);
         Ok(())
     })
 }

@@ -1,18 +1,21 @@
-//! Staged uploads: host data copied into new device-local buffers and images.
+//! Staged uploads: host data copied into device-local buffers and images.
+
+use std::fmt::Display;
 
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, BufferUsage,
     CommandEncoder, Completion, CopyQueue, Error, Frame, Graphics, Image, ImageAccess,
-    ImageBarrier, ImageDesc, ImageInfo, ImageRange, ImageUsage, Memory, PerFrame, QueueTransfer,
-    QueueType, Result, Rhi,
+    ImageBarrier, ImageDesc, ImageInfo, ImageRange, ImageRegion, ImageUsage, Memory, PerFrame,
+    QueueTransfer, QueueType, Result, Rhi,
 };
 
 /// Buffer copies move whole words: their offsets and sizes are multiples of
 /// this many bytes.
 const WORD: u64 = 4;
 
-/// Uploads host data into new device-local buffers and images through one
-/// persistently mapped staging buffer per frame slot.
+/// Uploads host data into new device-local buffers and images, and into
+/// regions of existing images, through one persistently mapped staging
+/// buffer per frame slot.
 ///
 /// Each frame packs its data straight into its slot's staging buffer, which
 /// the slot's previous frame no longer uses. When it is full, it is replaced
@@ -33,11 +36,20 @@ const WORD: u64 = 4;
 /// # }
 /// ```
 pub struct Uploader {
-    /// Each frame slot's staging buffer.
-    staging: PerFrame<Buffer>,
-    /// The frame whose data `used` counts.
+    /// Staging for the copies into new resources.
+    staging: Staging,
+    /// Staging for writes into existing images, which the graphics queue
+    /// copies, when new resources are copied on the dedicated copy queue:
+    /// each queue family reads staging buffers of its own.
+    writes: Option<Staging>,
+    /// The frame whose data the staging buffers hold.
     frame: u64,
-    /// Bytes of that frame's staging buffer holding its data.
+}
+
+/// One persistently mapped staging buffer per frame slot.
+struct Staging {
+    buffers: PerFrame<Buffer>,
+    /// Bytes of the current frame's buffer holding its data.
     used: u64,
 }
 
@@ -91,10 +103,11 @@ impl Uploader {
     /// device's buffer size limit, or a native error if memory cannot be
     /// allocated.
     pub fn new(rhi: &Rhi, capacity: u64) -> Result<Self> {
+        let dedicated = rhi.capabilities().dedicated_copy_queue;
         Ok(Self {
-            staging: PerFrame::try_new(rhi, |_| Self::create_staging(rhi, capacity))?,
+            staging: Staging::new(rhi, capacity)?,
+            writes: dedicated.then(|| Staging::new(rhi, capacity)).transpose()?,
             frame: 0,
-            used: 0,
         })
     }
 
@@ -107,9 +120,11 @@ impl Uploader {
     pub fn begin<'f>(&'f mut self, frame: &'f Frame<'f>) -> Uploads<'f> {
         if self.frame != frame.number() {
             // Beginning the frame waited for the work of the frame that last
-            // used its slot's staging buffer.
+            // used its slot's staging buffers.
             self.frame = frame.number();
-            self.used = 0;
+            for staging in std::iter::once(&mut self.staging).chain(&mut self.writes) {
+                staging.used = 0;
+            }
         }
         Uploads {
             uploader: self,
@@ -118,27 +133,47 @@ impl Uploader {
         }
     }
 
+    /// Stages `data` for copies into new resources; see [`Staging::stage`].
+    fn stage(&mut self, frame: &Frame<'_>, data: &[u8], size: u64, alignment: u64) -> Result<u64> {
+        self.staging.stage(frame, data, size, alignment)
+    }
+}
+
+impl Staging {
+    /// Creates staging buffers of `capacity` bytes.
+    fn new(rhi: &Rhi, capacity: u64) -> Result<Self> {
+        Ok(Self {
+            buffers: PerFrame::try_new(rhi, |_| Self::create(rhi, capacity))?,
+            used: 0,
+        })
+    }
+
+    /// `frame`'s staging buffer.
+    fn get(&self, frame: &Frame<'_>) -> &Buffer {
+        self.buffers.get(frame)
+    }
+
     /// Reserves `size` bytes of `frame`'s staging buffer at a multiple of
     /// `alignment`, copies `data`, at most `size` bytes, to their start and
     /// returns their offset. Replaces a full staging buffer with a larger one.
     fn stage(&mut self, frame: &Frame<'_>, data: &[u8], size: u64, alignment: u64) -> Result<u64> {
-        let staging = self.staging.get_mut(frame);
+        let staging = self.buffers.get_mut(frame);
         let capacity = staging.info().size;
         let mut offset = self.used.next_multiple_of(alignment);
         if offset + size > capacity {
             // Copies recorded earlier in this frame keep the old buffer alive
             // until they complete, as dropping it defers its free.
             let limit = frame.rhi().capabilities().limits.max_buffer_size;
-            *staging = Self::create_staging(frame.rhi(), (2 * capacity).min(limit).max(size))?;
+            *staging = Self::create(frame.rhi(), (2 * capacity).min(limit).max(size))?;
             offset = 0;
         }
         self.used = offset + size;
-        self.staging.write(frame, offset, data)?;
+        self.buffers.write(frame, offset, data)?;
         Ok(offset)
     }
 
     /// Creates a staging buffer of `size` bytes.
-    fn create_staging(rhi: &Rhi, size: u64) -> Result<Buffer> {
+    fn create(rhi: &Rhi, size: u64) -> Result<Buffer> {
         rhi.create_buffer(&BufferDesc {
             label: "upload staging",
             size,
@@ -186,6 +221,69 @@ impl Uploads<'_> {
         with_copies!(recording, encoder => encoder.copy_buffer(staging, &buffer, &[copy]))?;
         recording.finish_buffer(&buffer, access)?;
         Ok(buffer)
+    }
+
+    /// Writes `texels` into `region` of `image`, keeping the rest of it.
+    /// Graphics work submitted before this batch leaves the region in
+    /// `access`, and graphics work submitted after it finds it there again.
+    /// `texels` holds the region's texels tightly packed, as for
+    /// [`Uploads::image`].
+    ///
+    /// The graphics queue copies them, after the batch's other copies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `texels`' length differs from the
+    /// region's texels, `region` is not inside `image`, `image` lacks
+    /// [`ImageUsage::COPY_DST`] or the usage `access` needs, or `access` is
+    /// [`ImageAccess::Undefined`].
+    pub fn write_image(
+        &mut self,
+        image: &Image,
+        access: ImageAccess,
+        region: ImageRegion,
+        texels: &[u8],
+    ) -> Result<()> {
+        let info = image.info();
+        Self::check_texels(info, image.label(), &region, texels, "the region")?;
+        let staging = match &mut self.uploader.writes {
+            Some(writes) => writes,
+            None => &mut self.uploader.staging,
+        };
+        let size = texels.len() as u64;
+        let offset = staging.stage(
+            self.frame,
+            texels,
+            size,
+            info.format.copy_offset_alignment(),
+        )?;
+        let copy = BufferImageCopy::packed(info.format, offset, region);
+        let encoder = match Recording::get(&mut self.recording, self.frame)? {
+            Recording::Transfer { acquires, .. } => acquires,
+            Recording::Graphics(encoder) => encoder,
+        };
+        let range = ImageRange {
+            base_mip_level: region.mip_level,
+            mip_level_count: 1,
+            base_layer: region.base_layer,
+            layer_count: region.layer_count,
+        };
+        let barrier = |before, after| {
+            [ImageBarrier {
+                image,
+                range,
+                before,
+                after,
+                transfer: None,
+            }]
+        };
+        // SAFETY: graphics work before the copy leaves the region in
+        // `access`, and on the graphics queue: new images are handed over
+        // to it before.
+        unsafe { encoder.barrier(&[], &barrier(access, ImageAccess::CopyDestination))? };
+        encoder.copy_buffer_to_image(staging.get(self.frame), image, &[copy])?;
+        // SAFETY: the copy left the region in `CopyDestination`.
+        unsafe { encoder.barrier(&[], &barrier(ImageAccess::CopyDestination, access)) }
     }
 
     /// Creates an image from `desc` holding `mips`, which graphics work
@@ -314,19 +412,37 @@ impl Uploads<'_> {
             ));
         }
         for (level, data) in (0..).zip(mips) {
-            let extent = info.extent.mip(level);
-            // Image limits keep this far from overflowing.
-            let texels = u64::from(extent.width)
-                * u64::from(extent.height)
-                * u64::from(extent.depth)
-                * u64::from(info.array_layers);
-            let expected = texels * u64::from(info.format.bytes_per_texel());
-            if data.len() as u64 != expected {
-                return invalid(format!(
-                    "mip {level} holds {} bytes instead of {expected}",
-                    data.len()
-                ));
-            }
+            let region = info.mip_region(level);
+            Self::check_texels(info, label, &region, data, format_args!("mip {level}"))?;
+        }
+        Ok(())
+    }
+
+    /// Checks that `data` holds every texel of `region` of the image `info`
+    /// describes, tightly packed. `name` names the region in errors.
+    fn check_texels(
+        info: &ImageInfo,
+        label: &str,
+        region: &ImageRegion,
+        data: &[u8],
+        name: impl Display,
+    ) -> Result<()> {
+        let extent = region.extent;
+        let expected = [
+            extent.width,
+            extent.height,
+            extent.depth,
+            region.layer_count,
+            info.format.bytes_per_texel(),
+        ]
+        .into_iter()
+        .fold(1_u64, |size, factor| size.saturating_mul(u64::from(factor)));
+        if data.len() as u64 != expected {
+            return Err(Error::Invalid {
+                object: "image upload",
+                label: label.to_owned(),
+                reason: format!("{name} holds {} bytes instead of {expected}", data.len()),
+            });
         }
         Ok(())
     }
