@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use dirk_shaders::bindless::heap;
+use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLDevice, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
@@ -35,7 +36,7 @@ impl Sampler {
 
     /// Creates a sampler state shaders can read from the heap.
     pub(super) fn create(
-        device: &Object<dyn MTLDevice>,
+        device: &ProtocolObject<dyn MTLDevice>,
         desc: &SamplerDesc<'_>,
     ) -> Result<Object<dyn MTLSamplerState>> {
         let sampler = MTLSamplerDescriptor::new();
