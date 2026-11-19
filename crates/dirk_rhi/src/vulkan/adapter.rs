@@ -78,6 +78,10 @@ pub(super) struct Adapter {
     pub(super) extensions: Vec<*const c_char>,
     pub(super) capabilities: Capabilities,
     pub(super) non_coherent_atom_size: u64,
+    /// Nanoseconds per timestamp tick.
+    pub(super) timestamp_period: f32,
+    /// The bits of timestamps the graphics queue writes.
+    pub(super) timestamp_mask: u64,
     score: u32,
 }
 
@@ -138,7 +142,8 @@ impl Adapter {
         let available = unsafe { instance.enumerate_device_extension_properties(raw) }
             .check("vkEnumerateDeviceExtensionProperties")?;
         // SAFETY: `raw` belongs to this instance.
-        let families = unsafe { instance.get_physical_device_queue_family_properties(raw) };
+        let family_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(raw) };
 
         let mut missing = Vec::new();
         if properties.api_version < vk::API_VERSION_1_3 {
@@ -153,7 +158,7 @@ impl Adapter {
         if !Heap::fits(&vulkan12) {
             missing.push("update-after-bind descriptor limits that fit the bindless heap");
         }
-        let families = QueueFamilies::find(&families);
+        let families = QueueFamilies::find(&family_properties);
         if families.is_none() {
             missing.push("a graphics and compute queue");
         }
@@ -161,16 +166,13 @@ impl Adapter {
             return Ok(Err(format!("{name} lacks {}", missing.join(", "))));
         };
 
-        let optional = [
-            (features.sampler_anisotropy, Features::SAMPLER_ANISOTROPY),
-            (features.image_cube_array, Features::IMAGE_CUBE_ARRAY),
-            (features.independent_blend, Features::INDEPENDENT_BLEND),
-            (features.depth_bias_clamp, Features::DEPTH_BIAS_CLAMP),
-        ]
-        .into_iter()
-        .filter(|(supported, _)| *supported == vk::TRUE)
-        .fold(Features::empty(), |all, (_, feature)| all | feature);
         let limits = &properties.limits;
+        let timestamp_bits = Self::timestamp_bits(
+            &family_properties[families.graphics as usize],
+            limits,
+            &supported,
+        );
+        let optional = Self::optional_features(&features, timestamp_bits > 0);
         let capabilities = Capabilities {
             name,
             limits: Limits {
@@ -212,6 +214,10 @@ impl Adapter {
             families,
             extensions,
             non_coherent_atom_size: limits.non_coherent_atom_size,
+            timestamp_period: limits.timestamp_period,
+            timestamp_mask: u64::MAX
+                .checked_shr(64_u32.saturating_sub(timestamp_bits))
+                .unwrap_or(0),
             capabilities,
             score: Self::score(properties.device_type),
         }))
@@ -227,6 +233,34 @@ impl Adapter {
             vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
             vk::PhysicalDeviceType::CPU => 1,
             _ => 0,
+        }
+    }
+
+    /// The optional features in `features`, and timestamps if `timestamps`.
+    fn optional_features(features: &vk::PhysicalDeviceFeatures, timestamps: bool) -> Features {
+        [
+            (features.sampler_anisotropy, Features::SAMPLER_ANISOTROPY),
+            (features.image_cube_array, Features::IMAGE_CUBE_ARRAY),
+            (features.independent_blend, Features::INDEPENDENT_BLEND),
+            (features.depth_bias_clamp, Features::DEPTH_BIAS_CLAMP),
+            (timestamps.into(), Features::TIMESTAMPS),
+        ]
+        .into_iter()
+        .filter(|(supported, _)| *supported == vk::TRUE)
+        .fold(Features::empty(), |all, (_, feature)| all | feature)
+    }
+
+    /// The bits of timestamps the graphics queue, of `family`, writes; zero
+    /// unless it writes them and they can be reset from the host.
+    fn timestamp_bits(
+        family: &vk::QueueFamilyProperties,
+        limits: &vk::PhysicalDeviceLimits,
+        supported: &RequiredFeatures,
+    ) -> u32 {
+        if limits.timestamp_period > 0.0 && supported.vulkan12.host_query_reset == vk::TRUE {
+            family.timestamp_valid_bits
+        } else {
+            0
         }
     }
 
