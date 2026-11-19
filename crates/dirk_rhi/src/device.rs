@@ -6,7 +6,9 @@ use std::sync::{
 use bitflags::bitflags;
 use raw_window_handle::DisplayHandle;
 
-use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
+use crate::{
+    Error, FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native,
+};
 
 /// Application information and policy used to create an [`Rhi`].
 #[derive(Clone, Copy, Debug)]
@@ -60,11 +62,18 @@ impl Rhi {
     /// # Errors
     ///
     /// Returns [`Error::NoSuitableDevice`](crate::Error::NoSuitableDevice)
-    /// listing why each device was rejected, [`Error::Invalid`](crate::Error::Invalid) if the frame
-    /// memory exceeds the device's buffer size limit, or a native error if
-    /// the graphics API cannot be loaded or initialized or memory cannot be
-    /// allocated.
+    /// listing why each device was rejected, [`Error::Invalid`] if the
+    /// application name contains a NUL byte or the frame memory exceeds the
+    /// device's buffer size limits, or a native error if the graphics API
+    /// cannot be loaded or initialized or memory cannot be allocated.
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
+        if info.application_name.contains('\0') {
+            return Err(Error::invalid(
+                "application name",
+                info.application_name,
+                "contains a NUL byte",
+            ));
+        }
         let mut rhi = Self {
             device: Arc::new(native::Device::new(info)?),
             id: NEXT_RHI_ID.fetch_add(1, Ordering::Relaxed),
