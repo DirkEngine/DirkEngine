@@ -1,106 +1,61 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+//! Editor panels showing each player's viewport, as bindless textures in
+//! egui, and forwarding their input to the player.
 
-use ash::vk;
+use std::{collections::HashMap, sync::Arc};
+
 use dirk_engine::editor::{
     EditorServices, EditorWindowDescriptor, EditorWindowId, VIEWPORT_CATEGORY,
 };
 use dirk_input::{ButtonState, InputEvent, egui::input_events_from_egui_response};
 use dirk_player::{PlayerId, PlayerInputSender};
+use dirk_rhi::Rhi;
 use parking_lot::Mutex;
 
-use crate::{
-    MAX_FRAMES_IN_FLIGHT, Result,
-    egui_integration::EguiState,
-    resources::{
-        descriptors::{DescriptorAllocator, DescriptorSet, DescriptorWriter, layouts::SetLayout},
-        device::{Garbage, RenderDevice},
-    },
-    viewport::Viewport,
-};
+use crate::{Result, viewport::Viewport};
 
-struct ViewportTextureBinding {
-    texture_id: egui::TextureId,
-    /// Just to keep the descriptor set alive as egui holds the raw set.
-    _descriptor_set: DescriptorSet<ViewportTextureSet>,
-}
-
-struct RetiredViewportTextureBinding {
-    binding: ViewportTextureBinding,
-    frames_remaining: usize,
-}
+/// Extent of a viewport, in pixels.
+type Extent = (u32, u32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ViewportEditorEntry {
+    /// The viewport output's bindless index, as a user texture.
     texture_id: egui::TextureId,
-    extent: vk::Extent2D,
+    extent: Extent,
     ready: bool,
-    requested_extent: Option<vk::Extent2D>,
-}
-
-struct ViewportTextureSet;
-
-impl SetLayout for ViewportTextureSet {
-    const BINDINGS: &'static [vk::DescriptorSetLayoutBinding<'static>] =
-        &[vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-            p_immutable_samplers: ::core::ptr::null(),
-            _marker: PhantomData,
-        }];
+    requested_extent: Option<Extent>,
 }
 
 pub struct ViewportEditor {
     state: Arc<Mutex<ViewportEditorState>>,
     input_sender: PlayerInputSender,
     windows: HashMap<PlayerId, EditorWindowId>,
-    textures: HashMap<PlayerId, ViewportTextureBinding>,
-    retired_textures: Vec<RetiredViewportTextureBinding>,
-    descriptor_allocator: DescriptorAllocator<ViewportTextureSet>,
-    sampler: vk::Sampler,
-    device: RenderDevice,
 }
 
 impl ViewportEditor {
-    pub fn new(device: &RenderDevice, input_sender: PlayerInputSender) -> Result<Self> {
-        Ok(Self {
+    pub fn new(input_sender: PlayerInputSender) -> Self {
+        Self {
             state: Arc::new(Mutex::new(ViewportEditorState::default())),
             input_sender,
             windows: HashMap::new(),
-            textures: HashMap::new(),
-            retired_textures: Vec::new(),
-            descriptor_allocator: DescriptorAllocator::new(device, 8)?,
-            sampler: create_sampler(device)?,
-            device: device.clone(),
-        })
+        }
     }
 
+    /// Adds a panel showing `viewport` for `player`.
     pub fn add_viewport(
         &mut self,
         player: PlayerId,
         viewport: &Viewport,
         editor: &EditorServices,
-        egui: &mut EguiState,
     ) -> Result<()> {
-        if self.windows.contains_key(&player) || self.textures.contains_key(&player) {
+        if self.windows.contains_key(&player) {
             self.remove_viewport(player, editor);
         }
-
-        let descriptor_set = self.descriptor_allocator.allocate()?;
-        write_viewport_descriptor(
-            &self.device,
-            &descriptor_set,
-            self.sampler,
-            viewport.output_view(),
-        );
-        let texture_id = egui.add_user_texture(descriptor_set.raw());
 
         self.state.lock().insert(
             player,
             ViewportEditorEntry {
-                texture_id,
-                extent: viewport.settings().extent,
+                texture_id: Self::texture_id(viewport)?,
+                extent: viewport.extent(),
                 ready: false,
                 requested_extent: None,
             },
@@ -118,15 +73,7 @@ impl ViewportEditor {
             draw_viewport_window(ui, &state, &input_sender, player);
             Ok(())
         });
-
         self.windows.insert(player, window_id);
-        self.textures.insert(
-            player,
-            ViewportTextureBinding {
-                texture_id,
-                _descriptor_set: descriptor_set,
-            },
-        );
         Ok(())
     }
 
@@ -134,63 +81,30 @@ impl ViewportEditor {
         if let Some(window) = self.windows.remove(&player) {
             editor.remove_window(window);
         }
-        if let Some(binding) = self.textures.remove(&player) {
-            self.retired_textures.push(RetiredViewportTextureBinding {
-                binding,
-                frames_remaining: MAX_FRAMES_IN_FLIGHT + 1,
-            });
-        }
         self.state.lock().remove(player);
     }
 
-    pub fn release_retired_textures(&mut self, egui: &mut EguiState) {
-        self.retired_textures.retain_mut(|retired| {
-            retired.frames_remaining = retired.frames_remaining.saturating_sub(1);
-            if retired.frames_remaining == 0 {
-                egui.remove_user_texture(retired.binding.texture_id);
-                false
-            } else {
-                true
-            }
-        });
-    }
-
+    /// Resizes viewports to the size their panels asked for. Call while a
+    /// frame is open: the UI recorded in it may still show old outputs.
     pub fn apply_resize_requests(
         &mut self,
+        rhi: &Rhi,
         viewports: &mut HashMap<PlayerId, Viewport>,
-        egui: &mut EguiState,
     ) -> Result<()> {
         let requests = self.state.lock().take_resize_requests();
         for (player, requested_extent) in requests {
             let Some(viewport) = viewports.get_mut(&player) else {
                 continue;
             };
-            if viewport.settings().extent == requested_extent {
+            if viewport.extent() == requested_extent {
                 continue;
             }
-
-            let descriptor_set = self.descriptor_allocator.allocate()?;
-            viewport.resize(&self.device, requested_extent)?;
-            write_viewport_descriptor(
-                &self.device,
-                &descriptor_set,
-                self.sampler,
-                viewport.output_view(),
+            viewport.resize(rhi, requested_extent)?;
+            self.state.lock().replace_texture(
+                player,
+                Self::texture_id(viewport)?,
+                viewport.extent(),
             );
-            let texture_id = egui.add_user_texture(descriptor_set.raw());
-            let new_binding = ViewportTextureBinding {
-                texture_id,
-                _descriptor_set: descriptor_set,
-            };
-            if let Some(old_binding) = self.textures.insert(player, new_binding) {
-                self.retired_textures.push(RetiredViewportTextureBinding {
-                    binding: old_binding,
-                    frames_remaining: MAX_FRAMES_IN_FLIGHT + 1,
-                });
-            }
-            self.state
-                .lock()
-                .replace_texture(player, texture_id, viewport.settings().extent);
         }
         Ok(())
     }
@@ -200,19 +114,16 @@ impl ViewportEditor {
         for (player, entry) in state.entries_mut() {
             if let Some(viewport) = viewports.get(player) {
                 entry.ready = viewport.is_renderable() && viewport.has_rendered();
-                entry.extent = viewport.settings().extent;
+                entry.extent = viewport.extent();
             } else {
                 entry.ready = false;
             }
         }
     }
-}
 
-impl Drop for ViewportEditor {
-    fn drop(&mut self) {
-        self.textures.clear();
-        self.retired_textures.clear();
-        self.device.destroy(Garbage::Sampler(self.sampler));
+    /// The user texture showing `viewport`'s output: its bindless index.
+    fn texture_id(viewport: &Viewport) -> Result<egui::TextureId> {
+        Ok(egui::TextureId::User(u64::from(viewport.texture()?.slot())))
     }
 }
 
@@ -240,14 +151,14 @@ impl ViewportEditorState {
         self.entries.iter_mut()
     }
 
-    fn request_extent(&mut self, player: PlayerId, extent: vk::Extent2D) {
+    fn request_extent(&mut self, player: PlayerId, extent: Extent) {
         if let Some(entry) = self.entries.get_mut(&player) {
             entry.requested_extent = Some(clamp_extent(extent));
         }
     }
 
     #[must_use]
-    fn take_resize_requests(&mut self) -> Vec<(PlayerId, vk::Extent2D)> {
+    fn take_resize_requests(&mut self) -> Vec<(PlayerId, Extent)> {
         self.entries
             .iter_mut()
             .filter_map(|(player, entry)| {
@@ -259,12 +170,7 @@ impl ViewportEditorState {
             .collect()
     }
 
-    fn replace_texture(
-        &mut self,
-        player: PlayerId,
-        texture_id: egui::TextureId,
-        extent: vk::Extent2D,
-    ) {
+    fn replace_texture(&mut self, player: PlayerId, texture_id: egui::TextureId, extent: Extent) {
         if let Some(entry) = self.entries.get_mut(&player) {
             entry.texture_id = texture_id;
             entry.extent = extent;
@@ -372,12 +278,12 @@ fn draw_viewport_window(
     }
 }
 
-fn extent_from_points(size: egui::Vec2, pixels_per_point: f32) -> vk::Extent2D {
+fn extent_from_points(size: egui::Vec2, pixels_per_point: f32) -> Extent {
     let pixels_per_point = pixels_per_point.max(f32::EPSILON);
-    vk::Extent2D {
-        width: point_size_to_pixels(size.x, pixels_per_point),
-        height: point_size_to_pixels(size.y, pixels_per_point),
-    }
+    (
+        point_size_to_pixels(size.x, pixels_per_point),
+        point_size_to_pixels(size.y, pixels_per_point),
+    )
 }
 
 fn point_size_to_pixels(points: f32, pixels_per_point: f32) -> u32 {
@@ -391,39 +297,8 @@ fn point_size_to_pixels(points: f32, pixels_per_point: f32) -> u32 {
     }
 }
 
-fn clamp_extent(extent: vk::Extent2D) -> vk::Extent2D {
-    vk::Extent2D {
-        width: extent.width.max(1),
-        height: extent.height.max(1),
-    }
-}
-
-fn write_viewport_descriptor(
-    device: &RenderDevice,
-    descriptor_set: &DescriptorSet<ViewportTextureSet>,
-    sampler: vk::Sampler,
-    view: vk::ImageView,
-) {
-    DescriptorWriter::new(&device.device)
-        .combined_image_sampler(descriptor_set, 0, view, sampler)
-        .flush();
-}
-
-fn create_sampler(device: &RenderDevice) -> Result<vk::Sampler> {
-    let sampler_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
-        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .compare_enable(false)
-        .min_lod(0.0)
-        .max_lod(1.0)
-        .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-        .unnormalized_coordinates(false);
-
-    Ok(unsafe { device.device.create_sampler(&sampler_info, None)? })
+fn clamp_extent((width, height): Extent) -> Extent {
+    (width.max(1), height.max(1))
 }
 
 #[cfg(test)]
@@ -441,33 +316,15 @@ mod tests {
             player(0),
             ViewportEditorEntry {
                 texture_id: egui::TextureId::User(7),
-                extent: vk::Extent2D {
-                    width: 640,
-                    height: 480,
-                },
+                extent: (640, 480),
                 ready: false,
                 requested_extent: None,
             },
         );
 
-        state.request_extent(
-            player(0),
-            vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
-        );
+        state.request_extent(player(0), (0, 0));
 
-        assert_eq!(
-            state.take_resize_requests(),
-            vec![(
-                player(0),
-                vk::Extent2D {
-                    width: 1,
-                    height: 1
-                }
-            )]
-        );
+        assert_eq!(state.take_resize_requests(), vec![(player(0), (1, 1))]);
     }
 
     #[test]
@@ -477,10 +334,7 @@ mod tests {
             player(0),
             ViewportEditorEntry {
                 texture_id: egui::TextureId::User(1),
-                extent: vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
+                extent: (1, 1),
                 ready: false,
                 requested_extent: None,
             },
@@ -495,10 +349,7 @@ mod tests {
     fn ready_state_mirrors_renderable_and_rendered_flags() {
         let mut entry = ViewportEditorEntry {
             texture_id: egui::TextureId::User(1),
-            extent: vk::Extent2D {
-                width: 1,
-                height: 1,
-            },
+            extent: (1, 1),
             ready: true,
             requested_extent: None,
         };

@@ -14,10 +14,9 @@ documentation.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+bytemuck.workspace = true
 parking_lot.workspace = true
-pastey.workspace = true
 
-dirk_utils.workspace = true
 dirk_engine.workspace = true
 dirk_input.workspace = true
 dirk_platform.workspace = true
@@ -27,24 +26,20 @@ dirk_world.workspace = true
 dirk_shaders.workspace = true
 dirk_events.workspace = true
 dirk_assets.workspace = true
+dirk_rhi.workspace = true
+dirk_render_utils.workspace = true
 
-ash.workspace = true
-ash-window.workspace = true
 raw-window-handle.workspace = true
 glam.workspace = true
-gpu-allocator.workspace = true
 gltf.workspace = true
-slotmap.workspace = true
-egui = { workspace = true, optional = true }
-egui-ash-renderer = { workspace = true, optional = true }
+egui = { workspace = true, optional = true, features = ["bytemuck"] }
 
 [build-dependencies]
-cargo-gpu-install.workspace = true
 anyhow.workspace = true
 dirk_build.workspace = true
-rspirv.workspace = true
-quote.workspace = true
-proc-macro2.workspace = true
+
+[dev-dependencies]
+dirk_threads.workspace = true
 
 [features]
 default = []
@@ -53,12 +48,14 @@ editor = [
     "dirk_engine/editor",
     "dirk_input/egui",
     "dep:egui",
-    "dep:egui-ash-renderer",
 ]
 
+# The workspace forbids `unsafe`; the shader build's generated `Shader`
+# implementations need it, so it is denied here and expected where they are
+# included.
 [lints.rust]
 missing_docs = "warn"
-unsafe_code = "allow"
+unsafe_code = "deny"
 
 [lints.clippy]
 pedantic = "warn"

@@ -1,105 +1,45 @@
-use ash::vk;
 use raw_window_handle::HandleError;
 use thiserror::Error;
 
-/// An engine Result type to wrap the engine [enum@Error].
+/// A renderer result.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// All engine related errors
+/// Errors the renderer reports.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// An error returned by Vulkan
-    #[error("Vulkan error: {0}")]
-    VulkanError(#[from] ash::vk::Result),
-    /// An error occuring during the allocation of a GPU object
-    #[error("Allocation error: {0}")]
-    Allocation(#[from] gpu_allocator::AllocationError),
-
-    /// An error loading Vulkan function
-    #[error("Error loading Vulkan functions: {0}")]
-    Loading(#[from] ash::LoadingError),
-    /// Error produced by the [`platform`] crate.
+    /// The render hardware interface failed.
+    #[error(transparent)]
+    Rhi(#[from] dirk_rhi::Error),
+    /// The platform failed, such as to provide a window's handles.
     #[error("platform error: {0}")]
     Platform(#[from] dirk_platform::Error),
-    /// Error produced by the [`assets`] crate.
+    /// An asset could not be read.
     #[error("assets error: {0}")]
-    AssetError(#[from] dirk_assets::Error),
-    /// Error produced by the egui Vulkan renderer.
-    #[cfg(feature = "editor")]
-    #[error("egui renderer error: {0}")]
-    EguiRenderer(#[from] egui_ash_renderer::RendererError),
+    Asset(#[from] dirk_assets::Error),
 
-    /// If no physical device is found
-    #[error("no suitable graphics device found")]
-    NoDeviceFound,
-    /// If no supported vulkan image format is found
-    #[error("failed to find supported format")]
-    NoSupportedFormat,
-
-    /// The required Vulkan instance extension was not found
-    #[error("instance extension {0} not found")]
-    ExtensionNotFound(String),
-    /// The required Vulkan validation layer was not found
-    #[error("validation layer {0} not found")]
-    ValidationLayerNotFound(String),
-
-    /// Error during layout transition: the specified source layout
-    /// is not currently supported by the engine. If it should be supported,
-    /// add support in the transition function.
-    #[error("the layout {0:?} is not supported as a source. implement it")]
-    UnsupportedSourceLayout(vk::ImageLayout),
-    /// Error during layout transition: the specified destination layout
-    /// is not currently supported by the engine. If it should be supported,
-    /// add support in the transition function.
-    #[error("the layout {0:?} is not supported as a destination. implement it")]
-    UnsupportedDesinationLayout(vk::ImageLayout),
-
-    /// The Vulkan surface is suboptimal
-    #[error("suboptimal surface")]
-    SuboptimalSurface,
-    /// The surface does not support the image usages required by the renderer.
-    #[error(
-        "surface does not support required swapchain usage {required:?}; supported usage is {supported:?}"
-    )]
-    UnsupportedSwapchainUsage {
-        /// Required swapchain image usage flags.
-        required: vk::ImageUsageFlags,
-        /// Usage flags advertised by the surface capabilities.
-        supported: vk::ImageUsageFlags,
-    },
-    /// The requested descriptor set allocation is too large for Vulkan.
-    #[error("descriptor set allocation count {0} exceeds u32::MAX")]
-    DescriptorSetCountTooLarge(usize),
-    /// A glTF material references an image index that does not exist.
+    /// The device renders to none of the depth formats scenes use.
+    #[error("the device renders to no depth format scenes use")]
+    NoDepthFormat,
+    /// A glTF material references an image that does not exist.
     #[error("glTF image index {0} is out of range")]
     TextureIndexOutOfRange(usize),
-    /// The host descriptor set layout does not match the reflected shader layout.
-    #[error("pipeline {pipeline} descriptor layout mismatch at set {set}")]
-    PipelineDescriptorLayoutMismatch {
-        /// Pipeline name.
-        pipeline: &'static str,
-        /// Descriptor set index.
-        set: usize,
-    },
-    /// The host vertex input layout does not match the reflected shader layout.
-    #[error("pipeline {pipeline} vertex input layout mismatch")]
-    PipelineVertexInputMismatch {
-        /// Pipeline name.
-        pipeline: &'static str,
-    },
+    /// A glTF image has a pixel format the renderer does not read yet.
+    #[error("glTF image format {0:?} is not supported")]
+    UnsupportedImageFormat(gltf::image::Format),
+    /// egui updated part of a texture it never set.
+    #[cfg(feature = "editor")]
+    #[error("egui updated part of texture {0:?}, which it never set")]
+    UnknownEguiTexture(egui::TextureId),
 
-    /// If there is no camera in the scene
+    /// The camera of a viewport is not a renderer entity, or has no view.
     #[error("camera {0:?} does not exist")]
     CameraDoesNotExist(dirk_universe::Entity),
-    /// If the requested world does not exist
+    /// The requested world does not exist.
     #[error("world {0} is not registered on renderer")]
     WorldDoesNotExist(dirk_universe::WorldId),
-    /// If the requested entity does not exist
+    /// The requested entity does not exist.
     #[error("entity {0:?} is not registered on renderer")]
     EntityDoesNotExist(dirk_universe::Entity),
-    /// The requested window does not exist
-    #[error("window {0:?} is not registered on renderer")]
-    WindowDoesNotExist(dirk_platform::WindowId),
 }
 
 impl From<HandleError> for Error {
