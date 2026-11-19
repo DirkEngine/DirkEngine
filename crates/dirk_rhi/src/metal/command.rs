@@ -258,6 +258,20 @@ impl CommandBuffer {
         }
     }
 
+    /// Generates every mip of `image` from mip 0. Metal orders the levels
+    /// and tracks the hazards around them, and rejects images of one mip,
+    /// which have none to generate.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is shared with Vulkan, whose blits can fail"
+    )]
+    pub(crate) fn generate_mips(&mut self, _device: &Device, image: &crate::Image) -> Result<()> {
+        if image.info().mip_levels > 1 {
+            self.blit().generateMipmapsForTexture(&image.raw.raw);
+        }
+        Ok(())
+    }
+
     /// Records nothing: Metal tracks every hazard, and its queues need no
     /// ownership transfers; see the backend's documentation.
     #[expect(
