@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, BufferUsage,
-    CommandEncoder, CopyQueue, Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format, Graphics, Image,
-    ImageAccess, ImageBarrier, ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageUsage,
-    Memory, PerFrame, QueueTransfer, QueueType, Result, Rhi, RhiCreateInfo, SampleCount,
-    ShaderStages,
+    CommandEncoder, CopyQueue, Error, Extent3d, FRAMES_IN_FLIGHT, Features, Filter, Format,
+    Graphics, Image, ImageAccess, ImageBarrier, ImageCopy, ImageDesc, ImageDimension, ImageRange,
+    ImageUsage, Memory, PerFrame, QueueTransfer, QueueType, Result, Rhi, RhiCreateInfo,
+    SampleCount, ShaderStages,
 };
 use dirk_rhi_test_shaders::support::{self, with_rhi};
 
@@ -870,6 +870,85 @@ fn frame_allocations_too_large_for_frame_memory_get_buffers_of_their_own() -> Re
             .flat_map(u32::to_ne_bytes)
             .collect();
         assert_eq!(read(&readback, 0, 28)?, [&[0x5a; 4][..], &words].concat());
+        Ok(())
+    })
+}
+
+#[test]
+fn timestamps_are_read_once_their_frame_slot_comes_round() -> Result<()> {
+    with_rhi(|rhi| {
+        if !rhi.capabilities().features.contains(Features::TIMESTAMPS) {
+            eprintln!("skipping: the device has no timestamps");
+            return Ok(());
+        }
+        let mut timestamps = rhi.create_timestamps("frame", 3)?;
+        let src = buffer(rhi, 1 << 20, BufferUsage::COPY_SRC, Memory::Device)?;
+        let dst = buffer(rhi, 1 << 20, BufferUsage::COPY_DST, Memory::Device)?;
+        let frame = rhi.begin_frame()?;
+        assert_eq!(timestamps.begin(&frame)?, [None; 3]);
+        let mut encoder = frame.encoder::<Graphics>("timed")?;
+        encoder.write_timestamp(&mut timestamps, 0)?;
+        encoder.copy_buffer(
+            &src,
+            &dst,
+            &[BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: 1 << 20,
+            }],
+        )?;
+        encoder.write_timestamp(&mut timestamps, 1)?;
+        frame.submit(encoder)?;
+        // An encoder dropped instead of submitted writes nothing.
+        frame
+            .encoder::<Graphics>("discarded")?
+            .write_timestamp(&mut timestamps, 2)?;
+        frame.finish();
+        // Later frames use the other slots.
+        for _ in 1..FRAMES_IN_FLIGHT {
+            let frame = rhi.begin_frame()?;
+            assert_eq!(timestamps.begin(&frame)?, [None; 3]);
+        }
+        let frame = rhi.begin_frame()?;
+        let [Some(start), Some(end), None] = *timestamps.begin(&frame)? else {
+            panic!("the first frame's submitted work wrote its first two timestamps only");
+        };
+        // Copying 1 MiB takes some time, but far less than a second.
+        let elapsed = end.checked_sub(start);
+        assert!(
+            elapsed.is_some_and(|elapsed| !elapsed.is_zero() && elapsed < Duration::from_secs(1)),
+            "{start:?} to {end:?} is not the time of a 1 MiB copy"
+        );
+        // The slot's timestamps were cleared for this frame.
+        frame.finish();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            let frame = rhi.begin_frame()?;
+            assert_eq!(timestamps.begin(&frame)?, [None; 3]);
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn timestamp_writes_are_validated() -> Result<()> {
+    with_rhi(|rhi| {
+        if !rhi.capabilities().features.contains(Features::TIMESTAMPS) {
+            eprintln!("skipping: the device has no timestamps");
+            return Ok(());
+        }
+        assert_invalid(rhi.create_timestamps("none", 0), "count is zero");
+        let mut timestamps = rhi.create_timestamps("frame", 1)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("timed")?;
+        assert_invalid(encoder.write_timestamp(&mut timestamps, 0), "call `begin`");
+        timestamps.begin(&frame)?;
+        assert_invalid(encoder.write_timestamp(&mut timestamps, 1), "outside");
+        encoder.write_timestamp(&mut timestamps, 0)?;
+        assert_invalid(
+            encoder.write_timestamp(&mut timestamps, 0),
+            "already written",
+        );
+        frame.submit(encoder)?;
         Ok(())
     })
 }

@@ -297,6 +297,40 @@ frame.finish();                               // closes the frame (also on Drop)
   out, so stale indices read the null descriptor for as long as possible. In debug builds
   a generation check may report them later.
 
+## Timestamps
+
+GPU timing is measured per frame with `Timestamps`, `count` timestamps per frame:
+
+```rust
+let mut timestamps = rhi.create_timestamps("frame", 2)?;  // needs Features::TIMESTAMPS
+let frame = rhi.begin_frame()?;
+let earlier = timestamps.begin(&frame)?;    // what this slot's last frame wrote
+encoder.write_timestamp(&mut timestamps, 0)?;  // graphics encoders, between commands
+```
+
+- Each frame slot has its own queries (one Vulkan query pool, or Metal counter sample
+  buffer, per slot). `begin(&frame)` returns the timestamps the slot's previous frame
+  wrote, which beginning the frame waited for, as `Option<Duration>`s since an arbitrary
+  point (`None` where it wrote none, or wrote one in an encoder it did not submit), then
+  clears them; writing before `begin`, twice in
+  a frame, or out of range is rejected. No fences, no waits and no `unsafe`.
+- Only graphics encoders write timestamps, outside render passes (the pass borrows the
+  encoder). On Vulkan each marks when every earlier command finished; on Metal, when the
+  GPU reached it, which earlier passes may still be running at, so Metal differences
+  approximate GPU time.
+- Vulkan: `vkCmdWriteTimestamp2` at `ALL_COMMANDS`, results read with availability and
+  reset from the host (`hostQueryReset`). `TIMESTAMPS` needs timestamp bits on the
+  graphics family, a timestamp period and host query reset; ticks are masked to the
+  valid bits and scaled by the period.
+- Metal: a counter sample buffer of the timestamp counter set. GPUs sampling at stage
+  boundaries (Apple GPUs) sample at the start of a blit pass filling a scratch buffer,
+  since Metal drops the samples of encoders without commands; others sample between
+  blits. Metal cannot clear samples, and leaves those of unsubmitted encoders unwritten
+  (zero on Apple GPUs, `MTLCounterErrorValue` on others), so reading a slot's samples
+  replaces its buffer with an unwritten one. GPU ticks have no documented period, so it
+  is measured against the CPU clock since device creation. Devices sampling neither way
+  lack `TIMESTAMPS`.
+
 ## Depth comparison
 
 Shadow maps are filtered by comparing a reference depth with each texel and filtering
@@ -508,5 +542,5 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Compute pipelines and dispatch, indirect draws, timestamp queries, render-graph
-subresource ranges, async compute. Each adds API without breaking the above.
+Compute pipelines and dispatch, indirect draws, render-graph subresource ranges, async
+compute. Each adds API without breaking the above.

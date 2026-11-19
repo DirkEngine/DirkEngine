@@ -489,6 +489,11 @@ impl<T> PerFrame<T> {
         &mut self.slots[slot]
     }
 
+    /// Whether these values were created for frames of `device`.
+    pub(crate) fn is_from(&self, device: &native::Device) -> bool {
+        self.device == std::ptr::from_ref(device).addr()
+    }
+
     /// `frame`'s slot, checking it belongs to the right RHI.
     fn slot(&self, frame: &Frame<'_>) -> usize {
         assert_eq!(
