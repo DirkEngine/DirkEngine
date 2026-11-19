@@ -98,6 +98,13 @@ impl Swapchain {
         surface: Surface,
         desc: &SwapchainDesc<'_>,
     ) -> Result<(Self, Format)> {
+        if !Arc::ptr_eq(&surface.device, device) {
+            return Err(Error::invalid(
+                "swapchain",
+                desc.label,
+                "the surface belongs to another device",
+            ));
+        }
         let format = desc
             .formats
             .iter()
