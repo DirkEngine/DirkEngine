@@ -18,12 +18,25 @@ parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# Every target uses Vulkan until the Metal backend lands; Apple targets go
-# through MoltenVK's portability subset.
+raw-window-handle = { workspace = true, features = ["std"] }
+
+# Apple targets use Metal.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# Command buffer completion handlers.
+block2.workspace = true
+objc2.workspace = true
+objc2-core-foundation.workspace = true
+objc2-foundation.workspace = true
+objc2-metal.workspace = true
+objc2-quartz-core.workspace = true
+# The `CAMetalLayer` of an AppKit or UIKit view.
+raw-window-metal.workspace = true
+
+# Every other target uses Vulkan.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
 ash.workspace = true
 ash-window.workspace = true
 gpu-allocator.workspace = true
-raw-window-handle = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 dirk_rhi_test_shaders = { version = "0.1.0", path = "test-shaders" }
