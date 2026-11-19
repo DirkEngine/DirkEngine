@@ -125,7 +125,7 @@ impl ModelRegistry {
     /// skipping, with a warning, those that cannot be read or uploaded, and
     /// drops those unloaded. An unload only drops the generation it names,
     /// not a newer one loaded since.
-    pub fn update(&mut self, rhi: &Rhi, uploads: &mut Uploads<'_>) -> Result<()> {
+    pub fn update(&mut self, rhi: &Rhi, uploads: &mut Uploads<'_>) {
         let loaded: Vec<_> = self.load_consumer.consume_all().collect();
         for event in loaded {
             let handle = event.handle.handle();
@@ -141,7 +141,7 @@ impl ModelRegistry {
                     self.models.insert(handle, model);
                 }
                 Err(error) => {
-                    warn!(model = %handle, %error, "skipping a model that cannot be uploaded")
+                    warn!(model = %handle, %error, "skipping a model that cannot be uploaded");
                 }
             }
         }
@@ -154,7 +154,6 @@ impl ModelRegistry {
                 self.models.remove(&event.handle);
             }
         }
-        Ok(())
     }
 
     /// The primitives of the model of `handle`, if it is loaded.

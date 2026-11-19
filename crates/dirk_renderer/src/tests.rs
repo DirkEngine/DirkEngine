@@ -156,7 +156,7 @@ fn draw_models(
         std::thread::sleep(Duration::from_millis(1));
         let mut frame = rhi.begin_frame()?;
         let mut uploads = uploader.begin(&mut frame);
-        models.update(uploads.rhi(), &mut uploads)?;
+        models.update(uploads.rhi(), &mut uploads);
         uploads.submit()?;
     }
 

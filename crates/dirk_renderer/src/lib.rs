@@ -431,7 +431,7 @@ impl Renderer {
 
         let mut frame = self.rhi.begin_frame()?;
         let mut uploads = self.uploader.begin(&mut frame);
-        self.models.update(uploads.rhi(), &mut uploads)?;
+        self.models.update(uploads.rhi(), &mut uploads);
         #[cfg(feature = "editor")]
         self.egui.update_textures(uploads.rhi(), &mut uploads)?;
         uploads.submit()?;
