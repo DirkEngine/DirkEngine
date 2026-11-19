@@ -19,9 +19,7 @@ impl dirk_engine::EnginePlugin for WorldPlugin {
 
         builder.add_subsystem(|ctx| {
             let assets = ctx.resource::<AssetRegistry>()?;
-            ctx.extend_universe(
-                Universe::builder().with_component_system(ModelUploadSystem::new(assets)),
-            );
+            ctx.extend_universe(Universe::builder().with_system(ModelUploadSystem::new(assets)));
             Ok(WorldSubsystem)
         });
 
