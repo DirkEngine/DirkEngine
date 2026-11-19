@@ -116,6 +116,52 @@ fn dispatches_write_storage_buffers_and_images() -> Result<()> {
 }
 
 #[test]
+fn dispatches_reach_buffers_created_while_their_encoder_records() -> Result<()> {
+    with_rhi(|rhi| {
+        let count = compute_pipeline::<CountCs, Count>(rhi)?;
+        let first = readback(rhi, 256, BufferUsage::STORAGE)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("compute")?;
+        let push = |buffer: &Buffer, base| Count {
+            output: buffer.index().expect("storage buffers have an index"),
+            base,
+        };
+        encoder.dispatch(&count, &push(&first, 1), [1, 1, 1])?;
+        // Created between two dispatches of one encoder, and large enough to
+        // need memory of its own (on Metal, a heap of its own), which the
+        // second dispatch must still reach.
+        let second = readback(frame.rhi(), 80 << 20, BufferUsage::STORAGE)?;
+        encoder.dispatch(&count, &push(&second, 100), [1, 1, 1])?;
+        let written = [&first, &second].map(|buffer| BufferBarrier {
+            buffer,
+            before: BufferAccess::ShaderWrite(ShaderStages::COMPUTE),
+            after: BufferAccess::HostRead,
+            transfer: None,
+        });
+        // SAFETY: the dispatches wrote these buffers last.
+        unsafe { encoder.barrier(&written, &[])? };
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, Duration::from_secs(10))?;
+
+        for (buffer, base) in [(&first, 1), (&second, 100)] {
+            let mut values = [0_u32; 64];
+            // SAFETY: the dispatch writing the buffer completed, followed by
+            // a barrier to host reads.
+            unsafe { buffer.read(0, bytemuck::cast_slice_mut(&mut values))? };
+            assert!(
+                values
+                    .iter()
+                    .zip(base..)
+                    .all(|(&value, expected)| value == expected),
+                "the dispatch from {base} wrote {values:?}"
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn compute_pipelines_are_validated() -> Result<()> {
     with_rhi(|rhi| {
         let vertex = rhi.create_shader::<FillVs>()?;
