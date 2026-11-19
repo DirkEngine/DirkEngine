@@ -20,12 +20,6 @@ pub enum Error {
     /// The device renders to none of the depth formats scenes use.
     #[error("the device renders to no depth format scenes use")]
     NoDepthFormat,
-    /// A glTF material references an image that does not exist.
-    #[error("glTF image index {0} is out of range")]
-    TextureIndexOutOfRange(usize),
-    /// A glTF image has a pixel format the renderer does not read yet.
-    #[error("glTF image format {0:?} is not supported")]
-    UnsupportedImageFormat(gltf::image::Format),
     /// egui updated part of a texture it never set.
     #[cfg(feature = "editor")]
     #[error("egui updated part of texture {0:?}, which it never set")]
