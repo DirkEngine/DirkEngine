@@ -7,7 +7,7 @@ use dirk_shaders::bindless::heap;
 use parking_lot::Mutex;
 
 use super::{Check, Device, pipeline::PUSH_STAGES};
-use crate::{MAX_PUSH_DATA_SIZE, Result, ViewType};
+use crate::{MAX_PUSH_DATA_SIZE, Result};
 
 /// One array of the heap.
 struct Array {
@@ -371,20 +371,6 @@ impl Device {
                 &[self.heap.set],
                 &[],
             );
-        }
-    }
-}
-
-impl ViewType {
-    /// The heap arrays images viewed this way are sampled and stored through,
-    /// if any.
-    pub(super) const fn heap_bindings(self) -> (u32, Option<u32>) {
-        match self {
-            Self::D2 => (heap::TEXTURES_2D, Some(heap::STORAGE_IMAGES_2D)),
-            Self::D2Array => (heap::TEXTURES_2D_ARRAY, Some(heap::STORAGE_IMAGES_2D_ARRAY)),
-            Self::Cube => (heap::TEXTURES_CUBE, None),
-            Self::CubeArray => (heap::TEXTURES_CUBE_ARRAY, None),
-            Self::D3 => (heap::TEXTURES_3D, Some(heap::STORAGE_IMAGES_3D)),
         }
     }
 }

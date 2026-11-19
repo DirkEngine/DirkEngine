@@ -69,7 +69,10 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
             fs::read(&module).with_context(|| format!("reading the SPIR-V of `{entry_point}`"))?;
         let reflected = Reflected::new(&entry_point, &spirv)?;
         let (extension, code) = if metal {
-            ("metal", msl::translate(&entry_point, &spirv, reflected.stage)?.into_bytes())
+            (
+                "metal",
+                msl::translate(&entry_point, &spirv, reflected.stage)?.into_bytes(),
+            )
         } else {
             ("spv", spirv)
         };

@@ -728,6 +728,7 @@ dependencies = [
  "dirk_shaders",
  "gpu-allocator",
  "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
@@ -1819,6 +1820,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block2",
  "dispatch2",
+ "libc",
  "objc2",
 ]
 
