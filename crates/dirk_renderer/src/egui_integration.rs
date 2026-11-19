@@ -236,6 +236,9 @@ struct EguiTexture {
 struct EguiDraw {
     scissor: Rect,
     texture: TextureIndex,
+    /// Whether `texture` comes from a user texture id, which is only drawn
+    /// if it names a viewport the pass samples.
+    user: bool,
     sampler: SamplerIndex,
     indices: Range<u32>,
     base_vertex: i32,
@@ -407,7 +410,8 @@ impl EguiRenderer {
                             .map(|index| (index, texture.sampler))
                     })
                     .transpose()?,
-                // User textures are the bindless indices of views.
+                // User textures are the bindless indices of viewport outputs,
+                // checked when the pass records.
                 TextureId::User(slot) => u32::try_from(slot).ok().map(|slot| {
                     (
                         TextureIndex::new(slot),
@@ -421,6 +425,7 @@ impl EguiRenderer {
                 self.draws.push(EguiDraw {
                     scissor,
                     texture,
+                    user: matches!(mesh.texture_id, TextureId::User(_)),
                     sampler,
                     indices: index_offset..index_offset + index_count,
                     base_vertex: i32::try_from(vertex_offset).unwrap_or(i32::MAX),
@@ -435,7 +440,8 @@ impl EguiRenderer {
     /// Adds the pass drawing what [`prepare`](Self::prepare) set up for
     /// `frame` to `graph`, onto a new image of `extent` cleared to black,
     /// which it returns. The pass samples `viewports`, outputs `graph`
-    /// renders that user textures may show.
+    /// renders that user textures may show; meshes whose user texture names
+    /// none of them, such as a stale one, are skipped.
     pub fn record<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -455,15 +461,23 @@ impl EguiRenderer {
         });
         let vertices = self.vertices.get(frame);
         let indices = self.indices.get(frame);
+        let viewports: Vec<_> = viewports.into_iter().collect();
         viewports
-            .into_iter()
-            .fold(graph.pass("egui"), |pass, viewport| {
+            .iter()
+            .fold(graph.pass("egui"), |pass, &viewport| {
                 pass.sampled(viewport, ShaderStages::FRAGMENT)
             })
             .color(target, LoadOp::Clear([0.0, 0.0, 0.0, 1.0]))
             .record(move |pass| {
                 let vertices = vertices.storage()?;
+                let shown = viewports
+                    .iter()
+                    .map(|&viewport| pass.image(viewport)?.texture())
+                    .collect::<dirk_rhi::Result<Vec<_>>>()?;
                 for draw in &self.draws {
+                    if draw.user && !shown.contains(&draw.texture) {
+                        continue;
+                    }
                     pass.set_scissor(draw.scissor)?;
                     let push = EguiPush {
                         screen_size: self.screen_size,
