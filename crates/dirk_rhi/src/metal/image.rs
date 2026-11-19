@@ -86,7 +86,7 @@ impl Image {
             slots: [None; 2],
         };
         if let Some(view_type) = view {
-            image.slots = Self::fill_slots(device, desc, view_type, &image.raw)?;
+            image.slots = Self::fill_slots(device, desc, desc.usage, view_type, &image.raw)?;
         }
         for range in desc.subview_ranges() {
             let levels = NSRange::new(range.base_mip_level as usize, 1);
@@ -110,7 +110,8 @@ impl Image {
                 texture: texture.clone(),
                 slots: [None; 2],
             });
-            let slots = Self::fill_slots(device, desc, ViewType::D2, &texture)?;
+            let slots =
+                Self::fill_slots(device, desc, desc.subview_usage(), ViewType::D2, &texture)?;
             if let Some(subview) = image.subviews.last_mut() {
                 subview.slots = slots;
             }
@@ -118,22 +119,24 @@ impl Image {
         Ok(image)
     }
 
-    /// Adds `texture`, a view of type `view_type`, to the heap arrays the
-    /// usage of `desc` needs, returning its sampled and storage slots.
+    /// Adds `texture`, a view of type `view_type`, to the heap arrays
+    /// `usage`, part of the usage of `desc`, needs, returning its sampled and
+    /// storage slots.
     fn fill_slots(
         device: &Device,
         desc: &ImageDesc<'_>,
+        usage: ImageUsage,
         view_type: ViewType,
         texture: &ProtocolObject<dyn MTLTexture>,
     ) -> Result<[Option<Slot>; 2]> {
         let descriptor = Descriptor::Texture(texture);
         let mut slots = [None; 2];
-        for ((usage, binding), slot) in view_type
+        for ((needed, binding), slot) in view_type
             .heap_bindings(desc.format)
             .into_iter()
             .zip(&mut slots)
         {
-            if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
+            if let Some(binding) = binding.filter(|_| usage.contains(needed)) {
                 match device.add_to_heap(binding, &descriptor) {
                     Ok(added) => *slot = Some(added),
                     Err(error) => {

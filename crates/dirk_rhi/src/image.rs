@@ -469,6 +469,18 @@ impl ImageDesc<'_> {
         Error::invalid("image", self.label, reason)
     }
 
+    /// The usage giving each subview its heap slots: storage, for per-mip
+    /// writes, and sampled for color images, to sample one mip while
+    /// rendering the next. Depth subviews get no sampled slot: shaders
+    /// sample depth images, such as shadow maps, through their full view.
+    pub(crate) fn subview_usage(&self) -> ImageUsage {
+        if self.format.is_depth_stencil() {
+            self.usage.difference(ImageUsage::SAMPLED)
+        } else {
+            self.usage
+        }
+    }
+
     /// The range of each subview the image owns, layer by layer, mip by
     /// mip; none unless it is a 2D or cube image of several mips or layers
     /// with attachment or storage usage.

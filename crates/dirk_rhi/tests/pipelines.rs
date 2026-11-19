@@ -1125,6 +1125,32 @@ fn subviews_render_to_and_sample_single_mips_and_layers() -> Result<()> {
 }
 
 #[test]
+fn depth_subviews_take_no_sampled_slot() -> Result<()> {
+    with_rhi(|rhi| {
+        let cascades = rhi.create_image(&ImageDesc {
+            label: "cascades",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            format: Format::Depth32Float,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            mip_levels: 1,
+            array_layers: 2,
+            samples: SampleCount::X1,
+        })?;
+        let view = cascades.view().expect("sampled images have a view");
+        assert!(view.depth_index().is_some());
+        let cascade = cascades
+            .subview(at(0, 1))
+            .expect("depth images rendered per layer have subviews");
+        assert!(
+            cascade.depth_index().is_none(),
+            "shaders sample the full view"
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn heap_slots_are_reused_once_the_gpu_is_done() -> Result<()> {
     with_rhi(|rhi| {
         let frame = rhi.begin_frame()?;

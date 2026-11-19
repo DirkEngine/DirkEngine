@@ -42,8 +42,10 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   images get none. `image.view()` borrows it, so a view can never outlive its image without
   a second `Arc`. 2D and cube images of several mips or layers that are rendered to or
   stored (attachment or storage usage) also own a single-mip, single-layer 2D **subview**
-  of each mip and layer, created with the image, each with the heap slots its usage needs
-  (sampled, storage); `image.subview(Subresource { mip_level, layer })` borrows one, and
+  of each mip and layer, created with the image, each with the heap slots it needs: storage
+  with storage usage, for per-mip writes, and sampled with sampled usage for color images,
+  to sample one mip while rendering the next (shaders sample depth images, such as shadow
+  maps, through their full view, so depth subviews take no slot); `image.subview(Subresource { mip_level, layer })` borrows one, and
   returns the full view of a single-mip, single-layer image. Subviews are freed with
   their image, through the same deferred path. Sampled-only textures, such as mipped model
   textures, get none, so they cost no extra heap slots.

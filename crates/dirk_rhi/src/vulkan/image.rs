@@ -92,10 +92,10 @@ impl Image {
         device.name(raw, desc.label);
 
         if let Some(view_type) = view {
-            image.view = Some(image.create_view(desc, view_type, ImageRange::ALL)?);
+            image.view = Some(image.create_view(desc, desc.usage, view_type, ImageRange::ALL)?);
         }
         for range in desc.subview_ranges() {
-            let view = image.create_view(desc, ViewType::D2, range)?;
+            let view = image.create_view(desc, desc.subview_usage(), ViewType::D2, range)?;
             image.subviews.push(view);
         }
         Ok(image)
@@ -125,11 +125,12 @@ impl Image {
         Ok(image)
     }
 
-    /// Creates a view of `range` as `view_type`, in the heap arrays the
-    /// usage of `desc` needs.
+    /// Creates a view of `range` as `view_type`, in the heap arrays `usage`,
+    /// part of the usage of `desc`, needs.
     fn create_view(
         &self,
         desc: &ImageDesc<'_>,
+        usage: ImageUsage,
         view_type: ViewType,
         range: ImageRange,
     ) -> crate::Result<View> {
@@ -138,12 +139,12 @@ impl Image {
             raw,
             slots: [None; 2],
         };
-        for ((usage, binding), slot) in view_type
+        for ((needed, binding), slot) in view_type
             .heap_bindings(desc.format)
             .into_iter()
             .zip(&mut view.slots)
         {
-            if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
+            if let Some(binding) = binding.filter(|_| usage.contains(needed)) {
                 match self.device.add_to_heap(binding, Descriptor::Image(raw)) {
                     Ok(added) => *slot = Some(added),
                     Err(error) => {
