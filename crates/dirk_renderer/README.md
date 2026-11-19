@@ -27,7 +27,8 @@ decoded in hardware, and presentation encodes once for windows without an
 sRGB format. egui's sRGB-encoded, premultiplied colors are converted to linear
 ones before compositing.
 
-Debug builds enable the Vulkan validation layer when it is installed.
+Debug builds request the RHI's validation: the Vulkan validation layer when it
+is installed, or on Apple platforms Metal's, enabled with `MTL_DEBUG_LAYER=1`.
 
 Register `RendererPlugin` with an `EngineBuilder` to install the renderer
 subsystem and its universe integration. The plugin depends on
