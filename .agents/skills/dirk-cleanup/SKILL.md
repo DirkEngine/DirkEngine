@@ -54,29 +54,33 @@ cleanup pass starts or go into the area agents' tasks.
 ### Split
 
 Start from this split and adjust it to the code. Split an area over about
-10,000 lines of source and tests along a module boundary, and merge small
-areas. Every file has exactly one owner.
+10,000 lines of source and test code (`stats.py` by area) along a module
+boundary, and merge small areas. Every file has exactly one owner.
 
 | Area | Paths |
 | --- | --- |
 | Renderer | `crates/dirk_renderer` (with its `shaders`), `crates/dirk_shaders` |
-| Engine | `crates/dirk_engine`, `crates/dirk_threads`, `crates/dirk_utils`, `crates/dirk_build` |
-| ECS and events | `crates/dirk_universe`, `crates/dirk_events`, `crates/dirk_proc` |
-| Assets and gameplay | `crates/dirk_assets`, `crates/dirk_world`, `crates/dirk_player` |
-| Platform, input and editor | `crates/dirk_platform`, `crates/dirk_input`, `crates/dirk_editor` |
-| Binary and tooling | `src`, `build.rs`, the dot-directories and root files |
+| Core | `crates/dirk_engine`, `crates/dirk_universe`, `crates/dirk_events`, `crates/dirk_threads`, `crates/dirk_utils`, `crates/dirk_proc`, `crates/dirk_build` |
+| Features and tooling | the other crates, `src`, `build.rs`, the dot-directories and root files |
 
 A PR's title scope is its crate's name without `dirk_`, such as `renderer`,
-`cli` for `src`, and none for tooling. Nobody edits `assets` or `.agents`.
-`docs/`, the crate READMEs and the `AGENTS.md` files belong to the docs lane.
+or `dirkengine` for `src`. Tooling PRs are `ci:` or `chore:`. Nobody edits
+`assets` or `.agents`. `docs/`, the crate READMEs and the `AGENTS.md` files
+belong to the docs lane.
 Each area agent opens several focused PRs, on branches named
 `refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
 
+Open PRs hold their files too (`gh pr list`). Ask the owner before cleaning
+code that an open PR rewrites.
+
 Builds run in parallel on a machine with no swap. Pick one
 `CARGO_BUILD_JOBS` value for every agent that compiles, and pass it to each.
-Every worktree builds the whole workspace, shaders included: run `just build`
+Start from 4, which suited 8 implementers and their reviewers on 16 cores and
+58 GB in a piqueld pass. Every worktree builds the whole workspace, shaders included: run `just build`
 here first, so the rust-gpu backend is cached in `~/.cache/rust-gpu` before
-the agents start. Run at most 6 reviews at a time.
+the agents start. A new worktree runs `just build` (`t3.json`) without your
+`CARGO_BUILD_JOBS`, so start the agents two at a time. Run at most 4 reviews
+at a time.
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
 `refactor: cleanup pass, November 2026`. Each PR says `Part of #<n>`. Tell
@@ -93,9 +97,9 @@ other areas own, and `CARGO_BUILD_JOBS`.
 Start a docs lane the same way, on `docs/cleanup-pass-<YYYY-MM-DD>`. It
 checks `docs/`, the crate READMEs and the `AGENTS.md` files against the code,
 fixes the drift, runs `just doc` and `just doc-test` (each README is its
-crate's rustdoc), and opens a draft PR. It reports stale doc comments instead
-of editing them, since they sit in the area agents' files: send each to the
-agent that owns it.
+crate's rustdoc), and opens a draft PR. It reports stale doc comments and
+crates with no README instead of fixing them, since that means editing the
+area agents' files: send each to the agent that owns it.
 
 ### Review
 
@@ -134,8 +138,7 @@ delegate, `role: "research"`, to look at how the crates fit together:
 - `ash`, `winit` and `egui` types that leak past the crates that wrap them
 - public items that no other crate needs, and internals that leak across a
   boundary
-- types, conversions and helpers duplicated across crates, or between the
-  renderer and `dirk_shaders`
+- types, conversions and helpers duplicated across crates
 - features that bypass plugins and subsystems, and `editor` gating spread
   across crates
 - errors that lose their context at a crate boundary
@@ -158,8 +161,8 @@ and a fix PR:
 1. Check it against current `main`, with a Sol delegate when there are many.
    Merge duplicate reports, and ask the owner about anything that might be
    intended. A vulnerability stops here: tell the owner only, and open no
-   issue or PR. The repository has no `SECURITY.md`, but its private
-   vulnerability reporting is on.
+   issue or PR. There's no `SECURITY.md`; the owner can open a private
+   security advisory.
 2. Open a GitHub issue with the `bug` label, titled as `AGENTS.md` describes,
    or reuse the one that exists (`gh issue list --search`). Include the
    `file:line`, what goes wrong and how to reproduce it. If the existing issue

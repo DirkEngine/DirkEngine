@@ -28,16 +28,18 @@ with the conventions. Report bigger issues.
 
 ## Checks
 
-Export `CARGO_BUILD_JOBS` for every cargo command. While iterating, run what
-you changed, such as `just test -p <crate>`. Before you open each PR, run
-`just validate`, then what it and CI don't check:
+Export `CARGO_BUILD_JOBS` for every cargo command. Before you open each PR,
+run `just validate`, then what it and CI don't check:
 
-- If you touched code behind `editor` or `cli`, the mixed feature sets:
-  `cargo clippy --locked --all-targets --no-default-features --features <f>
-  -- -D warnings`, for each of the two.
+- If you touched `src`, the mixed feature sets: `cargo clippy --locked
+  --all-targets --no-default-features --features <f> -- -D warnings`, with
+  `editor` and with `cli`.
+- If you touched code behind `cfg(validation)`, which release builds leave
+  out, `cargo clippy --locked --release -p <crate> --all-features -- -D
+  warnings`.
 - If you touched `platform_macos` code, `cargo clippy --locked --target
-  aarch64-apple-darwin -p <crate> -- -D warnings`. Draft CI skips macOS, and
-  nothing checks Windows, Android or iOS: read that code carefully.
+  aarch64-apple-darwin -p <crate> --all-targets --all-features -- -D
+  warnings`. Draft CI skips macOS.
 - No test or CI job renders. If you changed how the renderer, the platform
   layer or the editor runs, say in the PR that it needs a `just run`.
 

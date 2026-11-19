@@ -5,7 +5,7 @@ Usage: python3 -I stats.py [REPO] [--json OUT]
 Prints a summary and, with --json, writes every per-file record and the
 history to OUT for charts. Cargo.lock is the lockfile, everything under assets/
 is an asset, and generated files are the ones .gitattributes marks
-linguist-generated (none yet). Rust lines are classified by a small lexer: a
+linguist-generated. The skills in .agents/ aren't counted. Rust lines are classified by a small lexer: a
 line is code, a doc comment (/// or //!), a plain comment or blank, and a line
 with code and a trailing comment counts as code. Test code is whole files under
 tests/, tests.rs files, modules declared behind #[cfg(test)], and inline
@@ -29,7 +29,8 @@ def git(*a):
 
 if git("rev-parse", "--is-shallow-repository").strip() == "true":
     print("warning: shallow clone, so the growth history starts at its boundary", file=sys.stderr)
-files = git("ls-files", "-z").split("\0")[:-1]
+SKILLS = (".agents/", ".claude/")
+files = [p for p in git("ls-files", "-z").split("\0")[:-1] if not p.startswith(SKILLS)]
 attrs = git("check-attr", "-z", "linguist-generated", "--", *files).split("\0")
 marked = {attrs[i] for i in range(0, len(attrs) - 2, 3) if attrs[i + 2] in ("set", "true")}
 LOCKFILES = {p for p in files if p == "Cargo.lock"}
@@ -150,10 +151,10 @@ rs = [p for p in files if p.endswith(".rs")]
 sources = {p: open(p, encoding="utf-8").read() for p in rs}
 whole_tests = test_files(rs, sources)
 FACTS = {
-    "unsafe": r"\bunsafe\s*(\{|fn\b|impl\b|trait\b)", "#[allow": r"#!?\[allow\(",
-    "#[expect": r"#!?\[expect\(", ".unwrap()": r"\.unwrap\(\)", ".expect(": r"\.expect\(",
-    "TODO/FIXME": r"\b(TODO|FIXME|XXX)\b",
+    "unsafe": r"\bunsafe\s*(\{|fn\b|impl\b|trait\b)",
+    "#[expect": r"(?<![.\w])expect\(", ".expect(": r"\.expect\(",
 }
+TODO = r"\b(TODO|FIXME|XXX)\b"
 facts = defaultdict(int)
 tests = defaultdict(int)
 long_inline = []
@@ -181,9 +182,12 @@ for p in files:
                 rec["blank"] += 1
         rec["lang"] = "Rust"
         if kind == "handwritten":
-            prod = "\n".join(l for i, l in enumerate(lines) if i not in tl)
+            # Code facts skip comment-only lines, so doc examples don't count.
+            prod = [(l, code[i]) for i, l in enumerate(lines) if i not in tl]
+            prod_code = "\n".join(l for l, c in prod if c)
             for k, rx in FACTS.items():
-                facts[k] += len(re.findall(rx, prod, re.M))
+                facts[k] += len(re.findall(rx, prod_code))
+            facts["TODO/FIXME"] += len(re.findall(TODO, "\n".join(l for l, _ in prod)))
             n = len(re.findall(r"#\[test\b", src))
             tests["integration" if "/tests/" in "/" + p and "/src/" not in p else "unit"] += n
             long_inline += [(b - a + 1, f"{p}:{a + 1}") for a, b in blocks if b - a + 1 > 30]
@@ -214,7 +218,7 @@ def hist_cat(p):
     if p == "Cargo.lock": return "lockfile"
     if p.startswith("assets/"): return "asset"
     if p.endswith(".md"): return "docs"
-    if p.endswith(".rs") and ("/tests/" in "/" + p or p.endswith("tests.rs")): return "test"
+    if p.endswith(".rs") and ("/tests/" in "/" + p or p.endswith("/tests.rs")): return "test"
     return "source"
 
 
@@ -229,7 +233,7 @@ for l in git("log", "--reverse", "--first-parent", "--no-renames", "--numstat",
         cur = {"sha": sha, "date": date, "subject": " ".join(subject)}
     elif l.strip():
         added, deleted, path = l.split("\t", 2)
-        if added != "-":
+        if added != "-" and not path.startswith(SKILLS):
             running[hist_cat(path)] += int(added) - int(deleted)
             cur.update(running)
 if cur: history.append(cur)
