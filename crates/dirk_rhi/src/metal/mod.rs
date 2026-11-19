@@ -4,9 +4,10 @@
 //! tracked, and render passes declare the heap's resources with
 //! `useResources` (which also makes them resident), so Metal orders every
 //! conflicting access on its own. Barriers therefore record nothing, and
-//! queue ownership transfers have no Metal equivalent. Both queues submit
-//! to one command queue, each with its own `MTLSharedEvent` timeline, so the
-//! device reports no dedicated copy queue.
+//! queue ownership transfers have no Metal equivalent. Each queue is a
+//! command queue with an `MTLSharedEvent` timeline; Metal's tracking stops at
+//! the queue, so work on another queue is ordered by waiting for its
+//! completion, as on Vulkan.
 
 mod blit;
 mod buffer;
