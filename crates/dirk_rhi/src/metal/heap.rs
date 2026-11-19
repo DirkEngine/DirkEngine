@@ -4,22 +4,20 @@
 //! bytes per element, then a pointer to one `u32` byte length per element,
 //! which shaders bound their storage buffer reads with.
 
-use std::{collections::VecDeque, ptr::NonNull};
+use std::collections::VecDeque;
 
 use dirk_shaders::bindless::heap::{self, CAPACITIES, first_element, metal::BUFFER_LENGTHS};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLDevice, MTLOrigin, MTLPixelFormat, MTLRenderCommandEncoder,
-    MTLRenderStages, MTLResource, MTLResourceID, MTLResourceOptions, MTLResourceUsage,
-    MTLSamplerState, MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage,
+    MTLDevice, MTLOrigin, MTLPixelFormat, MTLResource, MTLResourceID, MTLResourceOptions,
+    MTLSamplerState, MTLSize, MTLTexture, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
 };
 use parking_lot::Mutex;
 
-use super::{Check, Device, Object, Sampler};
-use crate::{Error, Result, SamplerDesc};
+use super::{Check, Device, Object, Sampler, allocator::Allocator};
+use crate::{Error, Memory, Result, SamplerDesc};
 
 /// A slot in one of the heap's arrays.
 #[derive(Clone, Copy, Debug)]
@@ -35,41 +33,7 @@ pub(super) enum Descriptor<'a> {
     Buffer(&'a ProtocolObject<dyn MTLBuffer>),
 }
 
-/// How shaders access the resources of an array: sampled textures are read,
-/// storage images and buffers read and written. Indexes `Slots::resident`.
-const fn usage(binding: u32) -> usize {
-    matches!(
-        binding,
-        heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D | heap::BUFFERS
-    ) as usize
-}
-
-/// Usages of `Slots::resident`, by index.
-const USAGES: [MTLResourceUsage; 2] = [
-    MTLResourceUsage::Read,
-    MTLResourceUsage(MTLResourceUsage::Read.0 | MTLResourceUsage::Write.0),
-];
-
-/// Resources render passes make resident, and track hazards on, with one
-/// `useResources` call.
-#[derive(Default)]
-struct Resident {
-    /// The resources, contiguous for `useResources`.
-    resources: Vec<NonNull<ProtocolObject<dyn MTLResource>>>,
-    /// The slot each resource fills; `None` for the heap's own resources.
-    owners: Vec<Option<Slot>>,
-}
-
-impl Resident {
-    /// Adds `resource`, filling `owner`, and returns its position.
-    fn push(&mut self, resource: &ProtocolObject<dyn MTLResource>, owner: Option<Slot>) -> usize {
-        self.resources.push(NonNull::from(resource));
-        self.owners.push(owner);
-        self.resources.len() - 1
-    }
-}
-
-/// Free slots of each array, and the resources render passes use.
+/// Free slots of each array.
 #[derive(Default)]
 struct Slots {
     /// Slots never used yet start here.
@@ -77,16 +41,7 @@ struct Slots {
     /// Slots freed since, reused first, oldest first, so a stale index
     /// reads the empty resource for as long as possible.
     free: [VecDeque<u32>; CAPACITIES.len()],
-    /// Resources of filled slots, by `usage`.
-    resident: [Resident; 2],
-    /// Where each filled slot's resource is in `resident`, by binding and
-    /// slot.
-    positions: [Vec<usize>; CAPACITIES.len()],
 }
-
-// SAFETY: the resident pointers are thread-safe Metal resources, kept alive
-// by the objects owning their slots until the slot is emptied, or by the heap.
-unsafe impl Send for Slots {}
 
 /// The heap's argument buffer and what fills its empty slots.
 pub(super) struct Heap {
@@ -99,23 +54,22 @@ pub(super) struct Heap {
     empty: Vec<Option<Object<dyn MTLTexture>>>,
     /// Fills empty sampler slots.
     default_sampler: Object<dyn MTLSamplerState>,
-    /// Locked to assign, write and empty slots and to make their resources
-    /// resident.
+    /// Locked to assign, write and empty slots.
     slots: Mutex<Slots>,
 }
 
 impl Heap {
     /// Creates the heap with every slot empty: zeroed textures of the
-    /// array's kind, the default sampler, or an empty buffer.
+    /// array's kind, the default sampler, or an empty buffer. Its resources
+    /// come from `allocator`, so encoders make them resident with the rest.
     pub(super) fn new(
         device: &ProtocolObject<dyn MTLDevice>,
+        allocator: &Allocator,
         queue: &ProtocolObject<dyn MTLCommandQueue>,
     ) -> Result<Self> {
-        let shared = MTLResourceOptions::StorageModeShared;
         let buffer = |elements: u32, size: usize| {
-            device
-                .newBufferWithLength_options(elements as usize * size, shared)
-                .check("newBufferWithLength")
+            allocator
+                .buffer(device, elements as usize * size, Memory::Upload)
                 .map(Object::from)
         };
         let arguments = buffer(BUFFER_LENGTHS + 1, 8)?;
@@ -123,24 +77,15 @@ impl Heap {
         let lengths = buffer(BUFFER_LENGTHS, 4)?;
         let empty = (0..)
             .zip(CAPACITIES)
-            .map(|(binding, _)| Self::empty_texture(device, binding))
+            .map(|(binding, _)| Self::empty_texture(device, allocator, binding))
             .collect::<Result<Vec<_>>>()?;
         Self::zero(queue, empty.iter().flatten())?;
-        let default_sampler = Sampler::create(device, &SamplerDesc::default())?;
-        let mut slots = Slots::default();
-        // The lengths and empty textures stay resident.
-        for (binding, texture) in (0..).zip(&empty) {
-            if let Some(texture) = texture {
-                slots.resident[usage(binding)].push(ProtocolObject::from_ref(&**texture), None);
-            }
-        }
-        slots.resident[0].push(ProtocolObject::from_ref(&*lengths), None);
         let heap = Self {
             arguments,
             lengths,
             empty,
-            default_sampler,
-            slots: Mutex::new(slots),
+            default_sampler: Sampler::create(device, &SamplerDesc::default())?,
+            slots: Mutex::default(),
         };
         // SAFETY: the element after the arrays holds the lengths' address.
         unsafe {
@@ -159,6 +104,7 @@ impl Heap {
     /// it holds samplers or buffers.
     fn empty_texture(
         device: &ProtocolObject<dyn MTLDevice>,
+        allocator: &Allocator,
         binding: u32,
     ) -> Result<Option<Object<dyn MTLTexture>>> {
         let texture_type = match binding {
@@ -188,11 +134,14 @@ impl Heap {
         } else {
             MTLPixelFormat::RGBA8Unorm
         });
-        desc.setStorageMode(MTLStorageMode::Private);
-        desc.setUsage(if usage(binding) == 0 {
-            MTLTextureUsage::ShaderRead
-        } else {
+        let storage = matches!(
+            binding,
+            heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D
+        );
+        desc.setUsage(if storage {
             MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite
+        } else {
+            MTLTextureUsage::ShaderRead
         });
         // SAFETY: a 1x1 texture with one mip and layer (one cube) is valid
         // for every type.
@@ -202,9 +151,8 @@ impl Heap {
             desc.setDepth(1);
             desc.setArrayLength(1);
         }
-        device
-            .newTextureWithDescriptor(&desc)
-            .check("newTextureWithDescriptor")
+        allocator
+            .texture(device, &desc)
             .map(|texture| Some(texture.into()))
     }
 
@@ -317,54 +265,6 @@ impl Heap {
                 .write(length);
         }
     }
-
-    /// Makes every resource in the heap resident for `encoder`'s pass, and
-    /// declares how its shaders access them so Metal tracks their hazards.
-    pub(super) fn use_resources(&self, encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
-        self.declare(|resources, count, usage| {
-            // SAFETY: `declare` passes live resources.
-            unsafe {
-                encoder.useResources_count_usage_stages(
-                    resources,
-                    count,
-                    usage,
-                    MTLRenderStages::Vertex | MTLRenderStages::Fragment,
-                );
-            }
-        });
-    }
-
-    /// Makes every resource in the heap resident for `encoder`'s
-    /// dispatches, like [`Heap::use_resources`].
-    pub(super) fn use_resources_for_compute(
-        &self,
-        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    ) {
-        self.declare(|resources, count, usage| {
-            // SAFETY: `declare` passes live resources.
-            unsafe { encoder.useResources_count_usage(resources, count, usage) };
-        });
-    }
-
-    /// Passes the heap's resources to `declare`, `count` at `resources`
-    /// with each usage, while the slot lock keeps them alive.
-    fn declare(
-        &self,
-        mut declare: impl FnMut(
-            NonNull<NonNull<ProtocolObject<dyn MTLResource>>>,
-            usize,
-            MTLResourceUsage,
-        ),
-    ) {
-        let slots = self.slots.lock();
-        for (resident, usage) in slots.resident.iter().zip(USAGES) {
-            declare(
-                NonNull::from(resident.resources.as_slice()).cast(),
-                resident.resources.len(),
-                usage,
-            );
-        }
-    }
 }
 
 impl Device {
@@ -389,17 +289,6 @@ impl Device {
         };
         let slot = Slot { binding, index };
         heap.write(slot, Some(descriptor));
-        let resource = match *descriptor {
-            Descriptor::Texture(texture) => ProtocolObject::from_ref(texture),
-            Descriptor::Buffer(buffer) => ProtocolObject::from_ref(buffer),
-            Descriptor::Sampler(_) => return Ok(slot),
-        };
-        let position = slots.resident[usage(binding)].push(resource, Some(slot));
-        let positions = &mut slots.positions[binding as usize];
-        if positions.len() <= index as usize {
-            positions.resize(index as usize + 1, 0);
-        }
-        positions[index as usize] = position;
         Ok(slot)
     }
 
@@ -409,15 +298,5 @@ impl Device {
         let mut slots = self.heap.slots.lock();
         self.heap.write(slot, None);
         slots.free[slot.binding as usize].push_back(slot.index);
-        if slot.binding == heap::SAMPLERS {
-            return;
-        }
-        let position = slots.positions[slot.binding as usize][slot.index as usize];
-        let resident = &mut slots.resident[usage(slot.binding)];
-        resident.resources.swap_remove(position);
-        resident.owners.swap_remove(position);
-        if let Some(Some(moved)) = resident.owners.get(position).copied() {
-            slots.positions[moved.binding as usize][moved.index as usize] = position;
-        }
     }
 }

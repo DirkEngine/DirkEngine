@@ -20,8 +20,7 @@ use crate::{
 // destruction.
 impl CommandBuffer {
     /// Begins rendering to the attachments of `desc`, which cover `extent`,
-    /// with viewport and scissor covering it too, and the heap's resources
-    /// resident.
+    /// with viewport and scissor covering it too.
     pub(crate) fn begin_rendering(
         &mut self,
         device: &Device,
@@ -85,7 +84,6 @@ impl CommandBuffer {
                 HEAP_BUFFER as usize,
             );
         }
-        device.heap.use_resources(encoder);
         #[expect(
             clippy::cast_precision_loss,
             reason = "image extents are far below f32's exact integer range"
@@ -183,7 +181,8 @@ impl CommandBuffer {
         self.indices = Some((buffer.raw.clone(), offset, format));
     }
 
-    pub(crate) fn draw(&mut self, _device: &Device, vertices: Range<u32>, instances: Range<u32>) {
+    pub(crate) fn draw(&mut self, device: &Device, vertices: Range<u32>, instances: Range<u32>) {
+        self.make_resident(device);
         // SAFETY: see the recording note above.
         unsafe {
             self.render()
@@ -199,11 +198,12 @@ impl CommandBuffer {
 
     pub(crate) fn draw_indexed(
         &mut self,
-        _device: &Device,
+        device: &Device,
         indices: Range<u32>,
         base_vertex: i32,
         instances: Range<u32>,
     ) {
+        self.make_resident(device);
         let (buffer, offset, format) = self
             .indices
             .as_ref()
@@ -233,11 +233,12 @@ impl CommandBuffer {
     /// multi-draw indirect.
     pub(crate) fn draw_indirect(
         &mut self,
-        _device: &Device,
+        device: &Device,
         buffer: &Buffer,
         offset: u64,
         count: u32,
     ) {
+        self.make_resident(device);
         for draw in 0..u64::from(count) {
             let offset = offset + draw * size_of::<DrawArguments>() as u64;
             // SAFETY: see the recording note above; the arguments fit the
@@ -256,11 +257,12 @@ impl CommandBuffer {
     /// Makes `count` indexed draws, one Metal draw each.
     pub(crate) fn draw_indexed_indirect(
         &mut self,
-        _device: &Device,
+        device: &Device,
         buffer: &Buffer,
         offset: u64,
         count: u32,
     ) {
+        self.make_resident(device);
         let (indices, index_offset, format) = self
             .indices
             .clone()

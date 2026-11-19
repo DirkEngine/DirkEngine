@@ -9,6 +9,7 @@
 //! the queue, so work on another queue is ordered by waiting for its
 //! completion, as on Vulkan.
 
+mod allocator;
 mod blit;
 mod buffer;
 mod command;

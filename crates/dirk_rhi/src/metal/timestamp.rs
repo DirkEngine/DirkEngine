@@ -3,13 +3,13 @@ use std::{ptr::NonNull, sync::Arc, time::Instant};
 use objc2::{rc::autoreleasepool, runtime::ProtocolObject};
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder,
+    MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer,
     MTLCommonCounterSetTimestamp, MTLCounterDontSample, MTLCounterErrorValue,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
-    MTLCounterSamplingPoint, MTLCounterSet, MTLDevice, MTLResourceOptions, MTLStorageMode,
+    MTLCounterSamplingPoint, MTLCounterSet, MTLDevice, MTLStorageMode,
 };
 
-use super::{Check, CommandBuffer, Device, Object, device::Garbage};
+use super::{Check, CommandBuffer, Device, Object, command::Encoder, device::Garbage};
 use crate::Result;
 
 /// How the device samples timestamps, and the clocks they are calibrated
@@ -27,34 +27,27 @@ pub(super) struct Clock {
 impl Clock {
     /// The timestamp clock of `device`, or `None` if it cannot sample
     /// timestamps between commands.
-    pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Option<Self>> {
+    pub(super) fn new(device: &ProtocolObject<dyn MTLDevice>) -> Option<Self> {
         // SAFETY: the counter set name is a constant string.
         let name = unsafe { MTLCommonCounterSetTimestamp };
         let Some(counters) = device
             .counterSets()
             .and_then(|sets| sets.iter().find(|set| &*set.name() == name))
         else {
-            return Ok(None);
+            return None;
         };
         let sampling = if device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary) {
-            let options = MTLResourceOptions::StorageModePrivate
-                | MTLResourceOptions::HazardTrackingModeUntracked;
-            let scratch = device
-                .newBufferWithLength_options(4, options)
-                .check("newBufferWithLength")?;
-            Sampling::StageBoundary {
-                scratch: scratch.into(),
-            }
+            Sampling::StageBoundary
         } else if device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary) {
             Sampling::BlitBoundary
         } else {
-            return Ok(None);
+            return None;
         };
-        Ok(Some(Self {
+        Some(Self {
             counters: counters.into(),
             sampling,
             origin: (Instant::now(), Self::gpu_time(device)),
-        }))
+        })
     }
 
     /// The GPU's clock now, in ticks.
@@ -84,9 +77,9 @@ impl Clock {
 /// Where a device samples timestamps.
 enum Sampling {
     /// At the start of encoders, as on Apple GPUs. Metal drops the samples
-    /// of encoders without commands, so sampling passes fill `scratch`, an
-    /// untracked buffer whose contents never matter.
-    StageBoundary { scratch: Object<dyn MTLBuffer> },
+    /// of encoders without commands, so sampling passes fill the device's
+    /// scratch buffer.
+    StageBoundary,
     /// Between blits.
     BlitBoundary,
 }
@@ -95,6 +88,7 @@ enum Sampling {
 pub(crate) struct Timestamps {
     device: Arc<Device>,
     raw: Object<dyn MTLCounterSampleBuffer>,
+    label: String,
     /// Nanoseconds per tick, measured when last read.
     period: f64,
 }
@@ -102,6 +96,20 @@ pub(crate) struct Timestamps {
 impl Timestamps {
     /// Creates `count` timestamps. The device supports timestamps.
     pub(crate) fn new(device: &Arc<Device>, count: u32, label: &str) -> Result<Self> {
+        Ok(Self {
+            device: device.clone(),
+            raw: Self::samples(device, count as usize, label)?,
+            label: label.to_owned(),
+            period: 1.0,
+        })
+    }
+
+    /// A counter sample buffer of `count` unwritten timestamps.
+    fn samples(
+        device: &Device,
+        count: usize,
+        label: &str,
+    ) -> Result<Object<dyn MTLCounterSampleBuffer>> {
         let clock = device
             .clock
             .as_ref()
@@ -112,21 +120,19 @@ impl Timestamps {
         desc.setLabel(&NSString::from_str(label));
         // SAFETY: Metal accepts any positive sample count up to its limit,
         // and reports larger ones as an error.
-        unsafe { desc.setSampleCount(count as usize) };
-        let raw = device
+        unsafe { desc.setSampleCount(count) };
+        device
             .raw
             .newCounterSampleBufferWithDescriptor_error(&desc)
-            .check("newCounterSampleBufferWithDescriptor")?;
-        Ok(Self {
-            device: device.clone(),
-            raw: raw.into(),
-            period: 1.0,
-        })
+            .check("newCounterSampleBufferWithDescriptor")
+            .map(Object::from)
     }
 
-    /// Reads every timestamp into `ticks`, and measures the tick period.
-    /// Unwritten ones, which Metal resolves to its error value, read as
-    /// `None`.
+    /// Reads every timestamp into `ticks` and measures the tick period,
+    /// then starts over with unwritten timestamps, since Metal cannot clear
+    /// samples and keeps those of encoders never submitted unwritten.
+    /// Unwritten ones, which Metal resolves to zero (Apple GPUs) or its
+    /// error value, read as `None`.
     ///
     /// No pending work may write them.
     pub(crate) fn read(&mut self, ticks: &mut [Option<u64>]) -> Result<()> {
@@ -138,16 +144,18 @@ impl Timestamps {
             .to_vec();
         let (results, _) = data.as_chunks::<{ size_of::<MTLCounterResultTimestamp>() }>();
         for (ticks, result) in ticks.iter_mut().zip(results) {
-            *ticks =
-                Some(u64::from_ne_bytes(*result)).filter(|&ticks| ticks != MTLCounterErrorValue);
+            *ticks = Some(u64::from_ne_bytes(*result))
+                .filter(|&ticks| ticks != 0 && ticks != MTLCounterErrorValue);
         }
         if let Some(clock) = &self.device.clock {
             self.period = clock.period(&self.device.raw);
         }
+        // No pending work uses the samples read, so they are released now.
+        self.raw = Self::samples(&self.device, ticks.len(), &self.label)?;
         Ok(())
     }
 
-    /// Nothing to reset: samples are overwritten.
+    /// Nothing to reset: reading starts over with unwritten timestamps.
     #[expect(
         clippy::unused_self,
         reason = "Vulkan resets queries before they are written again"
@@ -169,13 +177,12 @@ impl Drop for Timestamps {
 impl CommandBuffer {
     /// Writes timestamp `query` after the commands recorded before it: at
     /// the start of a blit pass filling the scratch buffer on GPUs sampling
-    /// at stage boundaries, or between blits on others. The scratch buffer
-    /// is untracked, so nothing orders that pass after earlier ones, which
-    /// may still run when it samples.
+    /// at stage boundaries, or between blits on others. Like any encoder,
+    /// the pass waits only for the encoders before the last barrier, so
+    /// earlier passes may still run when it samples.
     pub(crate) fn write_timestamp(&mut self, device: &Device, timestamps: &Timestamps, query: u32) {
         let sampling = device.clock.as_ref().map(|clock| &clock.sampling);
-        if let Some(Sampling::StageBoundary { scratch }) = sampling {
-            self.end_encoding();
+        if let Some(Sampling::StageBoundary) = sampling {
             let pass = MTLBlitPassDescriptor::new();
             // SAFETY: attachment zero always exists, and the sample index is
             // inside the buffer.
@@ -185,10 +192,17 @@ impl CommandBuffer {
                 attachment.setStartOfEncoderSampleIndex(query as usize);
                 attachment.setEndOfEncoderSampleIndex(MTLCounterDontSample);
             }
-            let encoder = autoreleasepool(|_| self.raw().blitCommandEncoderWithDescriptor(&pass))
-                .expect("Metal creates encoders for command buffers without an open one");
-            encoder.fillBuffer_range_value(scratch, NSRange::new(0, scratch.length()), 0);
-            encoder.endEncoding();
+            self.open(|commands| {
+                Encoder::Blit(
+                    commands
+                        .blitCommandEncoderWithDescriptor(&pass)
+                        .expect("Metal creates encoders for command buffers without an open one"),
+                )
+            });
+            let scratch = &device.scratch;
+            self.blit()
+                .fillBuffer_range_value(scratch, NSRange::new(0, scratch.length()), 0);
+            self.end_encoding();
         } else {
             // SAFETY: the sample index is inside the buffer.
             unsafe {

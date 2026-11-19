@@ -2,17 +2,15 @@
 
 use std::sync::Arc;
 
-use objc2::{MainThreadMarker, rc::autoreleasepool, runtime::ProtocolObject};
+use objc2::{MainThreadMarker, rc::autoreleasepool};
 use objc2_core_foundation::CGSize;
-use objc2_foundation::NSString;
-use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use raw_window_handle::RawWindowHandle;
 use raw_window_metal::Layer;
 
-use super::{Check, Device, Image, Object, device::Garbage};
+use super::{Device, Image, Object, device::Garbage};
 use crate::{
-    Error, Format, ImageUsage, PresentMode, QueueType, Result, SurfaceTarget, SwapchainDesc,
+    Error, Format, ImageUsage, PresentMode, Result, SurfaceTarget, SwapchainDesc,
     presentation::Acquired,
 };
 
@@ -236,26 +234,17 @@ impl Swapchain {
 }
 
 impl Device {
-    /// Presents the drawable each swapchain acquired once the work committed
-    /// before completes: one graphics command buffer presents them all,
-    /// after it. Size changes are found when acquiring, so this never asks
-    /// for recreation.
+    /// Presents the drawable each swapchain acquired once the graphics work
+    /// submitted before completes: one graphics command buffer presents them
+    /// all, after waiting for it. Size changes are found when acquiring, so
+    /// this never asks for recreation.
     pub(crate) fn present(&self, images: &mut [(&mut Swapchain, u32)]) -> Result<Vec<bool>> {
-        let commands = autoreleasepool(|_| {
-            self.queues[QueueType::Graphics as usize]
-                .raw
-                .commandBuffer()
-        })
-        .check("commandBuffer")?;
-        commands.setLabel(Some(&NSString::from_str("present")));
-        for (swapchain, _) in images.iter_mut() {
-            let drawable = swapchain
+        self.present_drawables(images.iter_mut().map(|(swapchain, _)| {
+            swapchain
                 .drawable
                 .take()
-                .expect("images are presented after being acquired");
-            commands.presentDrawable(ProtocolObject::from_ref(&*drawable));
-        }
-        commands.commit();
+                .expect("images are presented after being acquired")
+        }))?;
         Ok(vec![false; images.len()])
     }
 }
