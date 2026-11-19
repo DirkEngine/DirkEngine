@@ -14,6 +14,7 @@ pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
         return Ok(());
     };
     test(&mut rhi)?;
+    rhi.wait_idle()?;
     assert_eq!(
         rhi.validation_error_count(),
         0,

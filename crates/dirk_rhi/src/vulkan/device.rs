@@ -12,8 +12,22 @@ use super::{
     Check,
     adapter::{Adapter, RequiredFeatures},
     instance::Instance,
+    queue::Queue,
 };
-use crate::{Capabilities, Error, Features, Result, RhiCreateInfo};
+use crate::{
+    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo, graveyard::Graveyard,
+};
+
+/// A native object whose owner dropped it, destroyed once the GPU is done.
+pub(super) enum Garbage {
+    Buffer(vk::Buffer, Allocation),
+    Image {
+        raw: vk::Image,
+        view: Option<vk::ImageView>,
+        allocation: Allocation,
+    },
+    Sampler(vk::Sampler),
+}
 
 /// The logical device, shared by the RHI and every object created from it.
 pub(crate) struct Device {
@@ -26,6 +40,11 @@ pub(crate) struct Device {
     allocator: Mutex<ManuallyDrop<Allocator>>,
     /// Names objects for debugging tools when validation is enabled.
     debug: Option<debug_utils::Device>,
+    /// Indexed by `QueueType`.
+    pub(super) queues: [Queue; QueueType::COUNT],
+    /// The Vulkan queues submitted to, each locked while submitting.
+    pub(super) vk_queues: [Mutex<vk::Queue>; QueueType::COUNT],
+    graveyard: Graveyard<Garbage>,
     /// Destroyed after the device, which `Drop` destroys first.
     instance: Instance,
 }
@@ -73,15 +92,20 @@ impl Device {
             debug_settings: AllocatorDebugSettings::default(),
             buffer_device_address: false,
             allocation_sizes: AllocationSizes::default(),
-        });
-        let allocator = match allocator {
-            Ok(allocator) => allocator,
+        })
+        .map_err(|error| Error::native("creating the memory allocator", error))
+        .and_then(|allocator| Ok((allocator, Queue::create(&raw, adapter.families)?)));
+        let (allocator, queues) = match allocator {
+            Ok(parts) => parts,
             Err(error) => {
-                // SAFETY: nothing has been created from the device yet.
+                // SAFETY: nothing created from the device is left.
                 unsafe { raw.destroy_device(None) };
-                return Err(Error::native("creating the memory allocator", error));
+                return Err(error);
             }
         };
+        // SAFETY: both families were requested with one queue each.
+        let vk_queues = [adapter.families.graphics, adapter.families.copy]
+            .map(|family| Mutex::new(unsafe { raw.get_device_queue(family, 0) }));
         Ok(Self {
             capabilities,
             debug: instance
@@ -90,8 +114,58 @@ impl Device {
             raw,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
+            queues,
+            vk_queues,
+            graveyard: Graveyard::new(),
             instance,
         })
+    }
+
+    /// Keeps `garbage` until the work of the current frame completes.
+    pub(super) fn bury(&self, garbage: Garbage) {
+        self.graveyard.bury(garbage);
+    }
+
+    /// Tags objects dropped from now on with `frame`.
+    pub(crate) fn begin_frame(&self, frame: u64) {
+        self.graveyard.begin_frame(frame);
+    }
+
+    /// Destroys every object dropped by the end of frame `completed`, whose
+    /// work, and all work before it, has completed.
+    pub(crate) fn collect(&self, completed: u64) {
+        self.graveyard
+            .collect(completed, |garbage| self.destroy(garbage));
+    }
+
+    /// The queue family `queue` submits to.
+    pub(super) fn family(&self, queue: QueueType) -> u32 {
+        self.queues[queue as usize].family
+    }
+
+    /// Destroys `garbage`, which the GPU no longer uses.
+    fn destroy(&self, garbage: Garbage) {
+        // SAFETY: the graveyard only hands out objects whose work completed.
+        unsafe {
+            match garbage {
+                Garbage::Buffer(raw, allocation) => {
+                    self.raw.destroy_buffer(raw, None);
+                    self.free(allocation);
+                }
+                Garbage::Image {
+                    raw,
+                    view,
+                    allocation,
+                } => {
+                    if let Some(view) = view {
+                        self.raw.destroy_image_view(view, None);
+                    }
+                    self.raw.destroy_image(raw, None);
+                    self.free(allocation);
+                }
+                Garbage::Sampler(raw) => self.raw.destroy_sampler(raw, None),
+            }
+        }
     }
 
     /// Allocates memory for a resource labelled `label`.
@@ -153,6 +227,10 @@ impl Drop for Device {
         unsafe {
             if let Err(error) = self.raw.device_wait_idle() {
                 error!(%error, "failed to wait for the Vulkan device before destroying it");
+            }
+            self.collect(u64::MAX);
+            for queue in &self.queues {
+                queue.destroy(&self.raw);
             }
             // The allocator frees its memory through the device.
             ManuallyDrop::drop(self.allocator.get_mut());

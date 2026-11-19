@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use super::{Check, Device};
+use super::{Check, Device, device::Garbage};
 use crate::{AddressMode, Filter, Result, SamplerDesc};
 
 /// A Vulkan sampler.
@@ -42,15 +42,13 @@ impl Sampler {
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        // SAFETY: no submissions exist yet, so the GPU cannot be using the
-        // sampler.
-        unsafe { self.device.raw.destroy_sampler(self.raw, None) };
+        self.device.bury(Garbage::Sampler(self.raw));
     }
 }
 
 impl Filter {
     /// The equivalent Vulkan filter.
-    const fn vk(self) -> vk::Filter {
+    pub(super) const fn vk(self) -> vk::Filter {
         match self {
             Self::Nearest => vk::Filter::NEAREST,
             Self::Linear => vk::Filter::LINEAR,

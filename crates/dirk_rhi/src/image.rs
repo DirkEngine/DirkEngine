@@ -23,6 +23,78 @@ impl Extent3d {
             depth: 1,
         }
     }
+
+    /// The extent of mip `level`: halved per level, at least one texel.
+    #[must_use]
+    pub fn mip(self, level: u32) -> Self {
+        let shrink = |size: u32| size.checked_shr(level).unwrap_or(0).max(1);
+        Self {
+            width: shrink(self.width),
+            height: shrink(self.height),
+            depth: shrink(self.depth),
+        }
+    }
+}
+
+/// Position of a texel in an image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Origin3d {
+    /// Horizontal position.
+    pub x: u32,
+    /// Vertical position.
+    pub y: u32,
+    /// Depth position.
+    pub z: u32,
+}
+
+/// A box of texels in some layers of one mip level, copied or blitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImageRegion {
+    /// The mip level.
+    pub mip_level: u32,
+    /// First array layer.
+    pub base_layer: u32,
+    /// Number of array layers.
+    pub layer_count: u32,
+    /// Corner of the box.
+    pub origin: Origin3d,
+    /// Size of the box.
+    pub extent: Extent3d,
+}
+
+/// Mip levels and array layers of an image a barrier applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImageRange {
+    /// First mip level.
+    pub base_mip_level: u32,
+    /// Number of mip levels; [`ImageRange::REMAINING`] for the rest.
+    pub mip_level_count: u32,
+    /// First array layer.
+    pub base_layer: u32,
+    /// Number of array layers; [`ImageRange::REMAINING`] for the rest.
+    pub layer_count: u32,
+}
+
+impl ImageRange {
+    /// A count covering every remaining mip level or layer.
+    pub const REMAINING: u32 = u32::MAX;
+    /// Every mip level and layer.
+    pub const ALL: Self = Self {
+        base_mip_level: 0,
+        mip_level_count: Self::REMAINING,
+        base_layer: 0,
+        layer_count: Self::REMAINING,
+    };
+
+    /// Every layer of mip `level`.
+    #[must_use]
+    pub const fn mip(level: u32) -> Self {
+        Self {
+            base_mip_level: level,
+            mip_level_count: 1,
+            ..Self::ALL
+        }
+    }
 }
 
 /// Shape of an image.
@@ -127,8 +199,7 @@ const VIEW_USAGE: ImageUsage = ImageUsage::SAMPLED
 
 /// A GPU image. Destroyed, with its view, when dropped.
 pub struct Image {
-    #[expect(dead_code, reason = "read when copies are recorded")]
-    raw: native::Image,
+    pub(crate) raw: native::Image,
     info: ImageInfo,
     view: Option<ImageView>,
     label: Box<str>,
@@ -300,6 +371,94 @@ impl ImageDesc<'_> {
     /// Rejects this description.
     fn invalid(&self, reason: impl Into<String>) -> Error {
         Error::invalid("image", self.label, reason)
+    }
+}
+
+impl ImageInfo {
+    /// Every texel of mip `level`, in every layer.
+    #[must_use]
+    pub fn mip_region(&self, level: u32) -> ImageRegion {
+        ImageRegion {
+            mip_level: level,
+            base_layer: 0,
+            layer_count: self.array_layers,
+            origin: Origin3d::default(),
+            extent: self.extent.mip(level),
+        }
+    }
+
+    /// Why `region` is not inside this image, if it is not.
+    pub(crate) fn check_region(&self, region: &ImageRegion) -> Result<(), String> {
+        let ImageRegion {
+            mip_level,
+            base_layer,
+            layer_count,
+            origin,
+            extent,
+        } = *region;
+        if mip_level >= self.mip_levels {
+            return Err(format!(
+                "mip level {mip_level} is outside its {} levels",
+                self.mip_levels
+            ));
+        }
+        if layer_count == 0
+            || base_layer
+                .checked_add(layer_count)
+                .is_none_or(|end| end > self.array_layers)
+        {
+            return Err(format!(
+                "{layer_count} layers from layer {base_layer} are outside its {} layers",
+                self.array_layers
+            ));
+        }
+        let size = self.extent.mip(mip_level);
+        let fits = |origin: u32, length: u32, size: u32| {
+            length > 0 && origin.checked_add(length).is_some_and(|end| end <= size)
+        };
+        if !(fits(origin.x, extent.width, size.width)
+            && fits(origin.y, extent.height, size.height)
+            && fits(origin.z, extent.depth, size.depth))
+        {
+            return Err(format!(
+                "box {extent:?} at {origin:?} is empty or outside mip {mip_level}, which is {size:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// `range` with remaining counts resolved, or why it is outside this
+    /// image.
+    pub(crate) fn resolve(&self, range: ImageRange) -> Result<ImageRange, String> {
+        let resolve = |base: u32, count: u32, total: u32, what: &str| {
+            let count = if count == ImageRange::REMAINING {
+                total.saturating_sub(base)
+            } else {
+                count
+            };
+            if count == 0 || base.checked_add(count).is_none_or(|end| end > total) {
+                Err(format!(
+                    "{count} {what} from {base} are outside its {total}"
+                ))
+            } else {
+                Ok(count)
+            }
+        };
+        Ok(ImageRange {
+            mip_level_count: resolve(
+                range.base_mip_level,
+                range.mip_level_count,
+                self.mip_levels,
+                "mip levels",
+            )?,
+            layer_count: resolve(
+                range.base_layer,
+                range.layer_count,
+                self.array_layers,
+                "layers",
+            )?,
+            ..range
+        })
     }
 }
 

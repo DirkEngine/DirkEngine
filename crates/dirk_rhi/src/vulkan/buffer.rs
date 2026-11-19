@@ -3,12 +3,12 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 
-use super::{Check, Device};
+use super::{Check, Device, device::Garbage};
 use crate::{BufferDesc, BufferUsage, Memory, Result};
 
 /// A Vulkan buffer and its memory.
 pub(crate) struct Buffer {
-    device: Arc<Device>,
+    pub(super) device: Arc<Device>,
     pub(super) raw: vk::Buffer,
     allocation: Allocation,
 }
@@ -156,9 +156,10 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        // SAFETY: no submissions exist yet, so the GPU cannot be using the buffer.
-        unsafe { self.device.raw.destroy_buffer(self.raw, None) };
-        self.device.free(std::mem::take(&mut self.allocation));
+        self.device.bury(Garbage::Buffer(
+            self.raw,
+            std::mem::take(&mut self.allocation),
+        ));
     }
 }
 
