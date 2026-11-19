@@ -264,7 +264,7 @@ impl Renderer {
         let models = {
             let frame = rhi.begin_frame()?;
             let mut uploads = uploader.begin(&frame);
-            let models = models::ModelRegistry::new(frame.rhi(), &mut uploads, event_manager)?;
+            let models = models::ModelRegistry::new(&mut uploads, event_manager)?;
             uploads.submit()?;
             models
         };
@@ -430,7 +430,7 @@ impl Renderer {
 
         let frame = self.rhi.begin_frame()?;
         let mut uploads = self.uploader.begin(&frame);
-        self.models.update(&mut uploads)?;
+        self.models.update(frame.rhi(), &mut uploads)?;
         #[cfg(feature = "editor")]
         self.egui.update_textures(frame.rhi(), &mut uploads)?;
         uploads.submit()?;
