@@ -85,6 +85,14 @@ impl Format {
         }
     }
 
+    /// Alignment of buffer offsets in copies between buffers and images of
+    /// this format, in bytes: a multiple of four and of the texel size.
+    #[must_use]
+    pub const fn copy_offset_alignment(self) -> u64 {
+        let texel = self.bytes_per_texel() as u64;
+        if texel > 4 { texel } else { 4 }
+    }
+
     /// Whether this format has a stencil component.
     #[must_use]
     pub const fn has_stencil(self) -> bool {
