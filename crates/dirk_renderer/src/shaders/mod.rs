@@ -19,6 +19,8 @@ impl ShaderCode {
     fn create_module(&self, device: &ash::Device) -> crate::Result<ash::vk::ShaderModule> {
         let code = self.code_as_u32();
         let info = ash::vk::ShaderModuleCreateInfo::default().code(code.as_slice());
+        // SAFETY: `code` is SPIR-V compiled by the build script, and `info`
+        // and the word slice it points to outlive the call.
         Ok(unsafe { device.create_shader_module(&info, None)? })
     }
 

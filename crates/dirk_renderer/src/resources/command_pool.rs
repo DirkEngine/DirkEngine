@@ -23,6 +23,9 @@ pub struct Transfer;
 pub struct Compute;
 
 /// Wrapper for [`vk::CommandPool`].
+///
+/// Only the renderer thread allocates from, frees into or destroys a pool,
+/// which provides the external synchronization Vulkan requires.
 pub struct CommandPool<Type: Pool> {
     device: Device,
     /// The command pool
@@ -78,6 +81,8 @@ impl<Type: Pool> CommandPool<Type> {
             .flags(flags)
             .queue_family_index(index);
 
+        // SAFETY: `info` outlives the call and names a queue family the device
+        // was created with.
         let pool = unsafe { device.create_command_pool(&info, None)? };
 
         Ok(Self {
@@ -87,7 +92,13 @@ impl<Type: Pool> CommandPool<Type> {
             pool_type: PhantomData,
         })
     }
+    /// Destroys the pool and frees every buffer allocated from it.
+    ///
+    /// Called exactly once, from the owner's `Drop`, after the device idled
+    /// and the owner's [`CommandBuffer`]s were dropped.
     pub fn destroy(&self) {
+        // SAFETY: the pool was created from `self.device`. Callers uphold the
+        // contract above, so none of its buffers is pending execution.
         unsafe {
             self.device.destroy_command_pool(self.pool, None);
         }
@@ -107,6 +118,8 @@ impl<Type: Pool> CommandPool<Type> {
             .command_pool(self.pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
+        // SAFETY: `self.pool` is live and `allocate_info` outlives the call. On
+        // success Vulkan returns exactly `command_buffer_count` (1) buffers.
         let buff = unsafe { self.device.allocate_command_buffers(&allocate_info)?[0] };
 
         Ok(CommandBuffer {
@@ -129,6 +142,12 @@ impl<Type: Pool> CommandPool<Type> {
 }
 
 /// Wrapper for [`vk::CommandBuffer`].
+///
+/// Invariant: `buff` was allocated from `pool` on `device` and stays valid
+/// until `Drop` frees it, and only the renderer thread records it. The `cmd_*`
+/// wrappers forward their arguments unchecked, so callers in this crate record
+/// only between `begin_command_buffer` and `end_command_buffer` and pass live
+/// handles from the same device that outlive the submission.
 pub struct CommandBuffer {
     device: Device,
     /// The buffer
@@ -144,34 +163,42 @@ impl CommandBuffer {
         &self,
         begin_info: &vk::CommandBufferBeginInfo<'_>,
     ) -> VkResult<()> {
+        // SAFETY: see the `CommandBuffer` invariant. Callers begin a buffer
+        // once, right after `allocate_buffer`, so it is in the initial state.
         unsafe { self.device.begin_command_buffer(self.buff, begin_info) }
     }
     pub fn end_command_buffer(&self) -> VkResult<()> {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe { self.device.end_command_buffer(self.buff) }
     }
     pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: vk::Pipeline) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_bind_pipeline(self.buff, bind_point, pipeline);
         }
     }
     pub fn begin_rendering(&self, rendering_info: &vk::RenderingInfo<'_>) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_begin_rendering(self.buff, rendering_info);
         }
     }
     pub fn end_rendering(&self) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_end_rendering(self.buff);
         }
     }
     pub fn set_viewport(&self, first_viewport: u32, viewports: &[vk::Viewport]) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_set_viewport(self.buff, first_viewport, viewports);
         }
     }
     pub fn set_scissor(&self, first_scissor: u32, scissors: &[vk::Rect2D]) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_set_scissor(self.buff, first_scissor, scissors);
@@ -185,6 +212,7 @@ impl CommandBuffer {
         descriptor_sets: &[vk::DescriptorSet],
         dynamic_offsets: &[u32],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 self.buff,
@@ -202,6 +230,7 @@ impl CommandBuffer {
         buffers: &[vk::Buffer],
         offsets: &[vk::DeviceSize],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_bind_vertex_buffers(self.buff, first_binding, buffers, offsets);
@@ -213,6 +242,7 @@ impl CommandBuffer {
         offset: vk::DeviceSize,
         index_type: vk::IndexType,
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_bind_index_buffer(self.buff, buffer, offset, index_type);
@@ -226,6 +256,7 @@ impl CommandBuffer {
         vertex_offset: i32,
         first_instance: u32,
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_draw_indexed(
                 self.buff,
@@ -244,6 +275,7 @@ impl CommandBuffer {
         dst_image_layout: vk::ImageLayout,
         regions: &[vk::BufferImageCopy],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_copy_buffer_to_image(
                 self.buff,
@@ -263,6 +295,7 @@ impl CommandBuffer {
         buffer_memory_barriers: &[vk::BufferMemoryBarrier<'_>],
         image_memory_barriers: &[vk::ImageMemoryBarrier<'_>],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_pipeline_barrier(
                 self.buff,
@@ -284,6 +317,7 @@ impl CommandBuffer {
         regions: &[vk::ImageBlit],
         filter: vk::Filter,
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_blit_image(
                 self.buff,
@@ -311,6 +345,7 @@ impl CommandBuffer {
         dst_image_layout: vk::ImageLayout,
         regions: &[vk::ImageCopy],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device.cmd_copy_image(
                 self.buff,
@@ -328,12 +363,14 @@ impl CommandBuffer {
         dst_buffer: vk::Buffer,
         regions: &[vk::BufferCopy],
     ) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_copy_buffer(self.buff, src_buffer, dst_buffer, regions);
         }
     }
     pub fn pipeline_barrier2(&self, dependency_info: &vk::DependencyInfo<'_>) {
+        // SAFETY: see the `CommandBuffer` invariant.
         unsafe {
             self.device
                 .cmd_pipeline_barrier2(self.buff, dependency_info);
@@ -350,6 +387,7 @@ impl CommandBuffer {
     }
     pub fn end_and_submit(&self, queues: &Queues) -> VkResult<()> {
         let info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.buff));
+        // SAFETY: see the `CommandBuffer` invariant; `begin_single_time` began it.
         unsafe {
             self.device.end_command_buffer(self.buff)?;
         };
@@ -366,6 +404,9 @@ impl CommandBuffer {
 
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
+        // SAFETY: `buff` came from `pool` on this device and is freed once.
+        // Its owners drop it only after the fence of its submission signalled
+        // (or before it was ever submitted), so it is not pending execution.
         unsafe {
             self.device
                 .free_command_buffers(self.pool, std::slice::from_ref(&self.buff));

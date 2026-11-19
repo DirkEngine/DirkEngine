@@ -11,6 +11,7 @@ pub trait SetLayout {
     fn create_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout> {
         let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(Self::BINDINGS);
 
+        // SAFETY: `info` points at the static `BINDINGS`.
         Ok(unsafe { device.create_descriptor_set_layout(&info, None)? })
     }
 

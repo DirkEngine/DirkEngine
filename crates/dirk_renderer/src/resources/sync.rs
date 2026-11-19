@@ -14,6 +14,7 @@ impl Fence {
     /// Creates a fence with the supplied creation flags.
     pub fn create(device: &Device, flags: vk::FenceCreateFlags) -> VkResult<Self> {
         let info = vk::FenceCreateInfo::default().flags(flags);
+        // SAFETY: `info` is a valid create info that outlives the call.
         let raw = unsafe { device.create_fence(&info, None)? };
 
         Ok(Self {
@@ -44,6 +45,7 @@ impl Fence {
 
     /// Waits for this fence to become signaled.
     pub fn wait(&self, timeout: u64) -> VkResult<()> {
+        // SAFETY: `self.raw` was created from `self.device` and lives until `Drop`.
         unsafe {
             self.device
                 .wait_for_fences(std::slice::from_ref(&self.raw), true, timeout)
@@ -52,12 +54,18 @@ impl Fence {
 
     /// Resets this fence to the unsignaled state.
     pub fn reset(&self) -> VkResult<()> {
+        // SAFETY: `self.raw` was created from `self.device` and lives until
+        // `Drop`. Callers reset it only after waiting on it, so no pending
+        // submission still signals it.
         unsafe { self.device.reset_fences(std::slice::from_ref(&self.raw)) }
     }
 }
 
 impl Drop for Fence {
     fn drop(&mut self) {
+        // SAFETY: the fence was created from `self.device` and is destroyed
+        // once. Its owners wait on it (or on the idle device) before dropping
+        // it, so no pending submission still signals it.
         unsafe {
             self.device.destroy_fence(self.raw, None);
         }
@@ -77,6 +85,8 @@ impl TimelineSemaphore {
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(initial_value);
         let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+        // SAFETY: `info` and the `type_info` it chains outlive the call, and
+        // the device was created with the `timeline_semaphore` feature.
         let raw = unsafe { device.device.create_semaphore(&info, None)? };
 
         Ok(Self {
@@ -101,12 +111,15 @@ impl TimelineSemaphore {
         let info = vk::SemaphoreWaitInfo::default()
             .semaphores(&semaphores)
             .values(&values);
+        // SAFETY: `self.raw` is a live timeline semaphore from this device,
+        // and `info` and the arrays it points to outlive the call.
         unsafe { self.device.device.wait_semaphores(&info, timeout) }
     }
 
     /// Returns the current timeline counter value.
     #[expect(dead_code, reason = "Nothing reads a timeline value from the CPU yet.")]
     pub fn value(&self) -> VkResult<u64> {
+        // SAFETY: `self.raw` is a live timeline semaphore from this device.
         unsafe { self.device.device.get_semaphore_counter_value(self.raw) }
     }
 }

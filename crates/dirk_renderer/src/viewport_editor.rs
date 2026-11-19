@@ -425,6 +425,7 @@ fn create_sampler(device: &RenderDevice) -> Result<vk::Sampler> {
         .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
         .unnormalized_coordinates(false);
 
+    // SAFETY: `sampler_info` outlives the call and leaves anisotropy disabled.
     Ok(unsafe { device.device.create_sampler(&sampler_info, None)? })
 }
 

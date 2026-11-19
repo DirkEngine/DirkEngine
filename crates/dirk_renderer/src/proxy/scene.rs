@@ -155,6 +155,8 @@ impl SceneManager {
             };
 
             let scene_ubo = SceneUbo { view, proj };
+            // SAFETY: the buffer is `size_of::<SceneUbo>()` bytes, and this
+            // runs after `end_frame` waited on this frame slot's fence.
             unsafe { scene.ubo[frame].write(&scene_ubo) };
         };
 
@@ -361,6 +363,9 @@ impl SceneProxy {
         if let Some(mat) = mat {
             let proxy_ubo = ProxyUbo { model: mat };
             for ubo in &self.ubo {
+                // SAFETY: the buffer is `size_of::<ProxyUbo>()` bytes. Not
+                // guaranteed: the other frame slot's buffer may still be read
+                // by a submission in flight.
                 unsafe { ubo.write(&proxy_ubo) };
             }
         }
@@ -374,6 +379,8 @@ impl SceneProxy {
         };
 
         let data = ProxyUbo { model };
+        // SAFETY: the buffer is `size_of::<ProxyUbo>()` bytes, and this runs
+        // while recording, after `end_frame` waited on this frame slot's fence.
         unsafe { self.ubo[frame].write(&data) };
     }
 }

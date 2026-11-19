@@ -132,8 +132,10 @@ mod debug;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const DEVICE_EXTENSIONS: &[&str] = &[
+    // SAFETY: Vulkan extension names are ASCII.
     unsafe { std::str::from_utf8_unchecked(swapchain::NAME.to_bytes()) },
     #[cfg(platform_macos)]
+    // SAFETY: Vulkan extension names are ASCII.
     unsafe {
         std::str::from_utf8_unchecked(ash::khr::portability_subset::NAME.to_bytes())
     },
@@ -283,6 +285,9 @@ impl Renderer {
     ) -> Result<Self> {
         info!("Intializing Vulkan...");
 
+        // SAFETY: this loads the system's Vulkan loader, trusted to be a
+        // conforming implementation. `entry` lives in `RenderDevice`, so the
+        // library stays loaded until the instance is destroyed.
         let entry = unsafe { Entry::load()? };
 
         let app_info = vk::ApplicationInfo::default()
@@ -319,6 +324,9 @@ impl Renderer {
         Self::validate_instance_extensions(&entry, &extensions)?;
         instance_create_info = instance_create_info.enabled_extension_names(&extensions);
 
+        // SAFETY: `instance_create_info` and everything it points to (app
+        // info, layer and extension names, chained messenger info) outlive the
+        // call, and the layers and extensions were checked to be available.
         let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
 
         #[cfg(validation)]
@@ -1018,6 +1026,7 @@ impl Renderer {
         }
     }
     fn create_sampler(device: &RenderDevice, mip_levels: u32) -> Result<vk::Sampler> {
+        // SAFETY: `physical_device` was enumerated from this instance.
         let props = unsafe {
             device
                 .instance
@@ -1045,6 +1054,9 @@ impl Renderer {
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false);
 
+        // SAFETY: `sampler_info` outlives the call. Anisotropy is enabled, so
+        // the device must have `sampler_anisotropy`: `create_device` enables
+        // it (creation fails otherwise), and `max_aniso` is the device limit.
         Ok(unsafe { device.device.create_sampler(&sampler_info, None)? })
     }
 
@@ -1063,6 +1075,7 @@ impl Renderer {
     }
 
     fn validate_instance_extensions(entry: &Entry, extensions: &[*const i8]) -> Result<()> {
+        // SAFETY: `entry` holds the loaded Vulkan library.
         let available = unsafe {
             entry
                 .enumerate_instance_extension_properties(None)
@@ -1070,9 +1083,13 @@ impl Renderer {
         };
 
         for &required in extensions {
+            // SAFETY: the names come from `ash_window` and ash's extension
+            // constants, all static NUL-terminated strings.
             let required = unsafe { CStr::from_ptr(required) };
             let found = available
                 .iter()
+                // SAFETY: Vulkan fills `extension_name` with a NUL-terminated
+                // string within the array.
                 .any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) } == required);
 
             if !found {
@@ -1088,6 +1105,8 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        // SAFETY: the device is live, and the renderer thread, the only one
+        // touching its queues, is the one running this.
         unsafe {
             self.render_device.device.device_wait_idle().ok();
         }

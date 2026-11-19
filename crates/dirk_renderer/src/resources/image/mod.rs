@@ -56,7 +56,9 @@ impl Image {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
+        // SAFETY: `image_info` outlives the call.
         let image = unsafe { device.device.create_image(&image_info, None)? };
+        // SAFETY: `image` was just created from this device.
         let requirements = unsafe { device.device.get_image_memory_requirements(image) };
 
         let allocation = device.allocate(&AllocationCreateDesc {
@@ -67,6 +69,9 @@ impl Image {
             allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
         })?;
 
+        // SAFETY: `image` has no memory bound yet, and `allocation` was made
+        // from this device for `requirements`, so its memory type, size and
+        // offset alignment suit the image.
         unsafe {
             device
                 .device
@@ -121,6 +126,9 @@ impl Image {
             MemoryLocation::CpuToGpu,
         )?;
 
+        // SAFETY: the staging buffer is mapped, `pixels.len()` bytes long and
+        // freshly created, so nothing else reads or writes it. The copy is
+        // bytewise, so alignment does not matter.
         unsafe {
             #[expect(clippy::expect_used, reason = "CpuToGpu memory is always mapped.")]
             let ptr = staging_buf
@@ -190,6 +198,9 @@ impl Image {
             vk::ImageAspectFlags::COLOR,
             mip_levels,
         )?;
+        // SAFETY: `old_view` was created from this device and never recorded
+        // into a command buffer (the upload uses the image, not the view), and
+        // `end_and_submit` waited for the upload to finish.
         unsafe {
             device.device.destroy_image_view(old_view, None);
         }
@@ -222,6 +233,9 @@ impl Image {
                 layer_count: 1,
             });
 
+        // SAFETY: `image` is a live image from this device, created with
+        // `format` and at least `mip_levels` levels, and `create_info` outlives
+        // the call.
         Ok(unsafe { device.device.create_image_view(&create_info, None)? })
     }
 }

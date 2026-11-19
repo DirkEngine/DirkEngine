@@ -180,6 +180,10 @@ impl Drop for RenderDeviceInner {
         self.deletion_queue.lock().flush_all(self);
         drop(self.allocator.take());
 
+        // SAFETY: this is the last handle to the device. `Renderer::drop`
+        // waited for it to idle, and every child object (pools, garbage,
+        // allocations) is destroyed above. The messenger and every surface are
+        // destroyed before the instance that created them.
         unsafe {
             self.device.destroy_device(None);
             #[cfg(validation)]
@@ -272,6 +276,12 @@ impl Garbage {
     )]
     fn destroy(self, render_device: &RenderDeviceInner) {
         let device = &render_device.device;
+        // SAFETY: each handle was created from this device (or its instance),
+        // and its owner enqueued it once from `Drop` and stopped using it.
+        // `flush` destroys it 2 × MAX_FRAMES_IN_FLIGHT frames later, once the
+        // frame fences have retired every submission that could reference it;
+        // `flush_all` runs from `RenderDeviceInner::drop`, after the device
+        // idled. Descriptor pools are created with `FREE_DESCRIPTOR_SET`.
         unsafe {
             match self {
                 Self::Allocation(allocation) => render_device

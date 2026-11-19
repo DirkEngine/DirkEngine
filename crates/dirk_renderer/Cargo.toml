@@ -76,5 +76,7 @@ dbg_macro = "warn"
 # Every exception names its lint with `#[expect]` and says why.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
+# Every unsafe block says why it is sound.
+undocumented_unsafe_blocks = "warn"
 # Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
 self_named_module_files = "warn"

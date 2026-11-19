@@ -23,6 +23,8 @@ impl Renderer {
         let (loader, surface) = Self::create_surface(entry, instance, window)?;
         let selection = Self::query_physical_device(instance, &loader, surface);
 
+        // SAFETY: `surface` was created above from this instance, only used
+        // for the queries, and no swapchain was made from it.
         unsafe { loader.destroy_surface(surface, None) };
 
         selection
@@ -33,6 +35,9 @@ impl Renderer {
         instance: &ash::Instance,
         window: &dirk_platform::Window,
     ) -> Result<(surface::Instance, vk::SurfaceKHR)> {
+        // SAFETY: the display and window handles come from a live platform
+        // window, and the instance enables the extensions
+        // `ash_window::enumerate_required_extensions` asked for.
         let surface = unsafe {
             ash_window::create_surface(
                 entry,
@@ -88,6 +93,7 @@ impl Renderer {
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
     ) -> Result<vk::SurfaceFormatKHR> {
+        // SAFETY: `physical_device` and `surface` come from the same live instance.
         let formats = unsafe {
             surface_loader.get_physical_device_surface_formats(physical_device, surface)?
         };
@@ -116,6 +122,7 @@ impl Renderer {
         candidates
             .iter()
             .find(|&&format| {
+                // SAFETY: `physical_device` was enumerated from `instance`.
                 let properties = unsafe {
                     instance.get_physical_device_format_properties(physical_device, format)
                 };
@@ -156,6 +163,7 @@ impl Renderer {
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
     ) -> Result<vk::PresentModeKHR> {
+        // SAFETY: `physical_device` and `surface` come from the same live instance.
         let modes = unsafe {
             surface_loader.get_physical_device_surface_present_modes(physical_device, surface)?
         };
@@ -212,6 +220,13 @@ impl Renderer {
             .push_next(&mut vulkan12_features)
             .push_next(&mut vulkan13_features);
 
+        // SAFETY: `device_create_info` and everything it points to live until
+        // the end of this function. Each extension name points into one of the
+        // static `CStr`s behind `DEVICE_EXTENSIONS`, so it is NUL-terminated.
+        // `select_physical_device` checked those extensions are supported; an
+        // unsupported feature makes the call fail with `ERROR_FEATURE_NOT_PRESENT`.
+        // Not checked: that the device supports Vulkan 1.3, whose feature
+        // struct is chained here.
         Ok(unsafe { instance.create_device(physical_device, &device_create_info, None)? })
     }
 

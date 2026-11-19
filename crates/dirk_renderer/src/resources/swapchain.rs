@@ -118,6 +118,12 @@ impl Swapchain {
         let (render_finished_semaphore, image_available_semaphore) =
             self.semaphores[self.semaphore_index];
 
+        // SAFETY: `self.raw` is this device's live swapchain and the semaphore
+        // comes from the same device. With one pair per image and at most
+        // MAX_FRAMES_IN_FLIGHT frames in flight, the submission that last
+        // waited on this semaphore has retired, so it is unsignalled. Not
+        // guaranteed: a suboptimal acquire returns an error and leaves the
+        // semaphore signalled with no waiter.
         let (image_index, suboptimal) = unsafe {
             self.device.swapchain_loader.acquire_next_image(
                 self.raw,
@@ -177,6 +183,8 @@ impl Swapchain {
         window_size: vk::Extent2D,
         old_swapchain: vk::SwapchainKHR,
     ) -> Result<(vk::SwapchainKHR, vk::Extent2D, Vec<SwapchainImage>)> {
+        // SAFETY: `surface` is a live surface from this device's instance and
+        // the physical device supports presenting to it.
         let capabilities = unsafe {
             device
                 .surface_loader
@@ -238,11 +246,16 @@ impl Swapchain {
             .clipped(true)
             .old_swapchain(old_swapchain);
 
+        // SAFETY: `create_info` and the queue family slice it points to outlive
+        // the call. Format, colour space, present mode, extent, image count and
+        // usage come from the surface's reported support, and `old_swapchain`
+        // is null or this surface's current swapchain.
         let swapchain = unsafe {
             device
                 .swapchain_loader
                 .create_swapchain(&create_info, None)?
         };
+        // SAFETY: `swapchain` was just created from this device.
         let images = unsafe { device.swapchain_loader.get_swapchain_images(swapchain)? };
 
         let swapchain_images = match images
@@ -270,6 +283,7 @@ impl Swapchain {
         let mut semaphores = Vec::with_capacity(count);
 
         for _ in 0..count {
+            // SAFETY: `semaphore_info` outlives the call.
             let render_finished =
                 match unsafe { device.device.create_semaphore(&semaphore_info, None) } {
                     Ok(semaphore) => semaphore,
@@ -279,6 +293,7 @@ impl Swapchain {
                     }
                 };
 
+            // SAFETY: `semaphore_info` outlives the call.
             let image_available =
                 match unsafe { device.device.create_semaphore(&semaphore_info, None) } {
                     Ok(semaphore) => semaphore,
@@ -354,6 +369,8 @@ impl SwapchainImage {
         Ok(Self {
             device: device.clone(),
             image,
+            // SAFETY: `image` belongs to a live swapchain created with `format`,
+            // and `create_info` outlives the call.
             view: unsafe { device.device.create_image_view(&create_info, None)? },
         })
     }

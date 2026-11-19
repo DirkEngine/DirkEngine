@@ -56,7 +56,9 @@ impl<Type: BuffType> Buffer<Type> {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
+        // SAFETY: `buffer_info` outlives the call.
         let buffer = unsafe { device.device.create_buffer(&buffer_info, None)? };
+        // SAFETY: `buffer` was just created from this device.
         let requirements = unsafe { device.device.get_buffer_memory_requirements(buffer) };
 
         let allocation = device.allocate(&AllocationCreateDesc {
@@ -67,6 +69,9 @@ impl<Type: BuffType> Buffer<Type> {
             allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
         })?;
 
+        // SAFETY: `buffer` has no memory bound yet, and `allocation` was made
+        // from this device for `requirements`, so its memory type, size and
+        // offset alignment suit the buffer.
         unsafe {
             device
                 .device
@@ -110,6 +115,11 @@ impl<Type: BuffType> Buffer<Type> {
             MemoryLocation::CpuToGpu,
         )?;
 
+        // SAFETY: the staging buffer is mapped, at least `size_of_val(data)`
+        // bytes long and freshly created, so nothing else reads or writes it.
+        // The mapping starts at a suballocation offset aligned to the buffer's
+        // requirements, which in practice covers `align_of::<T>()` for the
+        // vertex and index types uploaded here.
         unsafe {
             #[expect(clippy::expect_used, reason = "CpuToGpu memory is always mapped.")]
             let ptr = staging_buf
@@ -163,9 +173,14 @@ impl UniformBuffer {
     /// Copies `data` into the persistently-mapped host-visible memory.
     ///
     /// # Safety
-    /// The mapped pointer must be valid and the allocation must cover at least
-    /// `size_of::<T>()` bytes — both invariants are guaranteed by every
-    /// `UboData` constructed in this module.
+    ///
+    /// The buffer must be at least `size_of::<T>()` bytes long, and no
+    /// submission still pending on the GPU may read it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer is not host visible. Uniform buffers are created
+    /// with `MemoryLocation::CpuToGpu`, which is always mapped.
     pub unsafe fn write<T: Copy>(&self, data: &T) {
         #[expect(
             clippy::expect_used,
@@ -176,6 +191,10 @@ impl UniformBuffer {
             .expect("UBO allocation must be host-visible")
             .as_ptr()
             .cast::<u8>();
+        // SAFETY: the mapping is valid for the buffer's size, which the caller
+        // guarantees covers `size_of::<T>()` bytes, and the caller guarantees
+        // the GPU is not reading it. The copy is bytewise, so alignment does
+        // not matter, and `data` cannot overlap device memory.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 std::ptr::from_ref::<T>(data).cast::<u8>(),

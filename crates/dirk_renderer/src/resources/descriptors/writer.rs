@@ -143,6 +143,10 @@ impl<'dev> DescriptorWriter<'dev> {
             })
             .collect::<Vec<_>>();
 
+        // SAFETY: each write points at one entry of `buffer_infos` or
+        // `image_infos`, which outlive the call, and its descriptor type
+        // matches the layout binding (asserted in debug builds). Every caller
+        // writes sets it has just allocated, which no command buffer uses yet.
         unsafe {
             self.device.update_descriptor_sets(&writes, &[]);
         }
