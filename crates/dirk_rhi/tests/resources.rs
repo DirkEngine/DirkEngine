@@ -281,6 +281,12 @@ fn multisampled_attachments_are_created() -> Result<()> {
             ..image_2d(Format::Rgba8Unorm, ImageUsage::COLOR_ATTACHMENT)
         })?;
         assert_eq!(image.info().samples, SampleCount::X4);
+        let layered = rhi.create_image(&ImageDesc {
+            samples: SampleCount::X4,
+            array_layers: 2,
+            ..image_2d(Format::Rgba8Unorm, ImageUsage::COLOR_ATTACHMENT)
+        });
+        assert_invalid(layered, "image", "single-layer");
         Ok(())
     })
 }

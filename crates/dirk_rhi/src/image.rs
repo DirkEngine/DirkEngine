@@ -186,7 +186,8 @@ pub struct ImageDesc<'a> {
     pub mip_levels: u32,
     /// Number of array layers; a multiple of six for cube images.
     pub array_layers: u32,
-    /// Samples per texel.
+    /// Samples per texel. Multisampled images are single-mip, single-layer
+    /// 2D attachments, never sampled or storage.
     pub samples: SampleCount,
 }
 
@@ -444,12 +445,14 @@ impl ImageDesc<'_> {
         if self.samples != SampleCount::X1
             && (self.dimension != ImageDimension::D2
                 || self.mip_levels != 1
+                || self.array_layers != 1
                 || self
                     .usage
                     .intersects(ImageUsage::SAMPLED | ImageUsage::STORAGE))
         {
             return Err(self.invalid(
-                "multisampled images are single-mip 2D attachments, never sampled or storage",
+                "multisampled images are single-mip, single-layer 2D attachments, never sampled \
+                 or storage",
             ));
         }
         if self.format.has_stencil() && self.usage.contains(ImageUsage::SAMPLED) {
