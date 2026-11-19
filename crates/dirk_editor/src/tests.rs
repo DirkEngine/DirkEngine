@@ -87,7 +87,9 @@ fn editor_palette_converts_to_editor_style() {
 fn builtin_editor_subsystem_registers_expected_default_capabilities() -> anyhow::Result<()> {
     let services = crate::EditorServices::new();
     let handle = test_handle();
-    let universe = dirk_universe::Universe::builder().build();
+    let universe = dirk_universe::Universe::builder()
+        .build()
+        .expect("empty universe should schedule");
     let mut subsystem = crate::BuiltinEditorSubsystem;
 
     subsystem.start(&handle, &services)?;

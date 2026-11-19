@@ -1,10 +1,10 @@
-//! Systems run in registration order, once per tick.
+//! Systems run once per tick, ordered by the data they declare; see
+//! [`schedule`](crate::schedule).
 //!
 //! Functions and stateful [`System`] implementations declare the data they
 //! receive. The universe fetches those parameters before each run.
 
 use std::{
-    any::type_name,
     cell::{RefCell, RefMut},
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -13,7 +13,8 @@ use std::{
 use crate::{
     CommandBuffer, Universe,
     macros::sealed::Sealed,
-    query::{Join, Query, QueryAccess, QueryData, filter::QueryFilter},
+    query::{Join, Query, QueryData, filter::QueryFilter},
+    schedule::{Access, SystemConfig, SystemId},
 };
 
 /// Everything a system parameter can be fetched from during one run.
@@ -37,7 +38,7 @@ pub trait SystemParam: Sealed {
 
     /// Registers this parameter's accesses before the system runs.
     #[doc(hidden)]
-    fn register_access(access: &mut QueryAccess);
+    fn register_access(access: &mut Access);
 }
 
 impl SystemParam for () {
@@ -45,7 +46,7 @@ impl SystemParam for () {
 
     fn fetch<'u>(_: &SystemContext<'u>) -> Self::Item<'u> {}
 
-    fn register_access(_: &mut QueryAccess) {}
+    fn register_access(_: &mut Access) {}
 }
 
 macro_rules! impl_system_param_for_tuple {
@@ -57,7 +58,7 @@ macro_rules! impl_system_param_for_tuple {
                 ($($ty::fetch(context),)+)
             }
 
-            fn register_access(access: &mut QueryAccess) {
+            fn register_access(access: &mut Access) {
                 $($ty::register_access(access);)+
             }
         }
@@ -76,8 +77,9 @@ where
         Query::new(context.universe, context.last_run)
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         D::register_access(access);
+        F::register_access(access);
     }
 }
 
@@ -111,7 +113,7 @@ impl SystemParam for Commands<'_> {
         }
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         access.commands();
     }
 }
@@ -128,7 +130,7 @@ impl SystemParam for DeltaTime {
         Self(context.delta_time)
     }
 
-    fn register_access(_: &mut QueryAccess) {}
+    fn register_access(_: &mut Access) {}
 }
 
 /// A stateful system. `Params` names its inputs once, with `'u` standing for
@@ -157,13 +159,35 @@ pub trait System: 'static {
     /// The parameters fetched for each run.
     type Params<'u>: SystemParam<Item<'u> = Self::Params<'u>>;
 
-    /// Returns the type name for diagnostics.
-    fn name(&self) -> &'static str {
-        type_name::<Self>()
-    }
-
     /// Runs once with the fetched parameters.
     fn run(&mut self, params: Self::Params<'_>);
+
+    /// Names this system type for [`IntoSystem::before`] and [`IntoSystem::after`].
+    #[must_use]
+    fn label() -> Label<Self>
+    where
+        Self: Sized,
+    {
+        Label(PhantomData)
+    }
+}
+
+/// Names a [`System`] type in [`IntoSystem::before`] and [`IntoSystem::after`].
+/// Functions and closures name themselves instead.
+pub struct Label<S>(PhantomData<fn() -> S>);
+
+/// A registered system that other systems can be ordered against: a function,
+/// a closure, or a [`Label`] naming a [`System`] type.
+pub trait SystemLabel<Marker> {
+    /// Returns the system's identity.
+    #[doc(hidden)]
+    fn id(&self) -> SystemId;
+}
+
+impl<S: System> SystemLabel<SystemMarker> for Label<S> {
+    fn id(&self) -> SystemId {
+        SystemId::of::<S>()
+    }
 }
 
 /// Converts a [`System`] or a function into a registered system.
@@ -171,10 +195,38 @@ pub trait System: 'static {
 /// Functions and `FnMut` closures qualify when every argument is a
 /// [`SystemParam`]. The marker distinguishes these cases and is inferred by
 /// `UniverseBuilder::with_system`.
-pub trait IntoSystem<Marker>: 'static {
+pub trait IntoSystem<Marker>: Sized + 'static {
+    /// Converts this value into a system ready to be scheduled.
+    #[doc(hidden)]
+    fn into_config(self) -> SystemConfig;
+
     /// Converts this value into the internal system representation.
     #[doc(hidden)]
-    fn into_system(self) -> Box<dyn ErasedSystem>;
+    fn into_system(self) -> Box<dyn ErasedSystem> {
+        self.into_config().system
+    }
+
+    /// Runs this system before `other`, overriding any order derived from
+    /// the data they access.
+    fn before<M>(self, other: impl SystemLabel<M>) -> SystemConfig {
+        let mut config = self.into_config();
+        config.before.push(other.id());
+        config
+    }
+
+    /// Runs this system after `other`, overriding any order derived from
+    /// the data they access.
+    fn after<M>(self, other: impl SystemLabel<M>) -> SystemConfig {
+        let mut config = self.into_config();
+        config.after.push(other.id());
+        config
+    }
+}
+
+impl IntoSystem<()> for SystemConfig {
+    fn into_config(self) -> SystemConfig {
+        self
+    }
 }
 
 /// Internal execution interface used by the universe's system list.
@@ -188,7 +240,7 @@ pub trait ErasedSystem: 'static {
 trait Run: 'static {
     fn run(&mut self, context: &SystemContext<'_>);
 
-    fn register_access(access: &mut QueryAccess);
+    fn register_access(access: &mut Access);
 }
 
 /// Tracks the change-detection counter shared by every kind of system.
@@ -198,9 +250,16 @@ struct Runner<R> {
 }
 
 impl<R: Run> Runner<R> {
-    fn boxed(inner: R) -> Box<dyn ErasedSystem> {
-        R::register_access(&mut QueryAccess::default());
-        Box::new(Self { inner, last_run: 0 })
+    fn config(inner: R, id: SystemId) -> SystemConfig {
+        let mut access = Access::default();
+        R::register_access(&mut access);
+        SystemConfig {
+            system: Box::new(Self { inner, last_run: 0 }),
+            id,
+            access,
+            before: Vec::new(),
+            after: Vec::new(),
+        }
     }
 }
 
@@ -225,7 +284,7 @@ impl<S: System> Run for StructSystem<S> {
         self.0.run(S::Params::fetch(context));
     }
 
-    fn register_access(access: &mut QueryAccess) {
+    fn register_access(access: &mut Access) {
         S::Params::<'static>::register_access(access);
     }
 }
@@ -235,8 +294,8 @@ impl<S: System> Run for StructSystem<S> {
 pub struct SystemMarker;
 
 impl<S: System> IntoSystem<SystemMarker> for S {
-    fn into_system(self) -> Box<dyn ErasedSystem> {
-        Runner::boxed(StructSystem(self))
+    fn into_config(self) -> SystemConfig {
+        Runner::config(StructSystem(self), SystemId::of::<S>())
     }
 }
 
@@ -257,7 +316,7 @@ macro_rules! impl_function_system {
                 (self.func)($($binding),*);
             }
 
-            fn register_access(access: &mut QueryAccess) {
+            fn register_access(access: &mut Access) {
                 <($($ty,)*) as SystemParam>::register_access(access);
             }
         }
@@ -266,11 +325,23 @@ macro_rules! impl_function_system {
         where
             Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
         {
-            fn into_system(self) -> Box<dyn ErasedSystem> {
-                Runner::boxed(FunctionSystem::<_, ($($ty,)*)> {
-                    func: self,
-                    _marker: PhantomData,
-                })
+            fn into_config(self) -> SystemConfig {
+                Runner::config(
+                    FunctionSystem::<_, ($($ty,)*)> {
+                        func: self,
+                        _marker: PhantomData,
+                    },
+                    SystemId::of::<Func>(),
+                )
+            }
+        }
+
+        impl<Func, $($ty: SystemParam + 'static),*> SystemLabel<fn($($ty),*)> for Func
+        where
+            Func: FnMut($($ty),*) + for<'u> FnMut($($ty::Item<'u>),*) + 'static,
+        {
+            fn id(&self) -> SystemId {
+                SystemId::of::<Func>()
             }
         }
     };
