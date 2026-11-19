@@ -1,6 +1,6 @@
 //! Orders systems from the data they declare.
 //!
-//! A system reading `C` (through `&C`, `Delta<C>` or a filter) runs after
+//! A system reading `C` (through `&C`, `Changes<C>` or a filter) runs after
 //! every system writing `C`, so it sees this tick's values. `Lagged<D>` flips
 //! that: the reader runs before the writers, seeing values from before this
 //! tick's systems ran.

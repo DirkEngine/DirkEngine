@@ -7,7 +7,7 @@ use crate::{Error, render_commands::RenderCommandSender};
 use dirk_player::PlayerId;
 use dirk_universe::{
     Entity, InWorld, World, WorldId,
-    query::{Delta, Query},
+    query::{Changes, Delta},
     systems::System,
 };
 use dirk_world::components::{Renderable, Transform};
@@ -82,11 +82,11 @@ impl RendererSystem {
 
 impl System for RendererSystem {
     type Params<'u> = (
-        Query<'u, (Entity, Delta<'u, World>)>,
-        Query<'u, (Entity, Delta<'u, InWorld>)>,
-        Query<'u, (Entity, Delta<'u, Renderable>)>,
-        Query<'u, (Entity, Delta<'u, Transform>)>,
-        Query<'u, (Entity, Delta<'u, PlayerId>)>,
+        Changes<'u, World>,
+        Changes<'u, InWorld>,
+        Changes<'u, Renderable>,
+        Changes<'u, Transform>,
+        Changes<'u, PlayerId>,
     );
 
     fn run(&mut self, (worlds, locations, meshes, transforms, players): Self::Params<'_>) {

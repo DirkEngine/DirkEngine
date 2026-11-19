@@ -153,13 +153,6 @@ impl Components {
         })
     }
 
-    pub fn added<C: Component>(&self, entity: Entity, last_run: u64) -> bool {
-        self.storages
-            .get(&TypeId::of::<C>())
-            .and_then(|storage| storage.get(&entity))
-            .is_some_and(|slot| slot.added > last_run)
-    }
-
     pub fn changed<C: Component>(&self, entity: Entity, last_run: u64) -> bool {
         self.storages
             .get(&TypeId::of::<C>())
