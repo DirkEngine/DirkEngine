@@ -114,13 +114,21 @@ mod apple {
                 .find("};")
                 .context("unterminated heap struct")?;
         let mut members = BTreeMap::new();
-        for line in msl[start..end].lines() {
+        // Shaders may read one array as several types, such as storage
+        // buffers of different elements. SPIRV-Cross then declares the first
+        // and comments out the others, which it reads through casts of it.
+        let declarations = msl[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"));
+        for line in declarations {
             let id: u32 = line
                 .split_once("[[id(")
                 .and_then(|(_, rest)| rest.split_once(")]]"))
                 .and_then(|(id, _)| id.parse().ok())
                 .with_context(|| format!("heap member `{line}` has no id"))?;
-            members.insert(id, line);
+            if let Some(other) = members.insert(id, line) {
+                bail!("heap members `{other}` and `{line}` share id {id}");
+            }
         }
         let mut body = String::new();
         for (binding, capacity) in (0..).zip(CAPACITIES) {
@@ -172,6 +180,23 @@ mod apple {
             assert_eq!(
                 lay_out_heap("void f();").expect("nothing to lay out"),
                 "void f();"
+            );
+        }
+
+        #[test]
+        fn arrays_read_as_several_types_are_declared_once() {
+            let aliased = "struct spvDescriptorSetBuffer0\n{\n    \
+                           const device uint* m_4 [[id(95232)]][65536];\n    \
+                           // Overlapping binding: const device float4* m_6 [[id(95232)]][65536];\n\
+                           };\n";
+            let laid_out = lay_out_heap(aliased).expect("the heap is laid out");
+            assert!(laid_out.contains("m_4 [[id(95232)]]") && !laid_out.contains("m_6"));
+            let clashing = "struct spvDescriptorSetBuffer0\n{\n    \
+                            array<sampler, 1024> m_5 [[id(94208)]];\n    \
+                            array<sampler, 1024> m_6 [[id(94208)]];\n};\n";
+            assert!(
+                lay_out_heap(clashing).is_err(),
+                "members sharing an id fail"
             );
         }
     }
