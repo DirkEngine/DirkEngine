@@ -495,6 +495,23 @@ impl CommandBuffer {
         }
     }
 
+    /// Generates every mip of `image` from mip 0, in an encoder of its own
+    /// between barriers, as the image's moves from rest and back would be.
+    /// Metal orders the levels, and rejects images of one mip, which have
+    /// none to generate.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is shared with Vulkan, whose blits can fail"
+    )]
+    pub(crate) fn generate_mips(&mut self, _device: &Device, image: &crate::Image) -> Result<()> {
+        if image.info().mip_levels > 1 {
+            self.sync();
+            self.blit().generateMipmapsForTexture(&image.raw.raw);
+            self.sync();
+        }
+        Ok(())
+    }
+
     /// Orders the commands after the barrier after those before it, with
     /// fences; see the module's documentation. Metal textures have no
     /// layouts and its queues need no ownership transfers, so the accesses

@@ -182,10 +182,7 @@ impl<'f> Uploads<'f> {
         Self::check_texels(info, image.label(), &region, texels, "the region")?;
         let staging = self.stage(texels)?;
         let copy = BufferImageCopy::packed(info.format, staging.offset(), region);
-        let encoder = match Recording::get(&mut self.recording, self.frame)? {
-            Recording::Transfer { acquires, .. } => acquires,
-            Recording::Graphics(encoder) => encoder,
-        };
+        let encoder = Recording::get(&mut self.recording, self.frame)?.graphics();
         encoder.copy_buffer_to_image(staging.buffer(), image, &[copy])
     }
 
@@ -195,7 +192,7 @@ impl<'f> Uploads<'f> {
     ///
     /// `mips[level]` holds mip `level`'s texels tightly packed: rows, then
     /// depth slices, then array layers. Mips past the last one given are left
-    /// undefined, for example to be generated on the GPU.
+    /// undefined.
     ///
     /// # Errors
     ///
@@ -204,28 +201,29 @@ impl<'f> Uploads<'f> {
     /// more than the image has are given, or a mip's length differs from its
     /// texels'; or a native error if memory cannot be allocated.
     pub fn image(&mut self, desc: &ImageDesc<'_>, mips: &[&[u8]]) -> Result<Image> {
-        let image = self.frame.rhi().create_image(&ImageDesc {
-            usage: desc.usage | ImageUsage::COPY_DST,
+        self.copy_image(desc, mips)
+    }
+
+    /// Creates an image from `desc` holding `texels` in mip 0, packed as
+    /// for [`Uploads::image`], and generates its other mips on the graphics
+    /// queue by filtering mip 0 down, leaving it in its resting access for
+    /// graphics work submitted after this batch. `desc.usage` gains
+    /// [`ImageUsage::COPY_SRC`] and [`ImageUsage::COPY_DST`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Uploads::image`], or [`Error::Invalid`] if the
+    /// format cannot be blitted with linear filtering.
+    pub fn mipmapped_image(&mut self, desc: &ImageDesc<'_>, texels: &[u8]) -> Result<Image> {
+        let desc = ImageDesc {
+            usage: desc.usage | ImageUsage::COPY_SRC,
             ..*desc
-        })?;
-        let info = *image.info();
-        Self::check_mips(&info, desc.label, mips)?;
-        Recording::get(&mut self.recording, self.frame)?.begin_image(&image)?;
-        let copied = (0..).zip(mips).try_for_each(|(level, data)| {
-            // Frame allocations start at offsets valid for copies of any
-            // format.
-            let staging = self.stage(data)?;
-            let copy =
-                BufferImageCopy::packed(info.format, staging.offset(), info.mip_region(level));
-            with_copies!(Recording::get(&mut self.recording, self.frame)?, encoder => {
-                encoder.copy_buffer_to_image(staging.buffer(), &image, &[copy])
-            })
-        });
-        // Hands the image over even if a copy failed, such as into a depth
-        // image: the copy queue cannot return it to rest, so submitting the
-        // batch's other uploads would fail.
-        let finished = Recording::get(&mut self.recording, self.frame)?.finish_image(&image);
-        copied.and(finished)?;
+        };
+        // Hands mip 0 over to the graphics queue, which blits the others.
+        let image = self.copy_image(&desc, &[texels])?;
+        Recording::get(&mut self.recording, self.frame)?
+            .graphics()
+            .generate_mips(&image)?;
         Ok(image)
     }
 
@@ -255,6 +253,35 @@ impl<'f> Uploads<'f> {
             Recording::Graphics(encoder) => self.frame.submit(encoder)?,
         };
         Ok(Some(done))
+    }
+
+    /// Creates an image from `desc`, with [`ImageUsage::COPY_DST`], records
+    /// copies of `mips` into it and hands it over to graphics work in its
+    /// resting access.
+    fn copy_image(&mut self, desc: &ImageDesc<'_>, mips: &[&[u8]]) -> Result<Image> {
+        let image = self.frame.rhi().create_image(&ImageDesc {
+            usage: desc.usage | ImageUsage::COPY_DST,
+            ..*desc
+        })?;
+        let info = *image.info();
+        Self::check_mips(&info, desc.label, mips)?;
+        Recording::get(&mut self.recording, self.frame)?.begin_image(&image)?;
+        let copied = (0..).zip(mips).try_for_each(|(level, data)| {
+            // Frame allocations start at offsets valid for copies of any
+            // format.
+            let staging = self.stage(data)?;
+            let copy =
+                BufferImageCopy::packed(info.format, staging.offset(), info.mip_region(level));
+            with_copies!(Recording::get(&mut self.recording, self.frame)?, encoder => {
+                encoder.copy_buffer_to_image(staging.buffer(), &image, &[copy])
+            })
+        });
+        // Hands the image over even if a copy failed, such as into a depth
+        // image: the copy queue cannot return it to rest, so submitting the
+        // batch's other uploads would fail.
+        let finished = Recording::get(&mut self.recording, self.frame)?.finish_image(&image);
+        copied.and(finished)?;
+        Ok(image)
     }
 
     /// Copies `data` into the frame's memory, counting it as staged.
@@ -332,6 +359,14 @@ impl<'f> Recording<'f> {
                 Self::Graphics(frame.encoder("uploads")?)
             }),
         })
+    }
+
+    /// The encoder recording graphics work after the batch's copies.
+    fn graphics(&mut self) -> &mut CommandEncoder<'f, Graphics> {
+        match self {
+            Self::Transfer { acquires, .. } => acquires,
+            Self::Graphics(encoder) => encoder,
+        }
     }
 
     /// Prepares a new image for copies into it, taking over its first
