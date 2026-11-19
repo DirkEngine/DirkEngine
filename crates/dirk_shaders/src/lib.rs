@@ -6,4 +6,5 @@
 extern crate self as dirk_shaders;
 
 pub mod bindless;
+pub mod indirect;
 pub mod types;
