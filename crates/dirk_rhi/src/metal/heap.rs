@@ -4,7 +4,7 @@
 //! bytes per element, then a pointer to one `u32` byte length per element,
 //! which shaders bound their storage buffer reads with.
 
-use std::ptr::NonNull;
+use std::{collections::VecDeque, ptr::NonNull};
 
 use dirk_shaders::bindless::heap::{self, CAPACITIES, first_element, metal::BUFFER_LENGTHS};
 use objc2::runtime::ProtocolObject;
@@ -74,8 +74,9 @@ impl Resident {
 struct Slots {
     /// Slots never used yet start here.
     next: [u32; CAPACITIES.len()],
-    /// Slots freed since, reused first.
-    free: [Vec<u32>; CAPACITIES.len()],
+    /// Slots freed since, reused first, oldest first, so a stale index
+    /// reads the empty resource for as long as possible.
+    free: [VecDeque<u32>; CAPACITIES.len()],
     /// Resources of filled slots, by `usage`.
     resident: [Resident; 2],
     /// Where each filled slot's resource is in `resident`, by binding and
@@ -372,7 +373,7 @@ impl Device {
         let heap = &self.heap;
         let mut slots = heap.slots.lock();
         let capacity = CAPACITIES[binding as usize];
-        let index = match slots.free[binding as usize].pop() {
+        let index = match slots.free[binding as usize].pop_front() {
             Some(index) => index,
             None if slots.next[binding as usize] < capacity => {
                 slots.next[binding as usize] += 1;
@@ -407,7 +408,7 @@ impl Device {
     pub(super) fn remove_from_heap(&self, slot: Slot) {
         let mut slots = self.heap.slots.lock();
         self.heap.write(slot, None);
-        slots.free[slot.binding as usize].push(slot.index);
+        slots.free[slot.binding as usize].push_back(slot.index);
         if slot.binding == heap::SAMPLERS {
             return;
         }
