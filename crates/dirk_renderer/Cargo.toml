@@ -45,8 +45,6 @@ rspirv.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 
-dirk_build.workspace = true
-
 [features]
 default = []
 
