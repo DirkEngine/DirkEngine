@@ -43,13 +43,15 @@ pub fn with_rhi<E: From<Error>>(test: impl FnOnce(&mut Rhi) -> Result<(), E>) ->
 pub fn rhi(info: &RhiCreateInfo<'_>) -> Result<Option<Rhi>> {
     match Rhi::new(info) {
         Ok(rhi) => Ok(Some(rhi)),
+        // Machines that must run native tests, such as CI machines with a
+        // software driver, set `DIRK_REQUIRE_GPU=1` to fail instead.
         Err(
             error @ (Error::NoSuitableDevice(_)
             | Error::Native {
                 operation: "loading the Vulkan library",
                 ..
             }),
-        ) => {
+        ) if std::env::var_os("DIRK_REQUIRE_GPU").is_none_or(|required| required != "1") => {
             eprintln!("skipping native test: {error}");
             Ok(None)
         }

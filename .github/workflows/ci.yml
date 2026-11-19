@@ -98,6 +98,10 @@ jobs:
         os: ${{ fromJSON(needs.changes.outputs.platforms) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # Linux runs native tests on lavapipe, so failing to create a device
+      # fails them instead of skipping them.
+      DIRK_REQUIRE_GPU: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
