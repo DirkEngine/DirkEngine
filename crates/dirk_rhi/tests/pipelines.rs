@@ -41,16 +41,27 @@ fn attachment(rhi: &Rhi, format: Format, usage: ImageUsage, samples: SampleCount
 }
 
 /// A pipeline rendering to `color_targets` with shaders `V` and `F`.
-fn graphics_pipeline<V: Shader, F: Shader, P: PushData>(
+fn graphics_pipeline<V: Shader<Push = P>, F: Shader<Push = P>, P: PushData>(
     rhi: &Rhi,
     color_targets: &[ColorTarget],
     depth: Option<DepthState>,
     samples: SampleCount,
 ) -> Result<GraphicsPipeline<P>> {
-    let vertex = rhi.create_shader::<V, P>()?;
-    let fragment = rhi.create_shader::<F, P>()?;
+    let shaders = (rhi.create_shader::<V>()?, rhi.create_shader::<F>()?);
+    pipeline(rhi, shaders, color_targets, depth, samples)
+}
+
+/// A pipeline rendering to `color_targets` with a vertex and a fragment
+/// shader.
+fn pipeline<P: PushData>(
+    rhi: &Rhi,
+    (vertex, fragment): (dirk_rhi::ShaderModule<P>, dirk_rhi::ShaderModule<P>),
+    color_targets: &[ColorTarget],
+    depth: Option<DepthState>,
+    samples: SampleCount,
+) -> Result<GraphicsPipeline<P>> {
     rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
-        label: F::ENTRY_POINT,
+        label: fragment.entry_point(),
         vertex: &vertex,
         fragment: Some(&fragment),
         topology: Topology::default(),
@@ -423,8 +434,8 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
 #[test]
 fn culling_follows_the_winding_on_screen() -> Result<()> {
     with_rhi(|rhi| {
-        let vertex = rhi.create_shader::<FillVs, Fill>()?;
-        let fragment = rhi.create_shader::<FillFs, Fill>()?;
+        let vertex = rhi.create_shader::<FillVs>()?;
+        let fragment = rhi.create_shader::<FillFs>()?;
         let targets = [ColorTarget::new(Format::Rgba8Unorm)];
         let culling_back = |front_face| {
             rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -502,8 +513,8 @@ fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
 #[test]
 fn pipelines_are_validated_at_creation() -> Result<()> {
     with_rhi(|rhi| {
-        let vertex = rhi.create_shader::<FillVs, Fill>()?;
-        let fragment = rhi.create_shader::<FillFs, Fill>()?;
+        let vertex = rhi.create_shader::<FillVs>()?;
+        let fragment = rhi.create_shader::<FillFs>()?;
         let color = [ColorTarget::new(Format::Rgba8Unorm)];
         let desc = GraphicsPipelineDesc {
             label: "invalid",
@@ -732,8 +743,14 @@ fn shaders_read_storage_buffers_of_different_types_through_the_heap() -> Result<
             vertices: vertices.index().expect("storage buffers have an index"),
             colors: colors.index().expect("storage buffers have an index"),
         };
-        let pipeline = graphics_pipeline::<InstancedVs, ColorFs, Instanced>(
+        // The fragment shader reads no push data.
+        let shaders = (
+            rhi.create_shader::<InstancedVs>()?,
+            rhi.create_shader::<ColorFs>()?.with_push(),
+        );
+        let pipeline = pipeline(
             rhi,
+            shaders,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
             SampleCount::X1,
@@ -849,7 +866,7 @@ fn draws_pull_vertices_and_sample_textures_through_the_heap() -> Result<()> {
 
 /// A depth-only pipeline writing the depth of fills to targets of `format`.
 fn depth_only_pipeline(rhi: &Rhi, format: Format) -> Result<GraphicsPipeline<Fill>> {
-    let vertex = rhi.create_shader::<FillVs, Fill>()?;
+    let vertex = rhi.create_shader::<FillVs>()?;
     rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
         label: "depth only",
         vertex: &vertex,
@@ -921,8 +938,14 @@ fn comparison_samplers_filter_depth_comparisons() -> Result<()> {
         let view = shadow_map.view().expect("sampled images have a view");
         assert!(view.index().is_none(), "depth views are not color textures");
         let depth_only = depth_only_pipeline(rhi, Format::Depth32Float)?;
-        let pipeline = graphics_pipeline::<CoveringVs, DepthCompareFs, DepthCompare>(
+        // The vertex shader reads no push data.
+        let shaders = (
+            rhi.create_shader::<CoveringVs>()?.with_push(),
+            rhi.create_shader::<DepthCompareFs>()?,
+        );
+        let pipeline = pipeline(
             rhi,
+            shaders,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
             SampleCount::X1,
@@ -974,8 +997,14 @@ fn comparison_samplers_filter_depth_comparisons() -> Result<()> {
 #[test]
 fn shaders_read_frame_allocations_through_the_heap() -> Result<()> {
     with_rhi(|rhi| {
-        let pipeline = graphics_pipeline::<SlicedVs, ColorFs, Sliced>(
+        // The fragment shader reads no push data.
+        let shaders = (
+            rhi.create_shader::<SlicedVs>()?,
+            rhi.create_shader::<ColorFs>()?.with_push(),
+        );
+        let pipeline = pipeline(
             rhi,
+            shaders,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
             SampleCount::X1,

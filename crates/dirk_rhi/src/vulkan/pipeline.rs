@@ -46,7 +46,10 @@ impl ShaderModule {
     }
 
     /// The stage creation info of this module's entry point in `stage`.
-    fn stage(&self, stage: vk::ShaderStageFlags) -> vk::PipelineShaderStageCreateInfo<'_> {
+    pub(super) fn stage(
+        &self,
+        stage: vk::ShaderStageFlags,
+    ) -> vk::PipelineShaderStageCreateInfo<'_> {
         vk::PipelineShaderStageCreateInfo::default()
             .stage(stage)
             .module(self.raw)

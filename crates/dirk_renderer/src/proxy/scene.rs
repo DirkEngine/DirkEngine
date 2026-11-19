@@ -45,8 +45,8 @@ impl SceneManager {
     /// Creates an empty scene manager and its mesh pipeline.
     pub fn new(rhi: &Rhi) -> Result<Self> {
         let targets = SceneTargets::select(rhi.capabilities())?;
-        let vertex = rhi.create_shader::<MeshVs, MeshPush>()?;
-        let fragment = rhi.create_shader::<MeshFs, MeshPush>()?;
+        let vertex = rhi.create_shader::<MeshVs>()?;
+        let fragment = rhi.create_shader::<MeshFs>()?;
         let pipeline = rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
             label: "mesh",
             vertex: &vertex,
