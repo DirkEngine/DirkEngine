@@ -8,13 +8,10 @@ use std::{
 };
 
 use dirk_shaders::bindless::heap;
-use objc2_foundation::NSString;
-use objc2_metal::{
-    MTLArgumentBuffersTier, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily,
-};
+use objc2_metal::{MTLArgumentBuffersTier, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily};
 use tracing::{error, info, warn};
 
-use super::{Check, ImageId, Object, blit::Blitter, heap::Heap, heap::Slot, queue::Timeline};
+use super::{ImageId, Object, blit::Blitter, heap::Heap, heap::Slot, queue::Queue};
 use crate::{
     Capabilities, Error, Features, Format, FormatCapabilities, Limits, MAX_COLOR_TARGETS,
     QueueType, Result, RhiCreateInfo, command::Transition, graveyard::Graveyard,
@@ -69,10 +66,8 @@ impl Health {
 pub(crate) struct Device {
     pub(crate) capabilities: Capabilities,
     pub(super) raw: Object<dyn MTLDevice>,
-    /// The command queue both of the RHI's queues submit to.
-    pub(super) queue: Object<dyn MTLCommandQueue>,
     /// Indexed by `QueueType`.
-    pub(super) timelines: [Timeline; QueueType::COUNT],
+    pub(super) queues: [Queue; QueueType::COUNT],
     /// The bindless heap's argument buffer.
     pub(super) heap: Heap,
     /// Scaling blits, which Metal draws.
@@ -117,18 +112,19 @@ impl Device {
             );
         }
 
-        let queue: Object<_> = raw.newCommandQueue().check("newCommandQueue")?.into();
-        queue.setLabel(Some(&NSString::from_str(info.application_name)));
+        let queues = [
+            Queue::new(&raw, QueueType::Graphics, info.application_name)?,
+            Queue::new(&raw, QueueType::Copy, info.application_name)?,
+        ];
         Ok(Self {
             capabilities: Self::capabilities(&raw, name),
-            timelines: [Timeline::new(&raw)?, Timeline::new(&raw)?],
-            heap: Heap::new(&raw, &queue)?,
+            heap: Heap::new(&raw, &queues[QueueType::Graphics as usize].raw)?,
             blitter: Blitter::default(),
             health: Arc::default(),
             validation: info.validation,
             presentation: info.display.is_some(),
             graveyard: Graveyard::new(),
-            queue,
+            queues,
             raw,
         })
     }
@@ -154,7 +150,7 @@ impl Device {
                 max_storage_buffer_size: max_buffer_size.min(u64::from(u32::MAX)),
             },
             features: Features::all(),
-            dedicated_copy_queue: false,
+            dedicated_copy_queue: true,
             formats: std::array::from_fn(|index| {
                 FormatCapabilities::metal(Format::ALL[index], raw)
             }),
