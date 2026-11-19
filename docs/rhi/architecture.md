@@ -40,7 +40,15 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
 - An image owns its view. `create_image` creates a view of every mip and layer when the
   usage reads or writes the image through one (sampled, storage, attachment); transfer-only
   images get none. `image.view()` borrows it, so a view can never outlive its image without
-  a second `Arc`. Subresource views arrive with per-layer/per-mip graph passes.
+  a second `Arc`. 2D and cube images of several mips or layers that are rendered to or
+  stored (attachment or storage usage) also own a single-mip, single-layer 2D **subview**
+  of each mip and layer, created with the image, each with the heap slots it needs: storage
+  with storage usage, for per-mip writes, and sampled with sampled usage for color images,
+  to sample one mip while rendering the next (shaders sample depth images, such as shadow
+  maps, through their full view, so depth subviews take no slot); `image.subview(Subresource { mip_level, layer })` borrows one, and
+  returns the full view of a single-mip, single-layer image. Subviews are freed with
+  their image, through the same deferred path. Sampled-only textures, such as mipped model
+  textures, get none, so they cost no extra heap slots.
 
 ## Validation and errors
 
@@ -162,11 +170,13 @@ frame.finish();                               // closes the frame (also on Drop)
   between, so mip chains need neither raw barriers nor per-mip graph passes. Vulkan blits
   level by level, requiring the format's blit and linear filtering support; Metal uses
   `generateMipmapsForTexture`.
-- Render passes use dynamic rendering. Attachments are whole single-mip, single-layer 2D
-  images (`&Image`, using the view it owns) of one extent; color attachments may resolve
-  into a single-sample image. Like other safe commands, a pass moves its attachments from
-  rest into their attachment access when it begins and back when it ends (or, if leaked,
-  before the encoder's next command). `pass.draw(&pipeline, &push, vertices, instances)` and
+- Render passes use dynamic rendering. Attachments are one subresource of an image
+  (`image: &Image, subresource: Subresource`, rendered through the view the image owns of
+  it alone: its full view or a subview), all of one extent, the subresource's mip extent;
+  color attachments may resolve into a single-sample, single-subresource image. Like
+  other safe commands, a pass moves its attachments' subresources from rest into their
+  attachment access when it begins and back when it ends (or, if leaked, before the
+  encoder's next command). `pass.draw(&pipeline, &push, vertices, instances)` and
   `pass.draw_indexed(&pipeline, &push, Indices { buffer, format, offset, range, .. }, instances)`
   check only that the pipeline's targets equal the pass's (one small `==`) and that the
   indices fit their buffer; rebinding an unchanged pipeline or index buffer is skipped.
@@ -422,7 +432,7 @@ format capabilities follow Apple's feature tables, conservatively.
   makes heaps resident for reads only and does not cover texture views, which shader
   validation enforces, so encoders also declare, with one `useResources` per usage, the
   resources that needs: storage buffers and storage images read-write, and texture views
-  in the heap read. The bindless heap keeps that list as slots are filled and emptied.
+  in the heap, which are subviews, read. The bindless heap keeps that list as slots are filled and emptied.
   Both the heap list and the declared list carry a generation; command buffers keep a
   snapshot and check both generations (two atomic loads) before every draw and dispatch,
   so resources created while an encoder records, even in a new heap, are resident before
@@ -502,8 +512,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 ```
 
 - Passes declare their accesses; `record` validates them and derives the pass's barriers
-  at once, leaving the graph unchanged on error: per-mip RAW/WAR/WAW (repeated writes
-  included), reads of contents nothing wrote, a just-acquired swapchain image first used
+  at once, leaving the graph unchanged on error: per mip and layer RAW/WAR/WAW (repeated
+  writes included), reads of contents nothing wrote, a just-acquired swapchain image first used
   other than as an attachment or copy destination, shader accesses without stages,
   conflicting accesses in one pass, imports lacking a usage, and handles of other graphs.
   `execute` also rejects an imported swapchain image no pass writes, which would be
@@ -537,8 +547,15 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
   undefined with no barrier against earlier work, and is left wherever its last pass left
   it, since nothing outside the graph reaches it; one that frame does not reuse is
   dropped through deferred destruction. Steady rendering keeps `FRAMES_IN_FLIGHT` sets.
-- Subresource ranges (per-layer/mip passes) are a later, separate PR: the state tracker
-  already works per mip span.
+- Passes may declare an `ImageSlice` instead of a whole image: `handle.slice(ImageRange)`
+  for reads and copies, `handle.subresource(Subresource)` for attachments, which render
+  one mip of one layer; a `Handle<Image>` converts into the whole image's slice. The
+  tracker keeps disjoint blocks of mips × layers per resource, split where a declared
+  slice cuts them, so rendering cube faces, shadow cascades or a mip chain that samples
+  each previous mip barriers only what each pass touches. One pass may declare disjoint
+  slices of an image in different accesses; overlapping but different slices conflict. A
+  read widens an earlier barrier only if that barrier covers exactly its block, since
+  widening one covering blocks split off since would change their access too.
 
 ## Uploads (`dirk_render_utils`)
 
@@ -594,4 +611,4 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Render-graph subresource ranges, async compute. Each adds API without breaking the above.
+Async compute. Each adds API without breaking the above.

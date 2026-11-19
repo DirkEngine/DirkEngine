@@ -4,8 +4,8 @@ use ash::vk;
 
 use super::{Buffer, CommandBuffer, Device, GraphicsPipeline, pipeline::PUSH_STAGES};
 use crate::{
-    DrawArguments, DrawIndexedArguments, IndexFormat, LoadOp, Rect, RenderPassDesc, StoreOp,
-    Viewport,
+    DrawArguments, DrawIndexedArguments, Image, IndexFormat, LoadOp, Rect, RenderPassDesc, StoreOp,
+    Subresource, Viewport, image::ViewOf,
 };
 
 // Render pass recording. Inputs were validated by the render pass, and every
@@ -26,7 +26,7 @@ impl CommandBuffer {
             .map(|color| {
                 let (load, clear) = color.load.vk();
                 let attachment = vk::RenderingAttachmentInfo::default()
-                    .image_view(color.image.raw.attachment_view())
+                    .image_view(color.image.attachment_view(color.subresource))
                     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .load_op(load)
                     .store_op(color.store.vk())
@@ -38,7 +38,7 @@ impl CommandBuffer {
                 match color.resolve {
                     Some(resolve) => attachment
                         .resolve_mode(vk::ResolveModeFlags::AVERAGE)
-                        .resolve_image_view(resolve.raw.attachment_view())
+                        .resolve_image_view(resolve.attachment_view(Subresource::default()))
                         .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
                     None => attachment,
                 }
@@ -47,7 +47,7 @@ impl CommandBuffer {
         let depth = desc.depth.map(|depth| {
             let (load, clear) = depth.load.vk();
             vk::RenderingAttachmentInfo::default()
-                .image_view(depth.image.raw.attachment_view())
+                .image_view(depth.image.attachment_view(depth.subresource))
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(load)
                 .store_op(depth.store.vk())
@@ -264,6 +264,15 @@ impl CommandBuffer {
 )]
 const fn stride<T>() -> u32 {
     size_of::<T>() as u32
+}
+
+impl Image {
+    /// The view of `subresource` alone, which the render pass checked the
+    /// image has.
+    fn attachment_view(&self, subresource: Subresource) -> vk::ImageView {
+        self.raw
+            .attachment_view(self.view_of(subresource).unwrap_or(ViewOf::Full))
+    }
 }
 
 impl<T: Copy> LoadOp<T> {

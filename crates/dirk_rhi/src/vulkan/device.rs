@@ -12,6 +12,7 @@ use super::{
     Check, ImageId,
     adapter::{Adapter, RequiredFeatures},
     heap::{Heap, Slot},
+    image::View,
     instance::Instance,
     queue::Queue,
 };
@@ -31,10 +32,11 @@ pub(super) enum Garbage {
     Image {
         /// `None` for swapchain images, which their swapchain owns.
         raw: Option<vk::Image>,
-        view: Option<vk::ImageView>,
+        views: Vec<View>,
         allocation: Allocation,
-        slots: [Option<Slot>; 2],
     },
+    /// A view whose image failed to be created.
+    View(View),
     Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
     QueryPool(vk::QueryPool),
@@ -231,20 +233,22 @@ impl Device {
                 }
                 Garbage::Image {
                     raw,
-                    view,
+                    views,
                     allocation,
-                    slots,
                 } => {
-                    for slot in slots.into_iter().flatten() {
-                        self.remove_from_heap(slot);
-                    }
-                    if let Some(view) = view {
-                        self.raw.destroy_image_view(view, None);
+                    for view in views {
+                        self.destroy(Garbage::View(view));
                     }
                     if let Some(raw) = raw {
                         self.raw.destroy_image(raw, None);
                         self.free(allocation);
                     }
+                }
+                Garbage::View(view) => {
+                    for slot in view.slots.into_iter().flatten() {
+                        self.remove_from_heap(slot);
+                    }
+                    self.raw.destroy_image_view(view.raw, None);
                 }
                 Garbage::Sampler(raw, slot) => {
                     self.remove_from_heap(slot);
