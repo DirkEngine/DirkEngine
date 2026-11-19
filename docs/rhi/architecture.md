@@ -172,13 +172,14 @@ frame.finish();                               // closes the frame (also on Drop)
 - Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
   shader crate from a build script into one SPIR-V module per entry point and generates a
   type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (code, stage,
-  reflected push data size). The code is the backend's: SPIR-V, or for Apple targets the
+  reflected push data size and, for compute shaders, workgroup size). The code is the backend's: SPIR-V, or for Apple targets the
   Metal Shading Language that SPIRV-Cross translates it to at build time (see
   [Metal](#metal)); only Apple hosts compile SPIRV-Cross. Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way
   (`crates/dirk_rhi/test-shaders`).
-- `rhi.create_shader::<S, P>() -> ShaderModule<P>` asserts in a `const` block that `S`
-  reads no push data or exactly `size_of::<P>()` bytes, and that `P` is at most 128 bytes
+- `rhi.create_shader::<S>() -> ShaderModule<S::Push>`, where `S::Push` is the push data
+  type the entry point's source reads, asserts in a `const` block that `S` reads no push
+  data or exactly `size_of::<S::Push>()` bytes, and that `S::Push` is at most 128 bytes
   and a multiple of four. Mismatches fail `cargo build` (not `cargo check`, as with every
   post-monomorphization error).
 - `GraphicsPipeline<P>` is created from `ShaderModule<P>`s, so its push data type is the
@@ -200,6 +201,43 @@ frame.finish();                               // closes the frame (also on Drop)
   recreation on the next acquisition, and a frame whose acquisitions no submission waited
   for waits for them in an empty submission when it closes, so acquire semaphores are
   always consumed within their frame. One image per swapchain and frame.
+
+## Compute
+
+```rust
+let pipeline = rhi.create_compute_pipeline(&ComputePipelineDesc { label, shader: &module })?;
+encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder<Graphics>
+```
+
+- `ComputePipeline<P>` is typed by its push data like `GraphicsPipeline<P>`, created from
+  one `ShaderModule<P>` of the compute stage. The shader declares its workgroup size
+  (`#[spirv(compute(threads(64)))]`), which the shader build reflects into
+  `Shader::WORKGROUP_SIZE`; creation checks it against `Limits::max_compute_workgroup_size`
+  and `max_compute_workgroup_invocations` (and, on Metal, the pipeline's own
+  `maxTotalThreadsPerThreadgroup`), dispatch checks the counts against
+  `max_compute_workgroups`. Rebinding an unchanged pipeline is skipped.
+- Dispatches run on the graphics queue, outside render passes; async compute is out of
+  scope. Shaders reach resources through the heap: storage buffers through
+  `BufferIndex::get_mut` (`gpu` feature), storage images through their storage arrays.
+  Their accesses are `BufferAccess::ShaderWrite(ShaderStages::COMPUTE)` and
+  `ImageAccess::StorageWrite(ShaderStages::COMPUTE)` (or the reads), which barriers and the
+  render graph already translate; a compute-written buffer then feeds indirect draws
+  through `BufferAccess::Indirect`. Storage images rest in storage reads and writes by
+  every stage unless also sampled, so dispatches find them in place, and copies of what a
+  dispatch wrote move them from there, after its writes. The render graph needs no new
+  pass kind: passes
+  without attachments record on the frame's `CommandEncoder<Graphics>` and dispatch there.
+- Storage images are declared without a format, so the shader build declares
+  `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat` (allowed by Vulkan
+  1.3), and Vulkan grants `ImageUsage::STORAGE` only to formats supporting formatless reads
+  and writes (`VkFormatProperties3`).
+- Vulkan: one `vkCreateComputePipelines` with the global layout; the first dispatch in a
+  command buffer binds the heap at the compute bind point.
+- Metal: an `MTLComputePipelineState` per pipeline; dispatches share a compute encoder,
+  opened with the heap bound at `HEAP_BUFFER` and declared with `useResources`, so
+  Metal tracks hazards between dispatches and other passes as for render passes. Push data
+  is set with `setBytes`, padded like render push data, and threadgroups take the
+  shader's workgroup size.
 
 ## Presentation
 
@@ -272,8 +310,12 @@ frame.finish();                               // closes the frame (also on Drop)
   as entry point parameters at the documented bindings; the shader build declares the
   descriptor indexing capabilities, and accesses are `NonUniform`.
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
-  The shader build reflects each entry point's push block size and emits constants so a
-  `const` assertion fails the build if `size_of::<P>()` disagrees.
+  The shader build names each entry point's push data type, the one its
+  `#[spirv(push_constant)]` parameter refers to (`()` without one), as `Shader::Push`;
+  `rhi.create_shader::<S>()` returns a `ShaderModule<S::Push>`, so pipelines pair only
+  shaders of one push type (a shader reading none joins others with `with_push`). The
+  build also reflects each push block's size, and a `const` assertion fails the build if
+  it disagrees with the type's.
 - Indices read only the arrays of their kind: `get` accepts only those arrays' element
   types (sealed traits over the `spirv_std` image, sampler and buffer types), the shader
   build checks every array a shader declares against the heap's bindings, and `get` masks
@@ -488,4 +530,4 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 
 ## Later, each as its own small PR
 
-Compute pipelines and dispatch, render-graph subresource ranges, async compute. Each adds API without breaking the above.
+Render-graph subresource ranges, async compute. Each adds API without breaking the above.

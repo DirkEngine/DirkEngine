@@ -103,9 +103,9 @@ pub struct Presenter {
 impl Presenter {
     pub fn new(rhi: &Rhi) -> Result<Self> {
         Ok(Self {
-            vertex: rhi.create_shader::<PresentVs, PresentPush>()?,
-            fragment: rhi.create_shader::<PresentFs, PresentPush>()?,
-            encode: rhi.create_shader::<PresentEncodeFs, PresentPush>()?,
+            vertex: rhi.create_shader::<PresentVs>()?.with_push(),
+            fragment: rhi.create_shader::<PresentFs>()?,
+            encode: rhi.create_shader::<PresentEncodeFs>()?,
             sampler: rhi.create_sampler(&SamplerDesc {
                 label: "presentation",
                 ..SamplerDesc::default()
