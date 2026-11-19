@@ -91,7 +91,10 @@ pub struct ImageBarrier<'a> {
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(
     target_vendor = "apple",
-    expect(dead_code, reason = "Metal tracks hazards itself and records no barriers")
+    expect(
+        dead_code,
+        reason = "Metal tracks hazards itself and records no barriers"
+    )
 )]
 pub(crate) struct Transition {
     pub(crate) image: native::ImageId,

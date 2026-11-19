@@ -12,7 +12,7 @@ use raw_window_metal::Layer;
 
 use super::{Check, Device, Image, Object, device::Garbage};
 use crate::{
-    Error, Format, ImageUsage, PresentMode, Result, SurfaceTarget, SwapchainDesc,
+    Error, Format, ImageUsage, PresentMode, QueueType, Result, SurfaceTarget, SwapchainDesc,
     presentation::Acquired,
 };
 
@@ -241,7 +241,12 @@ impl Device {
     /// after it. Size changes are found when acquiring, so this never asks
     /// for recreation.
     pub(crate) fn present(&self, images: &mut [(&mut Swapchain, u32)]) -> Result<Vec<bool>> {
-        let commands = autoreleasepool(|_| self.queue.commandBuffer()).check("commandBuffer")?;
+        let commands = autoreleasepool(|_| {
+            self.queues[QueueType::Graphics as usize]
+                .raw
+                .commandBuffer()
+        })
+        .check("commandBuffer")?;
         commands.setLabel(Some(&NSString::from_str("present")));
         for (swapchain, _) in images.iter_mut() {
             let drawable = swapchain
