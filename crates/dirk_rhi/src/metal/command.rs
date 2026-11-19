@@ -103,7 +103,7 @@ impl CommandBuffer {
     }
 
     /// The open blit encoder, beginning one if needed.
-    fn blit(&mut self) -> &ProtocolObject<dyn MTLBlitCommandEncoder> {
+    pub(super) fn blit(&mut self) -> &ProtocolObject<dyn MTLBlitCommandEncoder> {
         if !matches!(self.encoder, Encoder::Blit(_)) {
             self.end_encoding();
             let encoder = autoreleasepool(|_| self.raw.blitCommandEncoder())
