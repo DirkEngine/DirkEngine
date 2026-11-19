@@ -2,18 +2,18 @@ use std::ffi::{CStr, c_char};
 
 use ash::vk;
 
-use super::{Check, instance::Instance};
+use super::{Check, heap::Heap, instance::Instance};
 use crate::{
     Capabilities, Error, Features, Format, FormatCapabilities, FormatFeatures, ImageUsage, Limits,
     Result, SampleCounts,
 };
 
-/// Declares the Vulkan 1.2 and 1.3 features every device must support. The
-/// RHI enables all of them, so the whole design can rely on them.
+/// Declares the features every device must support. The RHI enables all of
+/// them, so the whole design can rely on them.
 macro_rules! required_features {
     ($($chain:ident: $ty:ident { $($feature:ident,)+ })+) => {
-        /// Required Vulkan 1.2 and 1.3 features, chained into feature queries
-        /// and device creation.
+        /// Required features, chained into feature queries and device
+        /// creation.
         #[derive(Default)]
         pub(super) struct RequiredFeatures {
             $(pub(super) $chain: vk::$ty<'static>,)+
@@ -55,6 +55,9 @@ required_features! {
     vulkan13: PhysicalDeviceVulkan13Features {
         dynamic_rendering,
         synchronization2,
+    }
+    robustness2: PhysicalDeviceRobustness2FeaturesEXT {
+        null_descriptor,
     }
 }
 
@@ -109,8 +112,11 @@ impl Adapter {
     /// device and every requirement it misses.
     fn inspect(instance: &Instance, raw: vk::PhysicalDevice) -> Result<Result<Self, String>> {
         let instance = &instance.raw;
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Properties::default();
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Properties::default();
-        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan13);
+        let mut properties = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut vulkan12)
+            .push_next(&mut vulkan13);
         // SAFETY: `raw` belongs to this instance.
         unsafe { instance.get_physical_device_properties2(raw, &mut properties) };
         let properties = properties.properties;
@@ -122,7 +128,8 @@ impl Adapter {
         let mut supported = RequiredFeatures::default();
         let mut features = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut supported.vulkan12)
-            .push_next(&mut supported.vulkan13);
+            .push_next(&mut supported.vulkan13)
+            .push_next(&mut supported.robustness2);
         // SAFETY: `raw` belongs to this instance.
         unsafe { instance.get_physical_device_features2(raw, &mut features) };
         let features = features.features;
@@ -139,7 +146,12 @@ impl Adapter {
         if features.robust_buffer_access != vk::TRUE {
             missing.push("robust_buffer_access");
         }
+        let (extensions, missing_extensions) = Self::extensions(&available);
+        missing.extend(missing_extensions);
         missing.extend(supported.missing());
+        if !Heap::fits(&vulkan12) {
+            missing.push("update-after-bind descriptor limits that fit the bindless heap");
+        }
         let families = QueueFamilies::find(&families);
         if families.is_none() {
             missing.push("a graphics and compute queue");
@@ -148,16 +160,6 @@ impl Adapter {
             return Ok(Err(format!("{name} lacks {}", missing.join(", "))));
         };
 
-        // The portability subset must be enabled whenever a device offers it.
-        let extensions = [ash::khr::portability_subset::NAME]
-            .into_iter()
-            .filter(|name| {
-                available
-                    .iter()
-                    .any(|extension| extension.extension_name_as_c_str() == Ok(*name))
-            })
-            .map(CStr::as_ptr)
-            .collect();
         let score = match properties.device_type {
             vk::PhysicalDeviceType::DISCRETE_GPU => 4,
             vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
@@ -197,6 +199,7 @@ impl Adapter {
                 },
                 max_color_targets: limits.max_color_attachments,
                 max_push_data_size: limits.max_push_constants_size,
+                max_storage_buffer_size: u64::from(limits.max_storage_buffer_range),
             },
             features: optional,
             dedicated_copy_queue: families.copy != families.graphics,
@@ -216,6 +219,36 @@ impl Adapter {
             capabilities,
             score,
         }))
+    }
+}
+
+impl Adapter {
+    /// The device extensions to enable: robustness2 for null descriptors,
+    /// and the portability subset whenever a device offers it. Also returns
+    /// the required ones `available` lacks.
+    fn extensions(
+        available: &[vk::ExtensionProperties],
+    ) -> (Vec<*const c_char>, Vec<&'static str>) {
+        let has = |name: &CStr| {
+            available
+                .iter()
+                .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+        };
+        let required = [Some(ash::ext::robustness2::NAME)];
+        let missing = required
+            .iter()
+            .flatten()
+            .filter(|name| !has(name))
+            .map(|name| name.to_str().unwrap_or("a required extension"))
+            .collect();
+        let portability = Some(ash::khr::portability_subset::NAME).filter(|name| has(name));
+        let enabled = required
+            .into_iter()
+            .chain([portability])
+            .flatten()
+            .map(CStr::as_ptr)
+            .collect();
+        (enabled, missing)
     }
 }
 
