@@ -41,10 +41,8 @@ impl EnginePlugin for PlayerPlugin {
             ctx.add_resource(players.input_sender())?;
             #[cfg(not(feature = "editor"))]
             ctx.add_resource(players.presentation_assignments())?;
-            ctx.extend_universe(
-                dirk_universe::Universe::builder()
-                    .with_system(PlayerMovementSystem::new(players.registry.input_state())),
-            );
+            let movement = PlayerMovementSystem::new(players.registry.input_state());
+            ctx.configure_universe(|universe| universe.with_system(movement));
             Ok(players)
         });
         Ok(())

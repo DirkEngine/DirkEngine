@@ -67,11 +67,9 @@ pub struct ComponentInfo<'a> {
     pub debug: Ref<'a, dyn Debug>,
 }
 
-/// A cheap clonable handle for access to the [`Universe`].
-/// This give write-only access to the [`Universe`]. To write to it, use
-/// a [`System`].
-///
-/// [`System`]: systems::System
+/// A cheap clonable handle that queues structural changes for a [`Universe`]
+/// through [`CommandBuffer`]s, which apply at the start of the next tick.
+/// Systems edit component values directly through queries instead.
 #[derive(Clone)]
 pub struct UniverseHandle {
     allocator: Allocator,
@@ -431,33 +429,6 @@ impl UniverseBuilder {
     #[must_use]
     pub fn with_derived<Marker>(mut self, derive: impl IntoDerived<Marker>) -> Self {
         self.systems.push(derive.into_config());
-        self
-    }
-
-    /// Appends the worlds and systems configured on `other`. Systems that
-    /// depend on each other are ordered the same whatever the merge order;
-    /// unrelated systems keep their registration order.
-    ///
-    /// Only configuration can be merged. Handles from independent builders
-    /// allocate overlapping IDs and submit to different queues, so `other`
-    /// must not have issued a handle or command buffer that is still alive.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `other` has a live handle or a queued command buffer. Build
-    /// it separately instead, or submit commands through this builder's handle.
-    #[must_use]
-    pub fn with_other(mut self, other: Self) -> Self {
-        assert!(
-            other.handle.allocator.is_unique(),
-            "cannot merge a UniverseBuilder with issued handles or queued commands"
-        );
-        for world in other.worlds {
-            self.worlds.push(world);
-        }
-
-        self.systems.extend(other.systems);
-
         self
     }
 }

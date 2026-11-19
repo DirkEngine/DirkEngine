@@ -381,55 +381,6 @@ fn mutable_reads_stay_clean_and_equal_writes_count_as_changes() {
 }
 
 #[test]
-fn composed_builders_preserve_system_order_and_use_the_final_command_queue() {
-    use std::{cell::RefCell, rc::Rc};
-
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let make_system = |index| {
-        let seen = Rc::clone(&seen);
-        move |mut cmd: Commands<'_>, query: Query<'_, (Entity, &Position)>| {
-            for (entity, position) in &query {
-                seen.borrow_mut().push((index, position.0));
-                cmd.set_component(entity, Position(index, 0));
-            }
-        }
-    };
-    let other = Universe::builder().with_system(make_system(2));
-    let mut universe = Universe::builder()
-        .with_world(
-            World::builder("w").with_entity(Entity::builder().with_component(Position(0, 0))),
-        )
-        .with_system(make_system(1))
-        .with_other(other)
-        .build()
-        .expect("systems should schedule");
-
-    universe.tick(0.0);
-    assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0)]);
-
-    universe.tick(0.0);
-    assert_eq!(*seen.borrow(), vec![(1, 0), (2, 0), (1, 2), (2, 2)]);
-}
-
-#[test]
-#[should_panic(expected = "cannot merge a UniverseBuilder with issued handles or queued commands")]
-fn composed_builders_reject_retained_other_handle() {
-    let other = Universe::builder();
-    let _handle = other.handle();
-    let _ = Universe::builder().with_other(other);
-}
-
-#[test]
-#[should_panic(expected = "cannot merge a UniverseBuilder with issued handles or queued commands")]
-fn composed_builders_reject_queued_other_commands() {
-    let other = Universe::builder();
-    let mut cmd = other.handle().command_buffer();
-    cmd.create_world(World::builder("would disappear"));
-    cmd.submit();
-    let _ = Universe::builder().with_other(other);
-}
-
-#[test]
 fn destroyed_world_rejects_later_spawns_and_transfers() {
     let mut universe = Universe::builder()
         .build()

@@ -173,8 +173,8 @@ writes `C`, so it sees this tick's values. `Lagged<D>` reads `D` before this
 tick's systems write it instead: its system runs before the writers, which also
 breaks dependency cycles. Commands applied at the start of the tick are already
 visible, and an explicit order placing a writer first takes precedence.
-Dependent systems are ordered the same whatever order plugins merge their
-builders in; unrelated systems keep their registration order.
+Dependent systems are ordered the same whatever order plugins register them
+in; unrelated systems keep their registration order.
 
 ```rust
 use dirk_universe::prelude::*;
@@ -209,6 +209,4 @@ systems that were never registered, and two derivations of one component.
 order with the reason for each dependency, and displays as a readable list.
 
 Commands do not order systems, since their changes apply on the next tick.
-Systems run sequentially. `UniverseBuilder::with_other` appends another
-builder's systems; builders with outstanding handles or queued commands cannot
-be merged.
+Systems run sequentially.
