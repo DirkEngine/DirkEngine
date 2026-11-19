@@ -1,0 +1,322 @@
+//! The renderer's passes executed under validation, read back by the host.
+
+use std::time::{Duration, Instant};
+
+use dirk_assets::{AssetHandle, AssetRegistry, AssetType};
+use dirk_events::EventManager;
+use dirk_render_utils::{Handle, RenderGraph, Transients, Uploads};
+use dirk_rhi::{
+    Buffer, BufferAccess, BufferDesc, BufferImageCopy, BufferUsage, Completion, Extent3d, Format,
+    Frame, Graphics, Image, ImageAccess, ImageDesc, ImageDimension, ImageUsage, Memory, Rhi,
+    SampleCount,
+};
+use dirk_rhi_test_shaders::support::with_rhi;
+use dirk_threads::WorkerPool;
+use dirk_universe::{Entity, Universe, World};
+use glam::{Mat4, Vec3, vec3};
+
+use crate::{
+    models::ModelRegistry, proxy::scene::SceneManager, viewport::Viewport, window::Presenter,
+};
+
+/// Errors of the renderer, the RHI, and test setup.
+type Result<T = ()> = anyhow::Result<T>;
+
+/// An image presented to, like a window's, and read back by the host.
+struct Target {
+    image: Image,
+    readback: Buffer,
+}
+
+impl Target {
+    /// A `width` by `height` target of `format`.
+    fn new(rhi: &Rhi, format: Format, (width, height): (u32, u32)) -> Result<Self> {
+        Ok(Self {
+            image: rhi.create_image(&ImageDesc {
+                label: "target",
+                dimension: ImageDimension::D2,
+                extent: Extent3d::new_2d(width, height),
+                format,
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::COPY_SRC,
+                mip_levels: 1,
+                array_layers: 1,
+                samples: SampleCount::X1,
+                rest: None,
+            })?,
+            readback: rhi.create_buffer(&BufferDesc {
+                label: "readback",
+                size: u64::from(width * height * format.bytes_per_texel()),
+                usage: BufferUsage::COPY_DST,
+                memory: Memory::Readback,
+            })?,
+        })
+    }
+
+    /// Imports the target into `graph`, discarding its contents like a
+    /// swapchain image's, and adds `record`'s passes, then a pass copying
+    /// it into the readback buffer. Executes and submits the graph.
+    fn render<'a>(
+        &'a self,
+        frame: &Frame<'_>,
+        transients: &mut Transients,
+        record: impl FnOnce(&mut RenderGraph<'a>, Handle<Image>) -> Result,
+    ) -> Result<Completion> {
+        let mut graph = RenderGraph::new();
+        let target = graph.import_scratch(&self.image)?;
+        record(&mut graph, target)?;
+        let buffer =
+            graph.import_buffer(&self.readback, BufferAccess::None, BufferAccess::HostRead)?;
+        let info = *self.image.info();
+        graph
+            .pass("read back")
+            .image(target, ImageAccess::CopySource)
+            .buffer(buffer, BufferAccess::CopyDestination)
+            .record(move |pass| {
+                let (image, buffer) = (pass.image(target)?, pass.buffer(buffer)?);
+                let copy = BufferImageCopy::packed(info.format, 0, info.mip_region(0));
+                pass.copy_image_to_buffer(image, buffer, &[copy])
+            })?;
+        let mut encoder = frame.encoder::<Graphics>("test")?;
+        graph.execute(frame, &mut encoder, transients)?;
+        Ok(frame.submit(encoder)?)
+    }
+
+    /// The texels once `done` is reached, row by row.
+    fn read(&self, rhi: &Rhi, done: Completion) -> Result<Vec<[u8; 4]>> {
+        rhi.wait(done, Duration::from_secs(5))?;
+        let mut bytes = vec![0; usize::try_from(self.readback.info().size)?];
+        #[expect(unsafe_code, reason = "reading GPU results needs the work to be done")]
+        // SAFETY: the copy completed, and the graph made it visible to the
+        // host.
+        unsafe {
+            self.readback.read(0, &mut bytes)?;
+        }
+        Ok(bytes.as_chunks::<4>().0.to_vec())
+    }
+}
+
+/// Whether each channel of `actual` is within one of `expected`.
+fn close(actual: [u8; 4], expected: [u8; 4]) -> bool {
+    actual
+        .iter()
+        .zip(expected)
+        .all(|(&actual, expected)| actual.abs_diff(expected) <= 1)
+}
+
+/// A glTF quad, textured with sRGB (200, 100, 50), drawn as two objects of
+/// one model: each reads its own transform by instance index.
+#[test]
+fn gltf_models_draw_each_object_with_its_own_data() -> Result {
+    const EXTENT: (u32, u32) = (16, 8);
+    with_rhi(|rhi| {
+        let workers = WorkerPool::new("renderer tests");
+        let events = EventManager::new(workers.clone());
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        let assets = AssetRegistry::init_at(&events, workers, fixtures)?;
+        let quad = AssetHandle::from_raw("quad/quad.dirkasset", AssetType::Model);
+
+        let mut models = {
+            let mut frame = rhi.begin_frame()?;
+            let mut uploads = Uploads::new(&mut frame);
+            let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, u64::MAX)?;
+            uploads.submit()?;
+            models
+        };
+        let mut load = assets.load_asset::<dirk_assets::Model>(&quad);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while load.try_poll().transpose()?.is_none() {
+            anyhow::ensure!(Instant::now() < deadline, "the model did not load in time");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let universe = Universe::builder().build()?;
+        let mut commands = universe.handle().command_buffer();
+        let world = commands.create_world(World::builder("test"));
+        let [left, right, camera] = [(); 3].map(|()| commands.spawn(world, Entity::builder()));
+        let mut scene = SceneManager::new(rhi)?;
+        scene.create_scene(world);
+        for (entity, x) in [(left, -1.2), (right, 1.2)] {
+            scene.create_proxy(entity, world)?;
+            let proxy = scene.get_proxy_mut(entity).expect("just created");
+            proxy.set_model(Some(quad.clone()));
+            proxy.set_model_matrix(Some(Mat4::from_translation(vec3(x, 0.0, 0.0))));
+        }
+        scene.create_proxy(camera, world)?;
+        let view = glam::camera::rh::view::look_at_mat4(vec3(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+        scene
+            .get_proxy_mut(camera)
+            .expect("just created")
+            .set_view(Some(view));
+        let mut viewport = Viewport::new(rhi, scene.targets())?;
+        viewport.resize(rhi, EXTENT)?;
+        (viewport.world, viewport.camera) = (Some(world), Some(camera));
+
+        let presenter = Presenter::new(rhi)?;
+        let pipeline = presenter.pipeline(rhi, Format::Rgba8Unorm)?;
+        let target = Target::new(rhi, Format::Rgba8Unorm, EXTENT)?;
+        let mut transients = Transients::default();
+        let mut frame = rhi.begin_frame()?;
+        let mut uploads = Uploads::new(&mut frame);
+        models.update(&mut uploads)?;
+        uploads.submit()?;
+        let objects = scene.write_objects(&frame)?;
+        let mut graph = RenderGraph::new();
+        viewport.record(&mut graph, objects, &scene, &models)?;
+        let mut encoder = frame.encoder::<Graphics>("viewport")?;
+        graph.execute(&frame, &mut encoder, &mut transients)?;
+        frame.submit(encoder)?;
+        let done = target.render(&frame, &mut transients, |graph, image| {
+            let output = graph.import(viewport.output())?;
+            Ok(presenter.record(graph, &pipeline, image, Some(output))?)
+        })?;
+        frame.finish();
+
+        let texels = target.read(rhi, done)?;
+        let texel = |x: u32, y: u32| texels[(y * EXTENT.0 + x) as usize];
+        let (textured, black) = ([200, 100, 50, 255], [0, 0, 0, 255]);
+        for (x, y, expected) in [
+            (4, 4, textured),
+            (11, 4, textured),
+            (8, 4, black),
+            (0, 0, black),
+        ] {
+            assert!(
+                close(texel(x, y), expected),
+                "texel ({x}, {y}) is {:?}, not {expected:?}",
+                texel(x, y)
+            );
+        }
+        Ok(())
+    })
+}
+
+/// Once a frame's uploads staged the budget, the models left wait for later
+/// frames: with a budget of one byte, each frame uploads one model.
+#[test]
+fn model_uploads_past_the_budget_wait_for_later_frames() -> Result {
+    with_rhi(|rhi| {
+        let workers = WorkerPool::new("renderer tests");
+        let events = EventManager::new(workers.clone());
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        let assets = AssetRegistry::init_at(&events, workers, fixtures)?;
+        let quads = ["quad/quad.dirkasset", "quad/second_quad.dirkasset"]
+            .map(|path| AssetHandle::from_raw(path, AssetType::Model));
+
+        let mut models = {
+            let mut frame = rhi.begin_frame()?;
+            let mut uploads = Uploads::new(&mut frame);
+            let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, 1)?;
+            uploads.submit()?;
+            models
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for quad in &quads {
+            let mut load = assets.load_asset::<dirk_assets::Model>(quad);
+            while load.try_poll().transpose()?.is_none() {
+                anyhow::ensure!(Instant::now() < deadline, "{quad:?} did not load in time");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let mut uploaded = 0;
+        while uploaded < quads.len() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the models were not uploaded in time"
+            );
+            let mut frame = rhi.begin_frame()?;
+            let mut uploads = Uploads::new(&mut frame);
+            models.update(&mut uploads)?;
+            uploads.submit()?;
+            let now = quads
+                .iter()
+                .filter(|quad| models.primitives(quad).is_some())
+                .count();
+            assert!(
+                now <= uploaded + 1,
+                "one frame uploaded {} models",
+                now - uploaded
+            );
+            uploaded = now;
+        }
+        Ok(())
+    })
+}
+
+/// egui's sRGB-encoded, premultiplied colors are composited in linear space
+/// and encoded once, whether the target encodes them or not.
+#[cfg(feature = "editor")]
+#[test]
+fn ui_colors_are_composited_linearly_and_encoded_once() -> Result {
+    use egui::{
+        Color32, Rgba, TextureId, TextureOptions, TexturesDelta,
+        epaint::{ClippedPrimitive, ColorImage, ImageDelta, Mesh, Primitive, pos2},
+    };
+
+    use crate::egui_integration::EguiRenderer;
+
+    const EXTENT: (u32, u32) = (12, 4);
+    with_rhi(|rhi| {
+        let gray = Color32::from_gray(128);
+        let half_white = Color32::from_white_alpha(128);
+        let additive_red = Color32::from_rgba_premultiplied(128, 0, 0, 0);
+        // Gray, half-transparent white over black, and red added to gray.
+        let mut mesh = Mesh::default();
+        let rect = |x: f32| egui::Rect::from_min_max(pos2(x, 0.0), pos2(x + 4.0, 4.0));
+        mesh.add_colored_rect(rect(0.0), gray);
+        mesh.add_colored_rect(rect(4.0), half_white);
+        mesh.add_colored_rect(rect(8.0), gray);
+        mesh.add_colored_rect(rect(8.0), additive_red);
+        let primitives = [ClippedPrimitive {
+            clip_rect: egui::Rect::EVERYTHING,
+            primitive: Primitive::Mesh(mesh),
+        }];
+        let mut delta = TexturesDelta::default();
+        let white = ColorImage::filled([1, 1], Color32::WHITE);
+        delta.set.insert(
+            TextureId::default(),
+            [ImageDelta::full(white, TextureOptions::LINEAR)].into(),
+        );
+
+        let linear = |color: Color32| Rgba::from(color).to_array();
+        let encode = egui::ecolor::gamma_u8_from_linear_f32;
+        let gray_linear = linear(gray)[0];
+        let expected = [
+            [128, 128, 128, 255],
+            [
+                encode(linear(half_white)[0]),
+                encode(linear(half_white)[1]),
+                encode(linear(half_white)[2]),
+                255,
+            ],
+            [encode(gray_linear + linear(additive_red)[0]), 128, 128, 255],
+        ];
+
+        let mut egui = EguiRenderer::new(rhi)?;
+        let presenter = Presenter::new(rhi)?;
+        let mut transients = Transients::default();
+        for format in [Format::Rgba8Srgb, Format::Rgba8Unorm] {
+            let pipeline = presenter.pipeline(rhi, format)?;
+            let target = Target::new(rhi, format, EXTENT)?;
+            let mut frame = rhi.begin_frame()?;
+            let mut uploads = Uploads::new(&mut frame);
+            egui.set_textures(uploads.rhi(), &mut uploads, &mut delta)?;
+            uploads.submit()?;
+            let meshes = egui.prepare(&frame, &primitives, 1.0, EXTENT, EXTENT)?;
+            let done = target.render(&frame, &mut transients, |graph, image| {
+                let ui = egui.record(graph, meshes, EXTENT, [])?;
+                Ok(presenter.record(graph, &pipeline, image, Some(ui))?)
+            })?;
+            frame.finish();
+
+            let texels = target.read(rhi, done)?;
+            for (column, expected) in expected.iter().enumerate() {
+                let texel = texels[column * 4 + EXTENT.0 as usize + 1];
+                assert!(
+                    close(texel, *expected),
+                    "{format:?}: column {column} is {texel:?}, not {expected:?}"
+                );
+            }
+        }
+        Ok(())
+    })
+}
