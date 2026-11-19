@@ -1,3 +1,5 @@
+use dirk_shaders::bindless::heap;
+
 use crate::{
     Capabilities, Error, Features, Format, ImageAccess, ImageUsage, Limits, Result, Rhi,
     SampleCounts, StorageImageIndex, TextureIndex, command::Transition, native,
@@ -600,6 +602,20 @@ impl Image {
     #[must_use]
     pub fn view(&self) -> Option<&ImageView> {
         self.view.as_ref()
+    }
+}
+
+impl ViewType {
+    /// The heap arrays images viewed this way are sampled and stored through,
+    /// if any.
+    pub(crate) const fn heap_bindings(self) -> (u32, Option<u32>) {
+        match self {
+            Self::D2 => (heap::TEXTURES_2D, Some(heap::STORAGE_IMAGES_2D)),
+            Self::D2Array => (heap::TEXTURES_2D_ARRAY, Some(heap::STORAGE_IMAGES_2D_ARRAY)),
+            Self::Cube => (heap::TEXTURES_CUBE, None),
+            Self::CubeArray => (heap::TEXTURES_CUBE_ARRAY, None),
+            Self::D3 => (heap::TEXTURES_3D, Some(heap::STORAGE_IMAGES_3D)),
+        }
     }
 }
 
