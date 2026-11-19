@@ -152,13 +152,14 @@ impl Viewport {
         };
         let output = graph.import_image(&images.output, before(SHOWN), SHOWN)?;
         let attachment = ImageAccess::DepthStencilAttachment;
-        let depth = graph.import_image(&images.depth, before(attachment), attachment)?;
+        // Only the output is kept: the scene pass resolves into it.
+        let depth = graph.import_scratch_image(&images.depth, before(attachment), attachment)?;
         let multisampled = images
             .multisampled
             .as_ref()
             .map(|image| {
                 let attachment = ImageAccess::ColorAttachment;
-                graph.import_image(image, before(attachment), attachment)
+                graph.import_scratch_image(image, before(attachment), attachment)
             })
             .transpose()?;
         let clear = LoadOp::Clear(self.settings.clear_color);

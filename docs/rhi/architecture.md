@@ -456,7 +456,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
   drawing windows and the UI sample the viewports' outputs.
 - One depth/MSAA attachment set per viewport (not per frame slot), imported into the graph
   from undefined on its first frame and from its attachment access after that, so frames
-  in flight take turns with a barrier between them.
+  in flight take turns with a barrier between them. They are scratch imports: their
+  contents are discarded once the output is resolved.
 - Per-object data lives in one per-slot storage buffer addressed by instance index. Meshes
   and egui pull their vertices through `BufferIndex`es; textures and samplers are
   `TextureIndex`es and `SamplerIndex`es in push data shared through `dirk_shaders::types`.
