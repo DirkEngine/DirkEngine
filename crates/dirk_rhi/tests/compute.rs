@@ -13,10 +13,10 @@ use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{Count, CountCs, FillVs, Paint, PaintCs};
 
 /// A compute pipeline running shader `S`.
-fn compute_pipeline<S: Shader, P: PushData>(rhi: &Rhi) -> Result<ComputePipeline<P>> {
+fn compute_pipeline<S: Shader<Push = P>, P: PushData>(rhi: &Rhi) -> Result<ComputePipeline<P>> {
     rhi.create_compute_pipeline(&ComputePipelineDesc {
         label: S::ENTRY_POINT,
-        shader: &rhi.create_shader::<S, P>()?,
+        shader: &rhi.create_shader::<S>()?,
     })
 }
 
@@ -124,7 +124,7 @@ fn dispatches_write_storage_buffers_and_images() -> Result<()> {
 #[test]
 fn compute_pipelines_are_validated() -> Result<()> {
     with_rhi(|rhi| {
-        let vertex = rhi.create_shader::<FillVs, dirk_rhi_test_shaders::Fill>()?;
+        let vertex = rhi.create_shader::<FillVs>()?;
         match rhi.create_compute_pipeline(&ComputePipelineDesc {
             label: "vertex",
             shader: &vertex,

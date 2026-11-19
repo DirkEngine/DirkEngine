@@ -163,8 +163,9 @@ frame.finish();                               // closes the frame (also on Drop)
   [Metal](#metal)); only Apple hosts compile SPIRV-Cross. Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way
   (`crates/dirk_rhi/test-shaders`).
-- `rhi.create_shader::<S, P>() -> ShaderModule<P>` asserts in a `const` block that `S`
-  reads no push data or exactly `size_of::<P>()` bytes, and that `P` is at most 128 bytes
+- `rhi.create_shader::<S>() -> ShaderModule<S::Push>`, where `S::Push` is the push data
+  type the entry point's source reads, asserts in a `const` block that `S` reads no push
+  data or exactly `size_of::<S::Push>()` bytes, and that `S::Push` is at most 128 bytes
   and a multiple of four. Mismatches fail `cargo build` (not `cargo check`, as with every
   post-monomorphization error).
 - `GraphicsPipeline<P>` is created from `ShaderModule<P>`s, so its push data type is the
@@ -287,8 +288,12 @@ encoder.dispatch(&pipeline, &push, [groups_x, groups_y, 1])?;  // CommandEncoder
   as entry point parameters at the documented bindings; the shader build declares the
   descriptor indexing capabilities, and accesses are `NonUniform`.
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
-  The shader build reflects each entry point's push block size and emits constants so a
-  `const` assertion fails the build if `size_of::<P>()` disagrees.
+  The shader build names each entry point's push data type, the one its
+  `#[spirv(push_constant)]` parameter refers to (`()` without one), as `Shader::Push`;
+  `rhi.create_shader::<S>()` returns a `ShaderModule<S::Push>`, so pipelines pair only
+  shaders of one push type (a shader reading none joins others with `with_push`). The
+  build also reflects each push block's size, and a `const` assertion fails the build if
+  it disagrees with the type's.
 - Indices read only the arrays of their kind: `get` accepts only those arrays' element
   types (sealed traits over the `spirv_std` image, sampler and buffer types), the shader
   build checks every array a shader declares against the heap's bindings, and `get` masks

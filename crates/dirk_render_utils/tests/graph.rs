@@ -68,14 +68,14 @@ impl Scene {
     }
 
     /// A pipeline drawing to one `Rgba8Unorm` target and `depth`.
-    fn pipeline<V: Shader, F: Shader, P: PushData>(
+    fn pipeline<V: Shader<Push = P>, F: Shader<Push = P>, P: PushData>(
         rhi: &Rhi,
         depth: Option<DepthState>,
     ) -> Result<GraphicsPipeline<P>> {
         rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
             label: F::ENTRY_POINT,
-            vertex: &rhi.create_shader::<V, P>()?,
-            fragment: Some(&rhi.create_shader::<F, P>()?),
+            vertex: &rhi.create_shader::<V>()?,
+            fragment: Some(&rhi.create_shader::<F>()?),
             topology: Topology::default(),
             cull_mode: CullMode::default(),
             front_face: FrontFace::default(),

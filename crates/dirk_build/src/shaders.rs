@@ -1,6 +1,7 @@
 //! Builds rust-gpu shader crates for `dirk_rhi`.
 
 mod msl;
+mod push;
 
 use std::{
     collections::BTreeMap,
@@ -29,10 +30,13 @@ use rspirv::{
 /// The generated file declares a type per entry point, named after it in
 /// `PascalCase` (`main_vs` becomes `MainVs`), implementing `dirk_rhi::Shader`
 /// with the stage, push data size and, for compute shaders, workgroup size
-/// reflected from its module. Creating a
-/// shader with push data of another size then fails the build. For Apple
-/// targets, which `dirk_rhi` runs on Metal, each module is translated to the
-/// Metal Shading Language; see [`msl`].
+/// reflected from its module, and the push data type its
+/// `#[spirv(push_constant)]` parameter refers to in the crate's source; see
+/// [`push`]. Modules of shaders reading a push data block of another size
+/// than that type fail the build, as do modules declaring resources other
+/// than the bindless heap's arrays as `dirk_shaders::bindless::heap` lays
+/// them out. For Apple targets, which `dirk_rhi` runs on Metal, each module
+/// is translated to the Metal Shading Language; see [`msl`].
 ///
 /// # Errors
 ///
@@ -69,6 +73,7 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
         bail!("expected one SPIR-V module per entry point");
     };
 
+    let source = push::Source::new(shader_crate)?;
     let mut generated = String::new();
     for (entry_point, module) in modules.into_iter().collect::<BTreeMap<_, _>>() {
         let spirv =
@@ -85,14 +90,19 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
         let path = out_dir.join(format!("{}.{extension}", entry_point.replace("::", "-")));
         fs::write(&path, code)?;
         let path = path.to_str().context("OUT_DIR is not valid UTF-8")?;
+        let push = source
+            .push_type(&entry_point)
+            .with_context(|| format!("finding the push data type of `{entry_point}`"))?;
         writeln!(
             generated,
             "/// The `{entry_point}` shader entry point.\n\
              pub struct {name};\n\
              // SAFETY: rust-gpu compiled this entry point for Vulkan 1.3, the\n\
-             // shader build reflected its stage and push data size, and\n\
-             // translated it for Metal on Apple targets.\n\
+             // shader build reflected its stage and push data size, found its\n\
+             // push data type in its source, checked the heap arrays it\n\
+             // declares, and translated it for Metal on Apple targets.\n\
              unsafe impl dirk_rhi::Shader for {name} {{\n    \
+                 type Push = {push};\n    \
                  const ENTRY_POINT: &'static str = {entry_point:?};\n    \
                  const STAGE: dirk_rhi::ShaderStage = dirk_rhi::ShaderStage::{stage:?};\n    \
                  const PUSH_SIZE: usize = {push_size};\n    \
@@ -359,7 +369,11 @@ impl Types<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Element {
     /// Sampled images, declared as depth images or not.
-    Texture { dim: Dim, arrayed: bool, depth: bool },
+    Texture {
+        dim: Dim,
+        arrayed: bool,
+        depth: bool,
+    },
     /// Storage images, declared without a format.
     StorageImage { dim: Dim, arrayed: bool },
     /// Samplers.
@@ -455,8 +469,16 @@ mod tests {
         let array = builder.type_runtime_array(image);
         let pointer = builder.type_pointer(None, StorageClass::UniformConstant, array);
         let variable = builder.variable(pointer, None, StorageClass::UniformConstant, None);
-        builder.decorate(variable, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-        builder.decorate(variable, Decoration::Binding, [Operand::LiteralBit32(binding)]);
+        builder.decorate(
+            variable,
+            Decoration::DescriptorSet,
+            [Operand::LiteralBit32(0)],
+        );
+        builder.decorate(
+            variable,
+            Decoration::Binding,
+            [Operand::LiteralBit32(binding)],
+        );
         Types(&builder.module()).check_bindings()
     }
 
