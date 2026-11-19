@@ -31,10 +31,11 @@ to DirkEngine. Keep changes focused and follow the style of neighbouring code.
 ## Validation
 
 `just validate` (or `just` alone) formats the sources and runs every check CI
-runs: Clippy with warnings denied on every target and feature set and on each
-crate alone, the tests with every feature and with none, the docs and doc
-tests, the dependency audit and the unused dependency check. Run it before
-handing work back.
+runs: Clippy with warnings denied on every target, with every feature, with no
+default features and on each crate alone, the tests with every feature and with
+none, the docs and doc tests, the dependency audit and the unused dependency
+check. Run it before handing work back. Mixed feature sets, such as `editor`
+without `cli`, aren't checked: build them yourself when you change that code.
 
 While iterating, run only what you changed, such as `just test -p <crate>`.
 When you change feature-gated code (`editor`, `cli`, `egui`), check it both
