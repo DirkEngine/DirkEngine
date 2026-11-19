@@ -1,8 +1,6 @@
 //! Shaders, graphics pipelines, render passes, and draws reading the
 //! bindless heap.
 
-use dirk_rhi_test_shaders::support;
-
 use std::time::Duration;
 
 use dirk_rhi::{
@@ -14,11 +12,11 @@ use dirk_rhi::{
     Indices, IndirectDraws, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi,
     SampleCount, SamplerDesc, Shader, ShaderStages, StoreOp, Subresource, Topology,
 };
+use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{
     CoveringVs, DepthCompare, DepthCompareFs, Fill, FillFs, FillVs, Textured, TexturedFs,
     TexturedVs, Vertex,
 };
-use support::with_rhi;
 
 const SIZE: u32 = 8;
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
