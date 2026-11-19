@@ -23,6 +23,9 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
     /// Texture coordinates.
     pub uv: [f32; 2],
+    /// Linear RGBA color the base color texture is multiplied by: the
+    /// vertex color times the material's base color factor.
+    pub color: [f32; 4],
 }
 
 /// Data of one drawn object, in a per-frame storage buffer the mesh shaders
