@@ -66,6 +66,25 @@ impl Format {
         )
     }
 
+    /// Size of one texel in bytes.
+    #[must_use]
+    pub const fn bytes_per_texel(self) -> u32 {
+        match self {
+            Self::R16Float | Self::Depth16Unorm => 2,
+            Self::Rgba8Unorm
+            | Self::Rgba8Srgb
+            | Self::Bgra8Unorm
+            | Self::Bgra8Srgb
+            | Self::Rg16Float
+            | Self::R32Float
+            | Self::Rg11b10Float
+            | Self::Depth24UnormStencil8
+            | Self::Depth32Float => 4,
+            Self::Rgba16Float | Self::Rg32Float | Self::Depth32FloatStencil8 => 8,
+            Self::Rgba32Float => 16,
+        }
+    }
+
     /// Whether this format has a stencil component.
     #[must_use]
     pub const fn has_stencil(self) -> bool {

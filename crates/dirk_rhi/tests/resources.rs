@@ -19,6 +19,7 @@ fn image_2d(format: Format, usage: ImageUsage) -> ImageDesc<'static> {
         mip_levels: 1,
         array_layers: 1,
         samples: SampleCount::X1,
+        rest: None,
     }
 }
 
@@ -258,6 +259,7 @@ fn images_are_validated_at_creation() -> Result<()> {
             rhi,
             ImageDesc {
                 samples: SampleCount::X4,
+                rest: None,
                 ..color
             },
             "multisampled",
@@ -272,11 +274,13 @@ fn multisampled_attachments_are_created() -> Result<()> {
         // Vulkan guarantees four samples for color attachments.
         let image = rhi.create_image(&ImageDesc {
             samples: SampleCount::X4,
+            rest: None,
             ..image_2d(Format::Rgba8Unorm, ImageUsage::COLOR_ATTACHMENT)
         })?;
         assert_eq!(image.info().samples, SampleCount::X4);
         let layered = rhi.create_image(&ImageDesc {
             samples: SampleCount::X4,
+            rest: None,
             array_layers: 2,
             ..image_2d(Format::Rgba8Unorm, ImageUsage::COLOR_ATTACHMENT)
         });

@@ -1,23 +1,52 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use bitflags::bitflags;
 
-use crate::{Format, FormatCapabilities, Result, native};
+use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
 
 /// Application information and policy used to create an [`Rhi`].
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RhiCreateInfo<'a> {
     /// Application name reported to drivers and debugging tools.
     pub application_name: &'a str,
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
     pub validation: bool,
+    /// Bytes of host-visible memory each frame slot allocates from, with
+    /// [`Frame::alloc`](crate::Frame::alloc); 8 MiB by default. Allocations
+    /// that do not fit get buffers of their own, so this never grows. Zero
+    /// gives every allocation a buffer of its own.
+    pub frame_memory: u64,
+}
+
+impl Default for RhiCreateInfo<'_> {
+    fn default() -> Self {
+        Self {
+            application_name: "",
+            validation: false,
+            frame_memory: 8 << 20,
+        }
+    }
 }
 
 /// The render hardware interface: one device and everything created from it.
+///
+/// Dropping it waits for the GPU to finish all submitted work.
 pub struct Rhi {
     pub(crate) device: Arc<native::Device>,
+    /// Unique among the RHIs of the process, unlike the device's address,
+    /// which a later RHI may reuse; tells their completions apart.
+    pub(crate) id: u64,
+    /// The number of the last frame begun; zero before the first.
+    pub(crate) frame: u64,
+    pub(crate) slots: [FrameSlot; FRAMES_IN_FLIGHT],
 }
+
+/// The id of the next [`Rhi`] created.
+static NEXT_RHI_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Rhi {
     /// Selects the most capable device that meets the RHI's requirements and
@@ -26,12 +55,23 @@ impl Rhi {
     /// # Errors
     ///
     /// Returns [`Error::NoSuitableDevice`](crate::Error::NoSuitableDevice)
-    /// listing why each device was rejected, or a native error if the
-    /// graphics API cannot be loaded or initialized.
+    /// listing why each device was rejected, [`Error::Invalid`](crate::Error::Invalid) if the frame
+    /// memory exceeds the device's buffer size limit, or a native error if
+    /// the graphics API cannot be loaded or initialized or memory cannot be
+    /// allocated.
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
-        Ok(Self {
+        let mut rhi = Self {
             device: Arc::new(native::Device::new(info)?),
-        })
+            id: NEXT_RHI_ID.fetch_add(1, Ordering::Relaxed),
+            frame: 0,
+            slots: Default::default(),
+        };
+        if info.frame_memory > 0 {
+            for slot in 0..FRAMES_IN_FLIGHT {
+                rhi.slots[slot].memory = Some(rhi.create_frame_memory(info.frame_memory)?);
+            }
+        }
+        Ok(rhi)
     }
 
     /// What the selected device supports. Queried once at creation.

@@ -3,12 +3,15 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 
-use super::{Check, Device};
+use super::{Check, Device, device::Garbage};
 use crate::{ImageDesc, ImageDimension, ImageUsage, SampleCount, ViewType};
+
+/// Identifies an image while it exists.
+pub(crate) type ImageId = vk::Image;
 
 /// A Vulkan image, its memory and its view.
 pub(crate) struct Image {
-    device: Arc<Device>,
+    pub(super) device: Arc<Device>,
     pub(super) raw: vk::Image,
     allocation: Allocation,
     view: Option<ImageView>,
@@ -97,6 +100,11 @@ impl Image {
         Ok(image)
     }
 
+    /// Identifies the image while it exists: until the GPU is done with it.
+    pub(crate) fn id(&self) -> ImageId {
+        self.raw
+    }
+
     /// The image's view, if it has one.
     pub(crate) fn view(&self) -> Option<ImageView> {
         self.view
@@ -105,15 +113,13 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        // SAFETY: no submissions exist yet, so the GPU cannot be using the
-        // image, and its view is destroyed before it.
-        unsafe {
-            if let Some(view) = self.view {
-                self.device.raw.destroy_image_view(view.raw, None);
-            }
-            self.device.raw.destroy_image(self.raw, None);
-        }
-        self.device.free(std::mem::take(&mut self.allocation));
+        // Its first transition, if still queued, stays: commands recorded
+        // before the drop expect it. Destroying the image forgets it.
+        self.device.bury(Garbage::Image {
+            raw: self.raw,
+            view: self.view.map(|view| view.raw),
+            allocation: std::mem::take(&mut self.allocation),
+        });
     }
 }
 

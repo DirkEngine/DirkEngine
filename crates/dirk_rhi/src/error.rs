@@ -1,4 +1,6 @@
-use std::error::Error as StdError;
+use std::{error::Error as StdError, time::Duration};
+
+use crate::Completion;
 
 /// Result of a fallible RHI operation.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -24,6 +26,14 @@ pub enum Error {
     /// The device was lost. Every object created from it is unusable.
     #[error("the graphics device was lost")]
     DeviceLost,
+    /// A wait ended before its submission completed.
+    #[error("timed out after {timeout:?} waiting for {completion}")]
+    Timeout {
+        /// The completion waited for.
+        completion: Completion,
+        /// How long the wait lasted.
+        timeout: Duration,
+    },
     /// A request was rejected before reaching the native API.
     #[error("invalid {object} `{label}`: {reason}")]
     Invalid {
