@@ -359,8 +359,10 @@ format capabilities follow Apple's feature tables, conservatively.
 - **Shaders.** `dirk_build::shaders` translates each entry point with SPIRV-Cross (MSL
   3.0, argument buffers tier 2) and rewrites the heap's argument buffer struct so every
   shader declares every array in binding order: slot `s` of binding `b` is element
-  `heap::first_element(b) + s`. Storage buffer lengths, which rust-gpu's bounds checks
-  read, follow the arrays as a pointer to one `u32` per element
+  `heap::first_element(b) + s`. An array read as several types, such as storage buffers
+  of different elements, is declared once and cast for the others. Storage buffer
+  lengths, which rust-gpu's bounds checks read, follow the arrays as a pointer to one
+  `u32` per element
   (`heap::metal::BUFFER_LENGTHS`). The heap is buffer 0 and push data buffer 1
   (`heap::metal`); push data is set with `setVertexBytes`/`setFragmentBytes`, padded to
   16 bytes since MSL rounds structs up to their alignment. Vertex shaders flip y; front
