@@ -47,9 +47,11 @@ impl ShaderStage {
 ///
 /// # Safety
 ///
-/// [`SPIRV`](Self::SPIRV) is a valid SPIR-V module for Vulkan 1.3 declaring
-/// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE). The entry
-/// point only binds the bindless heap, reads its push data block as
+/// [`CODE`](Self::CODE) is a valid module for the target's backend holding
+/// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE): SPIR-V for
+/// Vulkan 1.3, or, on Apple targets, Metal Shading Language source holding
+/// only that entry point, translated by the shader build. The entry point
+/// only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
 /// bytes (zero if it reads none), and uses only features the RHI enables.
 pub unsafe trait Shader {
@@ -62,8 +64,9 @@ pub unsafe trait Shader {
     /// Size of the push data block the entry point reads, in bytes; zero if
     /// it reads none.
     const PUSH_SIZE: usize;
-    /// The SPIR-V module, as bytes.
-    const SPIRV: &'static [u8];
+    /// The module: SPIR-V, or Metal Shading Language source on Apple
+    /// targets.
+    const CODE: &'static [u8];
 }
 
 /// A shader entry point ready for pipelines whose push data is `P`, the
@@ -81,7 +84,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
-///     const SPIRV: &'static [u8] = &[];
+///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
 ///     let rhi = Rhi::new(&Default::default())?;
@@ -103,7 +106,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
-///     const SPIRV: &'static [u8] = &[];
+///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
 ///     let rhi = Rhi::new(&Default::default())?;
@@ -153,7 +156,7 @@ impl Rhi {
             ));
         }
         Ok(ShaderModule {
-            raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::SPIRV)?,
+            raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::CODE)?,
             stage: S::STAGE,
             entry_point: S::ENTRY_POINT,
             push: PhantomData,
