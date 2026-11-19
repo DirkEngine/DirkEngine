@@ -5,21 +5,15 @@ crate style.
 
 ## Validation
 
-Before handing work back, run the same validation steps consistently:
+`just validate` (or `just` alone) formats the sources and runs every check CI
+runs: Clippy with warnings denied on every target and feature set, the tests
+with every feature and with none, the docs and doc tests, the dependency audit
+and the unused dependency check. Run it before handing work back.
 
-```sh
-cargo fmt --all
-cargo clippy --workspace
-cargo nextest run --workspace
-```
-
-If working on just one specific crate, replace `--workspace` with `-p <crate>`.
+While iterating, run only what you changed, such as `just test -p <crate>`.
 
 If a validation step cannot be run because a required tool or system dependency
 is unavailable, report the exact command that failed and the reason.
-
-If working on specific cargo features, run with `--no-default-features`
-& `--all-features`.
 
 ## Pull requests
 
