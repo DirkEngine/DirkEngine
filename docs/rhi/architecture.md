@@ -108,6 +108,33 @@ frame.finish();                               // closes the frame (also on Drop)
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes outside `PerFrame`, and creating shaders from unvalidated bytes.
 - Dynamic state defaults: viewport and scissor default to the render area.
+- Render passes use dynamic rendering. Attachments are whole single-mip, single-layer 2D
+  images (`&Image`, using the view it owns) of one extent; color attachments may resolve
+  into a single-sample image. `pass.draw(&pipeline, &push, vertices, instances)` and
+  `pass.draw_indexed(&pipeline, &push, Indices { buffer, format, offset, range, .. }, instances)`
+  check only that the pipeline's targets equal the pass's (one small `==`) and that the
+  indices fit their buffer; rebinding an unchanged pipeline or index buffer is skipped.
+- Clip space is Vulkan's: y points down and depth runs from 0 to 1. Backends with
+  another convention flip y when translating shaders.
+
+## Shaders and pipelines
+
+- Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
+  shader crate from a build script into one SPIR-V module per entry point and generates a
+  type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (SPIR-V, stage,
+  reflected push data size). Implementing it is the only `unsafe` step; creating modules
+  from it is safe. `dirk_rhi`'s tests build their shaders the same way
+  (`crates/dirk_rhi/test-shaders`).
+- `rhi.create_shader::<S, P>() -> ShaderModule<P>` asserts in a `const` block that `S`
+  reads no push data or exactly `size_of::<P>()` bytes, and that `P` is at most 128 bytes
+  and a multiple of four. Mismatches fail `cargo build` (not `cargo check`, as with every
+  post-monomorphization error).
+- `GraphicsPipeline<P>` is created from `ShaderModule<P>`s, so its push data type is the
+  shaders'. Descriptions are validated fully at creation: stages, target formats and
+  sample counts against format capabilities, blending against `BLEND` support and
+  independent blend, the color target limit, depth bias clamp. Pipelines have topology,
+  culling, front face, depth test and bias, per-target blending and write masks; stencil
+  tests come when something needs them.
 - Typestate presentation: `AcquiredFrame` -> submitted -> presented. Presenting before
   submit, or submitting twice, does not compile. No atomics tracking frame phase.
 

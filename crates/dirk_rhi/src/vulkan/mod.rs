@@ -7,13 +7,16 @@ mod convert;
 mod device;
 mod image;
 mod instance;
+mod pass;
+mod pipeline;
 mod queue;
 mod sampler;
 
-pub(crate) use buffer::Buffer;
+pub(crate) use buffer::{Buffer, BufferId};
 pub(crate) use command::{CommandBuffer, CommandPool};
 pub(crate) use device::Device;
 pub(crate) use image::{Image, ImageView};
+pub(crate) use pipeline::{GraphicsPipeline, PipelineId, ShaderModule};
 pub(crate) use sampler::Sampler;
 
 use crate::{Error, Result};
@@ -46,4 +49,4 @@ macro_rules! device_children {
     )+};
 }
 
-device_children!(Buffer, Image);
+device_children!(Buffer, Image, ShaderModule, GraphicsPipeline);

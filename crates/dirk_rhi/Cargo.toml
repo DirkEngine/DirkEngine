@@ -12,6 +12,7 @@ documentation.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+bytemuck.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -20,6 +21,9 @@ tracing.workspace = true
 # through MoltenVK's portability subset.
 ash.workspace = true
 gpu-allocator.workspace = true
+
+[dev-dependencies]
+dirk_rhi_test_shaders = { version = "0.1.0", path = "test-shaders" }
 
 # Unlike the workspace, which forbids `unsafe`, this crate is the audited boundary
 # between the native graphics API and its safe wrappers, so unsafe code is allowed

@@ -18,8 +18,11 @@ mod format;
 mod frame;
 mod graveyard;
 mod image;
+mod pass;
+mod pipeline;
 mod queue;
 mod sampler;
+mod shader;
 
 // Every target uses Vulkan, Apple targets through MoltenVK, until the Metal
 // backend selects `metal/mod.rs` on Apple targets.
@@ -39,5 +42,15 @@ pub use image::{
     Extent3d, Image, ImageDesc, ImageDimension, ImageInfo, ImageRange, ImageRegion, ImageView,
     Origin3d, SampleCount, ViewType,
 };
+pub use pass::{
+    ColorAttachment, DepthAttachment, IndexFormat, Indices, LoadOp, Rect, RenderPass,
+    RenderPassDesc, StoreOp, Viewport,
+};
+pub use pipeline::{
+    BlendComponent, BlendFactor, BlendOp, BlendState, ColorTarget, ColorWrites, CompareOp,
+    CullMode, DepthBias, DepthState, FrontFace, GraphicsPipeline, GraphicsPipelineDesc,
+    MAX_COLOR_TARGETS, Topology,
+};
 pub use queue::{Completion, CopyQueue, Graphics, QueueKind, QueueTransfer, QueueType};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc, SamplerInfo};
+pub use shader::{MAX_PUSH_DATA_SIZE, PushData, Shader, ShaderModule, ShaderStage};

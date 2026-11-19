@@ -6,6 +6,9 @@ use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 use super::{Check, Device, device::Garbage};
 use crate::{BufferDesc, BufferUsage, Memory, Result};
 
+/// Identifies a buffer while it is alive, to skip rebinding it.
+pub(crate) type BufferId = vk::Buffer;
+
 /// A Vulkan buffer and its memory.
 pub(crate) struct Buffer {
     pub(super) device: Arc<Device>,
@@ -55,6 +58,11 @@ impl Buffer {
         .check("vkBindBufferMemory")?;
         device.name(raw, desc.label);
         Ok(buffer)
+    }
+
+    /// Identifies the buffer while it is alive.
+    pub(crate) fn id(&self) -> BufferId {
+        self.raw
     }
 
     /// Copies `data` into mapped memory at `offset`, flushing it if the
