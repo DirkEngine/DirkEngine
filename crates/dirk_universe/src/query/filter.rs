@@ -2,14 +2,14 @@
 
 use std::{any::TypeId, marker::PhantomData};
 
-use crate::{Entity, Universe, components::Component, macros::sealed::Sealed, schedule::Access};
+use crate::{Entity, Universe, components::Component, macros::sealed, schedule::Access};
 
 /// A predicate that decides whether an entity is included in a query.
 ///
 /// Filters are combined with tuples (AND semantics) and composed from
 /// [`With`], [`Without`] and [`Changed`]. The empty tuple `()`
 /// matches every entity.
-pub trait QueryFilter: Sealed {
+pub trait QueryFilter: sealed::QueryFilter {
     /// Returns `true` when `entity` satisfies this filter in `universe`.
     #[doc(hidden)]
     fn matches(entity: Entity, universe: &Universe, last_run: u64) -> bool;
@@ -49,7 +49,7 @@ all_tuples!(impl_filter_for_tuple);
 
 /// Matches entities that have component `C`.
 pub struct With<C: Component>(PhantomData<C>);
-impl<C: Component> Sealed for With<C> {}
+impl<C: Component> sealed::QueryFilter for With<C> {}
 impl<C: Component> QueryFilter for With<C> {
     fn matches(entity: Entity, universe: &Universe, _: u64) -> bool {
         universe.components.contains(entity, TypeId::of::<C>())
@@ -62,7 +62,7 @@ impl<C: Component> QueryFilter for With<C> {
 
 /// Matches entities that do **not** have component `C`.
 pub struct Without<C: Component>(PhantomData<C>);
-impl<C: Component> Sealed for Without<C> {}
+impl<C: Component> sealed::QueryFilter for Without<C> {}
 impl<C: Component> QueryFilter for Without<C> {
     fn matches(entity: Entity, universe: &Universe, _: u64) -> bool {
         !universe.components.contains(entity, TypeId::of::<C>())
@@ -76,7 +76,7 @@ impl<C: Component> QueryFilter for Without<C> {
 /// Matches components added or mutably dereferenced since this system last ran.
 /// Each system observes changes independently; reading does not clear a flag.
 pub struct Changed<C: Component>(PhantomData<C>);
-impl<C: Component> Sealed for Changed<C> {}
+impl<C: Component> sealed::QueryFilter for Changed<C> {}
 impl<C: Component> QueryFilter for Changed<C> {
     fn matches(entity: Entity, universe: &Universe, last_run: u64) -> bool {
         universe.components.changed::<C>(entity, last_run)
