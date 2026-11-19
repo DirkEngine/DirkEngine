@@ -3,9 +3,9 @@
 //!
 //! glTF support: triangle lists, strips and fans, with or without 8-, 16- or
 //! 32-bit indices, including sparse accessors; positions, normals (flat per
-//! face when missing) and the UV set of the material's base color texture;
-//! RGB and RGBA 8-bit base color textures with their sampler's filters and
-//! wrapping. Unsupported content is logged and skipped: such primitives are
+//! face when missing), vertex colors and the UV set of the material's base
+//! color texture; base color factors; RGB and RGBA 8-bit base color textures
+//! with their sampler's filters and wrapping. Unsupported content is logged and skipped: such primitives are
 //! not drawn, and such images are replaced by white.
 
 use std::{
@@ -352,8 +352,9 @@ impl From<&gltf::texture::Sampler<'_>> for SamplerKey {
 
 impl Geometry {
     /// Reads `primitive`'s triangles, with the texture coordinates of
-    /// `uv_set`. Without normals, each triangle gets its own vertices
-    /// facing its way, as glTF asks.
+    /// `uv_set`, and colors multiplied by its material's base color factor.
+    /// Without normals, each triangle gets its own vertices facing its way,
+    /// as glTF asks.
     fn read(
         primitive: &gltf::Primitive<'_>,
         buffers: &[gltf::buffer::Data],
@@ -383,6 +384,13 @@ impl Geometry {
         let uvs: Vec<[f32; 2]> = reader
             .read_tex_coords(uv_set)
             .map_or_default(|uvs| uvs.into_f32().collect());
+        let colors: Vec<[f32; 4]> = reader
+            .read_colors(0)
+            .map_or_default(|colors| colors.into_rgba_f32().collect());
+        let factor = primitive
+            .material()
+            .pbr_metallic_roughness()
+            .base_color_factor();
         let vertex = |index: usize| MeshVertex {
             position: positions[index],
             normal: normals
@@ -390,6 +398,9 @@ impl Geometry {
                 .and_then(|normals| normals.get(index).copied())
                 .unwrap_or_default(),
             uv: uvs.get(index).copied().unwrap_or_default(),
+            color: colors.get(index).map_or(factor, |color| {
+                std::array::from_fn(|i| color[i] * factor[i])
+            }),
         };
         if normals.is_some() {
             return Ok(Self {
@@ -575,6 +586,33 @@ mod tests {
             Unsupported::Topology(gltf::mesh::Mode::Lines)
         ));
         assert!(matches!(partial, Unsupported::PartialTriangle(4)));
+        Ok(())
+    }
+
+    #[test]
+    fn vertex_colors_are_multiplied_by_the_base_color_factor() -> anyhow::Result<()> {
+        let [Ok(triangle)] = read("vertex_colors.gltf", 0)? else {
+            panic!("the primitive should load");
+        };
+        let colors: Vec<_> = triangle
+            .vertices
+            .iter()
+            .map(|vertex| vertex.color)
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                [0.5, 0.0, 0.0, 0.25],
+                [0.0, 1.0, 0.0, 0.25],
+                [0.0, 0.0, 1.0, 0.25]
+            ]
+        );
+        // Without vertex colors or a material, colors are white.
+        let [Ok(white)] = read("non_indexed.gltf", 0)? else {
+            panic!("the primitive should load");
+        };
+        let colors: Vec<_> = white.vertices.iter().map(|vertex| vertex.color).collect();
+        assert_eq!(colors, [[1.0; 4]; 3]);
         Ok(())
     }
 
