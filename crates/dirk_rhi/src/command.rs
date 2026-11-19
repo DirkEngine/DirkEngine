@@ -653,6 +653,7 @@ impl CommandEncoder<'_, Graphics> {
     ) -> Result<()> {
         self.check_image_copy("image blit", src, dst, regions)?;
         self.check_blit("image blit", src, filter)?;
+        self.end_pass();
         self.raw.blit_image(
             self.device(),
             &src.raw,
@@ -699,6 +700,7 @@ impl CommandEncoder<'_, Graphics> {
                 format!("cannot generate mips from {before:?} to {after:?}"),
             ));
         }
+        self.end_pass();
         self.raw.generate_mips(self.device(), image, before, after)
     }
 
