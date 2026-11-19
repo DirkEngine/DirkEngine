@@ -17,6 +17,10 @@ pub struct RhiCreateInfo<'a> {
     pub application_name: &'a str,
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
+    ///
+    /// Metal's validation is enabled by running with `MTL_DEBUG_LAYER=1` (and
+    /// `MTL_SHADER_VALIDATION=1` for shaders) instead, and stops the process
+    /// on misuse; this makes failed command buffers name the failing pass.
     pub validation: bool,
     /// The display windows will be presented to, such as the platform's
     /// event loop. Enables presentation; `None` for headless use.
@@ -94,8 +98,9 @@ impl Rhi {
         &self.device.capabilities
     }
 
-    /// Number of errors the validation layer has reported since creation.
-    /// Always zero when validation is disabled or unavailable.
+    /// Number of errors the validation layer has reported since creation,
+    /// or, on Metal, submitted command buffers that failed. Always zero when
+    /// Vulkan validation is disabled or unavailable.
     #[must_use]
     pub fn validation_error_count(&self) -> usize {
         self.device.validation_error_count()
