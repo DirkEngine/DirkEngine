@@ -17,6 +17,7 @@ unsafe-modules = [
     "dirk_renderer::viewport_editor",
     "dirk_renderer::window",
     "dirk_renderer",
+    "dirk_render_utils::upload",
     "dirk_rhi::buffer",
     "dirk_rhi::command",
     "dirk_rhi::frame",
@@ -27,6 +28,7 @@ unsafe-modules = [
     "frames",
     "pipelines",
     "resources",
+    "uploads",
 ]
 
 # The binary's library, which holds `DefaultPlugins` and the CLI, and the build
@@ -104,5 +106,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 194 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 197 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]

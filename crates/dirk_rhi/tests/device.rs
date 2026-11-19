@@ -1,9 +1,7 @@
 //! Device creation and capability queries.
 
-mod support;
-
 use dirk_rhi::{Error, Format, FormatFeatures, ImageUsage, Result, RhiCreateInfo, SampleCounts};
-use support::{rhi, with_rhi};
+use dirk_rhi_test_shaders::support::{rhi, with_rhi};
 
 #[test]
 fn capabilities_report_what_every_device_guarantees() -> Result<()> {
