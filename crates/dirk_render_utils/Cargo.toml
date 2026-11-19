@@ -1,0 +1,25 @@
+[package]
+name = "dirk_render_utils"
+description = "Rendering utilities built on DirkEngine's RHI"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+dirk_rhi.workspace = true
+
+# Unlike the workspace, which forbids `unsafe`, this crate records raw RHI
+# barriers, which are unsafe because they bypass the render graph. Every unsafe
+# block states why its barrier describes the resource's accesses.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = "warn"
+unwrap_used = "warn"

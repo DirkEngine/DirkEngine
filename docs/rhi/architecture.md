@@ -290,6 +290,10 @@ format capabilities follow Apple's feature tables, conservatively.
   straight into it (no intermediate `Vec`).
 - Copies are padded to the 4-byte rule internally; callers can upload any byte length.
 - Uses the copy queue with ownership transfer when a dedicated one exists.
+- `Uploader` owns the staging buffers; `uploader.begin(&frame)` opens a batch.
+  `uploads.buffer(..)`/`uploads.image(..)` return the new resource at once, each
+  with the graphics access it ends in, and `uploads.submit()` must precede the
+  graphics work using them, which then needs no wait.
 
 ## Renderer
 
