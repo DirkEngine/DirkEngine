@@ -191,16 +191,7 @@ impl Heap {
             heap.element::<u64>(BUFFER_LENGTHS)
                 .write(heap.lengths.gpuAddress());
         }
-        for (binding, capacity) in (0..).zip(CAPACITIES) {
-            for index in 0..capacity {
-                let slot = Slot {
-                    binding,
-                    index,
-                    declared: None,
-                };
-                heap.write(slot, None);
-            }
-        }
+        heap.empty_all();
         Ok(heap)
     }
 
@@ -337,19 +328,65 @@ impl Heap {
                 self.write_buffer(element, buffer.gpuAddress(), length);
                 return;
             }
-            None => match &self.empty[slot.binding as usize] {
-                Some(texture) => texture.gpuResourceID(),
-                None if slot.binding == heap::SAMPLERS => self.default_sampler.gpuResourceID(),
-                None => {
-                    // Shaders read nothing from a buffer of zero bytes.
+            None => {
+                let Some(id) = self.empty_id(slot.binding) else {
                     self.write_buffer(element, 0, 0);
                     return;
-                }
-            },
+                };
+                id
+            }
         };
         // SAFETY: `element` is inside the arrays, and resource IDs are eight
         // bytes; no pending work reads this slot.
         unsafe { self.element::<MTLResourceID>(element).write(id) };
+    }
+
+    /// What fills the empty slots of the array at `binding`: its empty
+    /// texture or the default sampler, or `None` for storage buffers, whose
+    /// empty slots hold zero bytes at address zero, which shaders read
+    /// nothing from.
+    fn empty_id(&self, binding: u32) -> Option<MTLResourceID> {
+        match &self.empty[binding as usize] {
+            Some(texture) => Some(texture.gpuResourceID()),
+            None if binding == heap::SAMPLERS => Some(self.default_sampler.gpuResourceID()),
+            None => None,
+        }
+    }
+
+    /// Empties every slot, filling each array at once: there are hundreds
+    /// of thousands. The heap is not shared yet.
+    fn empty_all(&self) {
+        let arguments = self.arguments.contents();
+        for (binding, capacity) in (0..).zip(CAPACITIES) {
+            let first = first_element(binding) as usize;
+            let capacity = capacity as usize;
+            // SAFETY: the array lies inside the argument buffer, which
+            // nothing else accesses yet, and resource IDs and buffer
+            // addresses are eight bytes.
+            unsafe {
+                match self.empty_id(binding) {
+                    Some(id) => std::slice::from_raw_parts_mut(
+                        arguments.cast::<MTLResourceID>().as_ptr().add(first),
+                        capacity,
+                    )
+                    .fill(id),
+                    None => std::slice::from_raw_parts_mut(
+                        arguments.cast::<u64>().as_ptr().add(first),
+                        capacity,
+                    )
+                    .fill(0),
+                }
+            }
+        }
+        // SAFETY: the lengths hold one `u32` per element of the arrays, and
+        // nothing else accesses them yet.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.lengths.contents().cast::<u32>().as_ptr(),
+                BUFFER_LENGTHS as usize,
+            )
+            .fill(0);
+        }
     }
 
     /// Writes a buffer at `address` of `length` bytes to `element`.
