@@ -2,7 +2,7 @@
 //! the engine's, so the tests also cover the shader build and its push data
 //! check, and the setup those tests share with the crates built on the RHI.
 
-pub use dirk_rhi_test_shaders_gpu::{Fill, Instanced, Sliced, Textured, Vertex};
+pub use dirk_rhi_test_shaders_gpu::{DepthCompare, Fill, Instanced, Sliced, Textured, Vertex};
 
 #[expect(
     unsafe_code,

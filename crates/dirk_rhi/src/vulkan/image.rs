@@ -87,16 +87,20 @@ impl Image {
 
         if let Some(view_type) = view {
             let view = image.create_view(view_type, desc.format, desc.label)?;
-            let (sampled, storage) = view_type.heap_bindings();
-            let storage_usage = desc.usage.contains(ImageUsage::STORAGE);
-            if desc.usage.contains(ImageUsage::SAMPLED) {
-                let layout = ImageAccess::sampled_layout(storage_usage);
-                image.slots[0] =
-                    Some(device.add_to_heap(sampled, Descriptor::Image(view, layout))?);
-            }
-            if let Some(storage) = storage.filter(|_| storage_usage) {
-                let descriptor = Descriptor::Image(view, vk::ImageLayout::GENERAL);
-                image.slots[1] = Some(device.add_to_heap(storage, descriptor)?);
+            let storage = desc.usage.contains(ImageUsage::STORAGE);
+            for ((usage, binding), slot) in view_type
+                .heap_bindings(desc.format)
+                .into_iter()
+                .zip(&mut image.slots)
+            {
+                if let Some(binding) = binding.filter(|_| desc.usage.contains(usage)) {
+                    let layout = if usage == ImageUsage::STORAGE {
+                        vk::ImageLayout::GENERAL
+                    } else {
+                        ImageAccess::sampled_layout(storage)
+                    };
+                    *slot = Some(device.add_to_heap(binding, Descriptor::Image(view, layout))?);
+                }
             }
         }
         Ok(image)

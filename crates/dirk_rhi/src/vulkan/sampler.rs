@@ -9,7 +9,7 @@ use super::{
     device::Garbage,
     heap::{Descriptor, Slot},
 };
-use crate::{AddressMode, Filter, Result, SamplerDesc};
+use crate::{AddressMode, CompareOp, Filter, Result, SamplerDesc};
 
 /// A Vulkan sampler.
 pub(crate) struct Sampler {
@@ -35,7 +35,9 @@ impl Sampler {
             .anisotropy_enable(desc.max_anisotropy > 1)
             .max_anisotropy(f32::from(desc.max_anisotropy))
             .min_lod(desc.min_lod)
-            .max_lod(desc.max_lod);
+            .max_lod(desc.max_lod)
+            .compare_enable(desc.compare.is_some())
+            .compare_op(desc.compare.map_or(vk::CompareOp::NEVER, CompareOp::vk));
         // SAFETY: `info` is valid for the device; anisotropy is only enabled
         // when the device supports it, as validated against its limit.
         let raw = unsafe { device.raw.create_sampler(&info, None) }.check("vkCreateSampler")?;
