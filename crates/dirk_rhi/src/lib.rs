@@ -49,7 +49,7 @@ pub use command::{
 };
 pub use device::{Capabilities, Features, Limits, Rhi, RhiCreateInfo};
 pub use dirk_shaders::bindless::{
-    BufferIndex, BufferSlice, SamplerIndex, StorageImageIndex, TextureIndex,
+    BufferIndex, BufferSlice, DepthTextureIndex, SamplerIndex, StorageImageIndex, TextureIndex,
 };
 pub use error::{Error, Result};
 pub use format::{Format, FormatCapabilities, FormatFeatures, ImageUsage, SampleCounts};

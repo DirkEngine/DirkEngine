@@ -350,23 +350,27 @@ enum Element {
 impl Element {
     /// The elements of the heap's array at `binding`, if it has one there.
     fn at(binding: u32) -> Option<Self> {
-        let texture = |dim, arrayed| Self::Texture {
+        let texture = |dim, arrayed, depth| Self::Texture {
             dim,
             arrayed,
-            depth: false,
+            depth,
         };
         let storage = |dim, arrayed| Self::StorageImage { dim, arrayed };
         Some(match binding {
-            heap::TEXTURES_2D => texture(Dim::Dim2D, false),
-            heap::TEXTURES_2D_ARRAY => texture(Dim::Dim2D, true),
-            heap::TEXTURES_CUBE => texture(Dim::DimCube, false),
-            heap::TEXTURES_CUBE_ARRAY => texture(Dim::DimCube, true),
-            heap::TEXTURES_3D => texture(Dim::Dim3D, false),
+            heap::TEXTURES_2D => texture(Dim::Dim2D, false, false),
+            heap::TEXTURES_2D_ARRAY => texture(Dim::Dim2D, true, false),
+            heap::TEXTURES_CUBE => texture(Dim::DimCube, false, false),
+            heap::TEXTURES_CUBE_ARRAY => texture(Dim::DimCube, true, false),
+            heap::TEXTURES_3D => texture(Dim::Dim3D, false, false),
             heap::STORAGE_IMAGES_2D => storage(Dim::Dim2D, false),
             heap::STORAGE_IMAGES_2D_ARRAY => storage(Dim::Dim2D, true),
             heap::STORAGE_IMAGES_3D => storage(Dim::Dim3D, false),
             heap::SAMPLERS => Self::Sampler,
             heap::BUFFERS => Self::StorageBuffer,
+            heap::DEPTH_TEXTURES_2D => texture(Dim::Dim2D, false, true),
+            heap::DEPTH_TEXTURES_2D_ARRAY => texture(Dim::Dim2D, true, true),
+            heap::DEPTH_TEXTURES_CUBE => texture(Dim::DimCube, false, true),
+            heap::DEPTH_TEXTURES_CUBE_ARRAY => texture(Dim::DimCube, true, true),
             _ => return None,
         })
     }
@@ -448,8 +452,10 @@ mod tests {
         // Depth 2 is unknown, as `Image!` declares by default; sampled 2 is
         // a storage image.
         check(heap::TEXTURES_2D, 2, 1).expect("2D textures");
+        check(heap::DEPTH_TEXTURES_2D, 1, 1).expect("2D depth textures");
         check(heap::STORAGE_IMAGES_2D, 2, 2).expect("2D storage images");
         assert!(check(heap::TEXTURES_2D_ARRAY, 2, 1).is_err(), "not arrayed");
+        assert!(check(heap::DEPTH_TEXTURES_2D, 2, 1).is_err(), "not depth");
         assert!(check(heap::TEXTURES_2D, 1, 1).is_err(), "depth");
         assert!(check(heap::TEXTURES_2D, 2, 2).is_err(), "storage");
         assert!(check(heap::SAMPLERS, 2, 1).is_err(), "not samplers");
