@@ -5,8 +5,8 @@ use dirk_universe::{
     components::Component,
     prelude::{Delta, InWorld},
     query::{
-        Query,
-        filter::{Added, Changed, Without},
+        Changes, Query,
+        filter::{Changed, Without},
     },
     systems::{Commands, DeltaTime, IntoSystem, System},
 };
@@ -483,14 +483,12 @@ fn systems_run_once_per_tick_even_without_entities_and_share_deltas() {
     for id in [1, 2] {
         let observed = Rc::clone(&observed);
         let mut calls = 0;
-        builder = builder.with_system(
-            move |worlds: Query<(Entity, Delta<World>)>, DeltaTime(delta_time)| {
-                calls += 1;
-                observed
-                    .borrow_mut()
-                    .push((id, calls, worlds.iter().count(), delta_time));
-            },
-        );
+        builder = builder.with_system(move |worlds: Changes<World>, DeltaTime(delta_time)| {
+            calls += 1;
+            observed
+                .borrow_mut()
+                .push((id, calls, worlds.iter().count(), delta_time));
+        });
     }
     let mut universe = builder.build().expect("systems should schedule");
     universe.tick(0.25);
@@ -524,11 +522,8 @@ struct Structure {
     positions: Observed<i32>,
 }
 
-fn observe<C: Component, T>(
-    query: &Query<(Entity, Delta<C>)>,
-    value: impl Fn(&C) -> T,
-) -> Observed<T> {
-    let mut observed: Vec<_> = query
+fn observe<C: Component, T>(changes: &Changes<C>, value: impl Fn(&C) -> T) -> Observed<T> {
+    let mut observed: Vec<_> = changes
         .iter()
         .map(|(entity, delta)| match delta {
             Delta::Set(component) => (entity, Some(value(&component))),
@@ -549,9 +544,7 @@ fn structure_observer(
     let seen = Rc::new(RefCell::new(Vec::new()));
     let system_seen = Rc::clone(&seen);
     let universe = universe.with_system(
-        move |worlds: Query<(Entity, Delta<World>)>,
-              locations: Query<(Entity, Delta<InWorld>)>,
-              positions: Query<(Entity, Delta<Position>)>| {
+        move |worlds: Changes<World>, locations: Changes<InWorld>, positions: Changes<Position>| {
             system_seen.borrow_mut().push(Structure {
                 worlds: observe(&worlds, |world| world.name().to_owned()),
                 locations: observe(&locations, |in_world| in_world.0),
@@ -606,23 +599,6 @@ fn deltas_report_the_net_structural_change_since_the_last_run() {
     // Removals are reported once.
     assert!(seen[2].worlds.is_empty() && seen[2].locations.is_empty());
     assert_eq!(seen[2].positions, []);
-}
-
-#[test]
-fn deltas_outside_systems_report_present_components_as_set() {
-    let mut universe = Universe::builder()
-        .with_world(
-            World::builder("w").with_entity(Entity::builder().with_component(Position(5, 0))),
-        )
-        .build()
-        .expect("systems should schedule");
-    universe.tick(0.0);
-
-    let query = universe.query::<(Entity, Delta<Position>)>();
-    let observed = observe(&query, |position| position.0);
-
-    assert_eq!(observed.len(), 1);
-    assert_eq!(observed[0].1, Some(5));
 }
 
 #[test]
@@ -691,13 +667,10 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
     let observer_removed = removed_seen.clone();
     let mut universe = Universe::builder()
         .with_system(
-            move |added: Query<&Counter, Added<Counter>>,
-                  changed: Query<&Counter, Changed<Counter>>,
-                  deltas: Query<(Entity, Delta<Counter>)>| {
-                observer_seen.borrow_mut().push((
-                    added.iter().map(|value| value.0).collect::<Vec<_>>(),
-                    changed.iter().map(|value| value.0).collect::<Vec<_>>(),
-                ));
+            move |changed: Query<&Counter, Changed<Counter>>, deltas: Changes<Counter>| {
+                observer_seen
+                    .borrow_mut()
+                    .push(changed.iter().map(|value| value.0).collect::<Vec<_>>());
                 observer_removed
                     .borrow_mut()
                     .push(observe(&deltas, |c| c.0));
@@ -727,13 +700,7 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
     universe.tick(0.0);
     assert_eq!(
         *seen.borrow(),
-        vec![
-            (vec![1], vec![1]),
-            (vec![], vec![3]),
-            (vec![4], vec![4]),
-            (vec![], vec![]),
-            (vec![], vec![]),
-        ]
+        vec![vec![1], vec![3], vec![4], vec![], vec![],]
     );
     // Removing and re-adding within one tick is a net `Set`.
     assert_eq!(

@@ -191,7 +191,7 @@ fn removed_outputs_are_reported_as_deltas() {
         clippy::needless_pass_by_value,
         reason = "Systems take their parameters by value."
     )]
-    fn observe(momenta: Query<(Entity, Delta<Momentum>)>) {
+    fn observe(momenta: Changes<Momentum>) {
         let removed = momenta.iter().filter(|(_, delta)| delta.value().is_none());
         REMOVED.set(REMOVED.get() + removed.count());
     }
