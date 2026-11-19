@@ -194,6 +194,10 @@ impl CommandBuffer {
         }
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is shared with Metal, where this can fail"
+    )]
     pub(crate) fn blit_image(
         self,
         device: &Device,
