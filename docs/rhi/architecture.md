@@ -304,10 +304,13 @@ encoder.write_timestamp(&mut timestamps, 0)?;  // graphics encoders, between com
 - Each frame slot has its own queries (one Vulkan query pool, or Metal counter sample
   buffer, per slot). `begin(&frame)` returns the timestamps the slot's previous frame
   wrote, which beginning the frame waited for, as `Option<Duration>`s since an arbitrary
-  point (`None` where it wrote none), then clears them; writing before `begin`, twice in
+  point (`None` where it wrote none, or wrote one in an encoder it did not submit), then
+  clears them; writing before `begin`, twice in
   a frame, or out of range is rejected. No fences, no waits and no `unsafe`.
 - Only graphics encoders write timestamps, outside render passes (the pass borrows the
-  encoder); each marks when every earlier command finished.
+  encoder). On Vulkan each marks when every earlier command finished; on Metal, when the
+  GPU reached it, which earlier passes may still be running at, so Metal differences
+  approximate GPU time.
 - Vulkan: `vkCmdWriteTimestamp2` at `ALL_COMMANDS`, results read with availability and
   reset from the host (`hostQueryReset`). `TIMESTAMPS` needs timestamp bits on the
   graphics family, a timestamp period and host query reset; ticks are masked to the

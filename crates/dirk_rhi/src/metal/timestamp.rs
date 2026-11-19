@@ -4,9 +4,9 @@ use objc2::{rc::autoreleasepool, runtime::ProtocolObject};
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder,
-    MTLCommonCounterSetTimestamp, MTLCounterDontSample, MTLCounterResultTimestamp,
-    MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint,
-    MTLCounterSet, MTLDevice, MTLResourceOptions, MTLStorageMode,
+    MTLCommonCounterSetTimestamp, MTLCounterDontSample, MTLCounterErrorValue,
+    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
+    MTLCounterSamplingPoint, MTLCounterSet, MTLDevice, MTLResourceOptions, MTLStorageMode,
 };
 
 use super::{Check, CommandBuffer, Device, Object, device::Garbage};
@@ -125,10 +125,11 @@ impl Timestamps {
     }
 
     /// Reads every timestamp into `ticks`, and measures the tick period.
-    /// Unwritten ones read as Metal's error value.
+    /// Unwritten ones, which Metal resolves to its error value, read as
+    /// `None`.
     ///
     /// No pending work may write them.
-    pub(crate) fn read(&mut self, ticks: &mut [u64]) -> Result<()> {
+    pub(crate) fn read(&mut self, ticks: &mut [Option<u64>]) -> Result<()> {
         let range = NSRange::new(0, ticks.len());
         // SAFETY: the range is inside the buffer, and no pending work writes
         // it.
@@ -137,7 +138,8 @@ impl Timestamps {
             .to_vec();
         let (results, _) = data.as_chunks::<{ size_of::<MTLCounterResultTimestamp>() }>();
         for (ticks, result) in ticks.iter_mut().zip(results) {
-            *ticks = u64::from_ne_bytes(*result);
+            *ticks =
+                Some(u64::from_ne_bytes(*result)).filter(|&ticks| ticks != MTLCounterErrorValue);
         }
         if let Some(clock) = &self.device.clock {
             self.period = clock.period(&self.device.raw);
@@ -167,7 +169,9 @@ impl Drop for Timestamps {
 impl CommandBuffer {
     /// Writes timestamp `query` after the commands recorded before it: at
     /// the start of a blit pass filling the scratch buffer on GPUs sampling
-    /// at stage boundaries, or between blits on others.
+    /// at stage boundaries, or between blits on others. The scratch buffer
+    /// is untracked, so nothing orders that pass after earlier ones, which
+    /// may still run when it samples.
     pub(crate) fn write_timestamp(&mut self, device: &Device, timestamps: &Timestamps, query: u32) {
         let sampling = device.clock.as_ref().map(|clock| &clock.sampling);
         if let Some(Sampling::StageBoundary { scratch }) = sampling {

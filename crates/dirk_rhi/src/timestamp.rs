@@ -33,8 +33,8 @@ pub struct Timestamps {
     frame: u64,
     /// The values `begin` last read.
     results: Box<[Option<Duration>]>,
-    /// Raw values read, before conversion.
-    ticks: Box<[u64]>,
+    /// Raw values read, before conversion; `None` where unavailable.
+    ticks: Box<[Option<u64>]>,
     label: Box<str>,
 }
 
@@ -72,7 +72,7 @@ impl Rhi {
             count,
             frame: 0,
             results: vec![None; count as usize].into(),
-            ticks: vec![0; count as usize].into(),
+            ticks: vec![None; count as usize].into(),
             label: label.into(),
         })
     }
@@ -81,7 +81,8 @@ impl Rhi {
 impl Timestamps {
     /// Begins using these timestamps in `frame`, returning the ones the last
     /// frame using its slot wrote, as times since an arbitrary point, or
-    /// `None` where it wrote none. Call once per frame before writing them;
+    /// `None` where it wrote none, or wrote one in an encoder it did not
+    /// submit. Call once per frame before writing them;
     /// later calls in the same frame return the same values.
     ///
     /// Differences between timestamps measure GPU time; they are only
@@ -115,8 +116,10 @@ impl Timestamps {
                 reason = "timestamps are positive, and nanoseconds need no more than 52 bits of \
                           precision"
             )]
-            let nanoseconds = (ticks as f64 * period) as u64;
-            *result = written.then_some(Duration::from_nanos(nanoseconds));
+            let nanoseconds = |ticks: u64| (ticks as f64 * period) as u64;
+            *result = ticks
+                .filter(|_| written)
+                .map(|ticks| Duration::from_nanos(nanoseconds(ticks)));
         }
         queries.raw.reset();
         queries.written.fill(false);
@@ -150,8 +153,12 @@ impl Timestamps {
 }
 
 impl CommandEncoder<'_, Graphics> {
-    /// Writes timestamp `index` of `timestamps` once the GPU has finished
-    /// every command recorded before it.
+    /// Writes timestamp `index` of `timestamps` after the commands recorded
+    /// before it. On Vulkan, it is written once they have all finished. On
+    /// Metal, it is sampled when the GPU reaches it, which nothing orders
+    /// after the earlier passes finish, since Metal overlaps passes that do
+    /// not depend on each other: differences between Metal timestamps
+    /// approximate GPU time.
     ///
     /// # Errors
     ///

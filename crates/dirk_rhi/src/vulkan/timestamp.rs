@@ -37,10 +37,11 @@ impl Timestamps {
     }
 
     /// Reads every timestamp into `ticks`, without the bits the queue does
-    /// not write. Unwritten ones read as zero.
+    /// not write. Unavailable ones, never written by submitted work, read as
+    /// `None`.
     ///
     /// No pending work may write them.
-    pub(crate) fn read(&mut self, ticks: &mut [u64]) -> Result<()> {
+    pub(crate) fn read(&mut self, ticks: &mut [Option<u64>]) -> Result<()> {
         // SAFETY: the queries exist, and no pending work writes them.
         let read = unsafe {
             self.device.raw.get_query_pool_results(
@@ -55,11 +56,7 @@ impl Timestamps {
             Err(error) => return Err(error).check("vkGetQueryPoolResults"),
         }
         for (ticks, &[value, available]) in ticks.iter_mut().zip(&self.results) {
-            *ticks = if available == 0 {
-                0
-            } else {
-                value & self.device.timestamp_mask
-            };
+            *ticks = (available != 0).then_some(value & self.device.timestamp_mask);
         }
         Ok(())
     }

@@ -766,6 +766,10 @@ fn timestamps_are_read_once_their_frame_slot_comes_round() -> Result<()> {
         )?;
         encoder.write_timestamp(&mut timestamps, 1)?;
         frame.submit(encoder)?;
+        // An encoder dropped instead of submitted writes nothing.
+        frame
+            .encoder::<Graphics>("discarded")?
+            .write_timestamp(&mut timestamps, 2)?;
         frame.finish();
         // Later frames use the other slots.
         for _ in 1..FRAMES_IN_FLIGHT {
@@ -774,7 +778,7 @@ fn timestamps_are_read_once_their_frame_slot_comes_round() -> Result<()> {
         }
         let frame = rhi.begin_frame()?;
         let [Some(start), Some(end), None] = *timestamps.begin(&frame)? else {
-            panic!("the first frame wrote its first two timestamps only");
+            panic!("the first frame's submitted work wrote its first two timestamps only");
         };
         // Copying 1 MiB takes some time, but far less than a second.
         let elapsed = end.checked_sub(start);
