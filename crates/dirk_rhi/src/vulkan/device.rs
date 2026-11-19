@@ -94,6 +94,8 @@ impl Device {
         let optional = capabilities.features;
         let features = vk::PhysicalDeviceFeatures::default()
             .robust_buffer_access(true)
+            .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true)
             .sampler_anisotropy(optional.contains(Features::SAMPLER_ANISOTROPY))
             .image_cube_array(optional.contains(Features::IMAGE_CUBE_ARRAY))
             .independent_blend(optional.contains(Features::INDEPENDENT_BLEND))
