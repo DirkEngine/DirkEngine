@@ -197,6 +197,7 @@ impl BufferUsage {
             (Self::COPY_DST, vk::BufferUsageFlags::TRANSFER_DST),
             (Self::INDEX, vk::BufferUsageFlags::INDEX_BUFFER),
             (Self::STORAGE, vk::BufferUsageFlags::STORAGE_BUFFER),
+            (Self::INDIRECT, vk::BufferUsageFlags::INDIRECT_BUFFER),
         ]
         .into_iter()
         .filter(|(usage, _)| self.contains(*usage))

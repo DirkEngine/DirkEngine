@@ -14,6 +14,8 @@ bitflags! {
         const INDEX = 1 << 2;
         /// Read and written by shaders as a storage buffer.
         const STORAGE = 1 << 3;
+        /// Arguments of indirect draws.
+        const INDIRECT = 1 << 4;
     }
 }
 

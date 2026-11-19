@@ -120,6 +120,8 @@ pub struct Limits {
     /// Largest buffer with [`BufferUsage::STORAGE`](crate::BufferUsage::STORAGE),
     /// in bytes.
     pub max_storage_buffer_size: u64,
+    /// Most draws one indirect draw call makes.
+    pub max_draw_indirect_count: u32,
 }
 
 bitflags! {
