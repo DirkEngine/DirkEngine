@@ -13,7 +13,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use dirk_rhi::{
     ColorAttachment, Error, Format, Frame, Graphics, ImageAccess, ImageBarrier, ImageRange,
     ImageUsage, LoadOp, PresentMode, RenderPassDesc, Result, Rhi, RhiCreateInfo, StoreOp,
-    Swapchain, SwapchainDesc,
+    Subresource, Swapchain, SwapchainDesc,
 };
 use winit::{
     application::ApplicationHandler,
@@ -173,6 +173,7 @@ impl App {
                 label: "clear",
                 colors: &[ColorAttachment {
                     image: acquired.image(),
+                    subresource: Subresource::default(),
                     load: LoadOp::Clear(color),
                     store: StoreOp::Store,
                     resolve: None,
