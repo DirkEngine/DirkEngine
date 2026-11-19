@@ -1,6 +1,10 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use bitflags::bitflags;
+use raw_window_handle::DisplayHandle;
 
 use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
 
@@ -12,6 +16,9 @@ pub struct RhiCreateInfo<'a> {
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
     pub validation: bool,
+    /// The display windows will be presented to, such as the platform's
+    /// event loop. Enables presentation; `None` for headless use.
+    pub display: Option<DisplayHandle<'a>>,
 }
 
 /// The render hardware interface: one device and everything created from it.
@@ -19,10 +26,16 @@ pub struct RhiCreateInfo<'a> {
 /// Dropping it waits for the GPU to finish all submitted work.
 pub struct Rhi {
     pub(crate) device: Arc<native::Device>,
+    /// Unique among the RHIs of the process, unlike the device's address,
+    /// which a later RHI may reuse; tells their completions apart.
+    pub(crate) id: u64,
     /// The number of the last frame begun; zero before the first.
     pub(crate) frame: u64,
     pub(crate) slots: [FrameSlot; FRAMES_IN_FLIGHT],
 }
+
+/// The id of the next [`Rhi`] created.
+static NEXT_RHI_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Rhi {
     /// Selects the most capable device that meets the RHI's requirements and
@@ -36,6 +49,7 @@ impl Rhi {
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
         Ok(Self {
             device: Arc::new(native::Device::new(info)?),
+            id: NEXT_RHI_ID.fetch_add(1, Ordering::Relaxed),
             frame: 0,
             slots: Default::default(),
         })

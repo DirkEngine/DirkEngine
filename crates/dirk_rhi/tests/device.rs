@@ -42,6 +42,7 @@ fn application_names_with_nul_bytes_are_rejected() {
     let result = rhi(&RhiCreateInfo {
         application_name: "dirk\0rhi",
         validation: false,
+        display: None,
     });
     assert!(
         matches!(

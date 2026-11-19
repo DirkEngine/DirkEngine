@@ -9,6 +9,7 @@ pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
     let Some(mut rhi) = rhi(&RhiCreateInfo {
         application_name: "dirk_rhi tests",
         validation: true,
+        display: None,
     })?
     else {
         return Ok(());
