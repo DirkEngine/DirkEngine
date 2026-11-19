@@ -2,7 +2,7 @@
 
 You own one area of DirkEngine in a parallel cleanup pass. Your task names the
 area, paths, crates, branch prefix, issue and `CARGO_BUILD_JOBS`, and lists
-what the other agents and open PRs hold.
+what the other agents and PRs outside the pass hold.
 
 Read every file in your area, and `docs/dev/rust-conventions.md`. Make real
 simplifications, not cosmetic churn, and bring the code you touch in line
@@ -20,10 +20,11 @@ with the conventions. Report bigger issues.
   fix PR for each. If a cleanup can't be done without changing behavior, report
   it too. Report a vulnerability only in your final message, never in a PR,
   commit or code comment.
-- **Stay in your area.** Never edit a file an open PR holds, nor rename what
-  such a file uses: report it instead. Edit another area only when a rename
-  forces it: keep it minimal and list those files in the PR description.
-  Report what crosses areas: another lane cleans up between them.
+- **Stay in your area.** Edit another area only when a rename forces it: keep
+  it minimal and list those files in the PR description. Report what crosses
+  areas: another lane cleans up between them. Never edit a file your task lists
+  as held by a PR outside the pass, nor make a change that would force such an
+  edit: report it instead.
 - **Keep the docs right.** Fix stale doc comments in your files. If you rename
   something a README, an `AGENTS.md` or a page in `docs/` names, update it.
 - Stop and report anything that needs a design decision.

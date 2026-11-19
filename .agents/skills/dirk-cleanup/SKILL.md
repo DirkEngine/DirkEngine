@@ -22,9 +22,8 @@ agent, branch, PR, review state and finding, and the files each task holds.
 Files are free once the task holding them has reported and its PRs touching
 them have merged or closed. Start no task on files that aren't free. A forced
 edit in another lane's files (a renamed item's callers, a docs reference) is
-the exception: that lane rebases over it. Files open PRs hold have no
-exception. After compaction, a usage limit or a T3 restart, check the ledger
-and restart only what didn't finish.
+the exception: that lane rebases over it. After compaction, a usage limit or a
+T3 restart, check the ledger and restart only what didn't finish.
 
 ## Audit
 
@@ -68,8 +67,9 @@ Nobody edits `assets` or `.agents`. `docs/`, every README and the `AGENTS.md`
 files belong to the docs lane. Each area agent opens several focused PRs, on
 branches named `refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
 
-Open PRs hold their files too, until they merge or close or the owner releases
-them: list them all with `gh pr list --limit 200 --json number,title,files`.
+PRs opened outside the pass hold their files too, with no forced-edit
+exception, until they merge or close or the owner releases them. List them
+all with `gh pr list --limit 200 --json number,title,files`.
 
 Builds run in parallel on a machine with no swap. Pick one
 `CARGO_BUILD_JOBS` value for every agent that compiles, such as 4, and pass
@@ -77,12 +77,12 @@ it to each. Run `just build` here first, so every worktree finds rust-gpu's
 backend cached in `~/.cache/rust-gpu`. Run at most 4 reviews at a time.
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
-`refactor: cleanup pass, November 2026`. Each PR says `Part of #<n>`. Tell
-the owner the split in one message, with the files open PRs hold in each area.
-Start an area no open PR touches without waiting. For the rest, ask the owner
-whether to start now, leaving the held files alone, or after those PRs merge.
-A held file that frees up goes to its area's agent if it's still running, and
-otherwise waits for the next pass.
+`refactor: cleanup pass, November 2026`. Each cleanup PR says `Part of #<n>`.
+Tell the owner the split in one message, with the files outside PRs hold in
+each area. Start an area no outside PR touches without waiting. For the rest,
+ask the owner whether to start now, leaving the held files alone, or after
+those PRs merge. A held file that frees up goes to its area's agent if it
+hasn't reported; otherwise its cleanup waits for the next pass.
 
 ### Start the agents
 
@@ -90,7 +90,7 @@ Call `orchestrator_capabilities` once. For each area, start a `delegate_task`
 on Claude Opus 5.5 with `isolation: "worktree"` and `role: "implementation"`.
 The task says to follow `.agents/skills/dirk-cleanup/references/agent-brief.md`.
 It names the area, paths, crates, branch prefix, issue, what the other areas
-own, the files open PRs hold, and `CARGO_BUILD_JOBS`.
+own, the files outside PRs hold, and `CARGO_BUILD_JOBS`.
 
 Start a docs lane the same way, with the docs lane's files as its area and
 `docs/cleanup-<YYYY-MM-DD>-` as its branch prefix. It fixes drift between the
