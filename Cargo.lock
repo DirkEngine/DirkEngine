@@ -696,9 +696,7 @@ name = "dirk_renderer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ash",
- "ash-window",
- "cargo-gpu-install",
+ "bytemuck",
  "dirk_assets",
  "dirk_build",
  "dirk_engine",
@@ -706,22 +704,18 @@ dependencies = [
  "dirk_input",
  "dirk_platform",
  "dirk_player",
+ "dirk_render_utils",
+ "dirk_rhi",
+ "dirk_rhi_test_shaders",
  "dirk_shaders",
+ "dirk_threads",
  "dirk_universe",
- "dirk_utils",
  "dirk_world",
  "egui",
- "egui-ash-renderer",
  "glam",
  "gltf",
- "gpu-allocator",
  "parking_lot",
- "pastey",
- "proc-macro2",
- "quote",
  "raw-window-handle",
- "rspirv",
- "slotmap",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -778,7 +772,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "dirk_proc",
- "glam",
  "spirv-std",
 ]
 
@@ -787,6 +780,7 @@ name = "dirk_shaders_gpu"
 version = "0.1.0"
 dependencies = [
  "dirk_shaders",
+ "glam",
  "spirv-std",
 ]
 
@@ -928,6 +922,7 @@ version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0656a7530b9e2841ee7a5f983965bdd9840c32f4012f759cfd44b912cced6b34"
 dependencies = [
+ "bytemuck",
  "emath",
 ]
 
@@ -949,18 +944,6 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "web-sys",
-]
-
-[[package]]
-name = "egui-ash-renderer"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5366921cf6111f490b2a8a2ac9fe44800afe9ae8dc95b693ebb6f9dd791e00ef"
-dependencies = [
- "ash",
- "egui",
- "log",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -986,6 +969,9 @@ name = "emath"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c8d4141cf0f60fb2f7aefaf352d3ffa5171ef0ab09731c64391801e95e48f1"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "epaint"
@@ -994,6 +980,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0ec0308dc23130fc1a7d4623a8534c2ed069c6dc84e258ee4f3de99615aa1a3"
 dependencies = [
  "ahash",
+ "bytemuck",
  "ecolor",
  "emath",
  "epaint_default_fonts",
@@ -2011,12 +1998,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2551,15 +2532,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "slotmap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
-dependencies = [
- "version_check",
-]
 
 [[package]]
 name = "smallvec"
