@@ -194,7 +194,7 @@ impl Uploads<'_> {
     ///
     /// `mips[level]` holds mip `level`'s texels tightly packed: rows, then
     /// depth slices, then array layers. Mips past the last one given are left
-    /// undefined, for example to be generated on the GPU.
+    /// undefined.
     ///
     /// # Errors
     ///
@@ -208,25 +208,38 @@ impl Uploads<'_> {
         access: ImageAccess,
         mips: &[&[u8]],
     ) -> Result<Image> {
-        let image = self.frame.rhi().create_image(&ImageDesc {
-            usage: desc.usage | ImageUsage::COPY_DST,
+        let image = self.copy_image(desc, mips)?;
+        Recording::get(&mut self.recording, self.frame)?.finish_image(&image, access)?;
+        Ok(image)
+    }
+
+    /// Creates an image from `desc` holding `texels` in mip 0, packed as
+    /// for [`Uploads::image`], and generates its other mips on the graphics
+    /// queue by filtering mip 0 down. Graphics work submitted after this
+    /// batch reads it through `access`. `desc.usage` gains
+    /// [`ImageUsage::COPY_SRC`] and [`ImageUsage::COPY_DST`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Uploads::image`], or [`Error::Invalid`] if the
+    /// format cannot be blitted with linear filtering.
+    pub fn mipmapped_image(
+        &mut self,
+        desc: &ImageDesc<'_>,
+        access: ImageAccess,
+        texels: &[u8],
+    ) -> Result<Image> {
+        let desc = ImageDesc {
+            usage: desc.usage | ImageUsage::COPY_SRC,
             ..*desc
-        })?;
-        let info = *image.info();
-        Self::check_mips(&info, desc.label, mips)?;
+        };
+        let image = self.copy_image(&desc, &[texels])?;
         let recording = Recording::get(&mut self.recording, self.frame)?;
-        recording.begin_image(&image)?;
-        let alignment = info.format.copy_offset_alignment();
-        for (level, data) in (0..).zip(mips) {
-            let size = data.len() as u64;
-            let offset = self.uploader.stage(self.frame, data, size, alignment)?;
-            let staging = self.uploader.staging.get(self.frame);
-            let copy = BufferImageCopy::packed(info.format, offset, info.mip_region(level));
-            with_copies!(recording, encoder => {
-                encoder.copy_buffer_to_image(staging, &image, &[copy])
-            })?;
-        }
-        recording.finish_image(&image, access)?;
+        // Hands mip 0 over to the graphics queue, which blits the others.
+        recording.finish_image(&image, ImageAccess::CopyDestination)?;
+        recording
+            .graphics()
+            .generate_mips(&image, ImageAccess::CopyDestination, access)?;
         Ok(image)
     }
 
@@ -256,6 +269,31 @@ impl Uploads<'_> {
             Recording::Graphics(encoder) => self.frame.submit(encoder)?,
         };
         Ok(Some(done))
+    }
+
+    /// Creates an image from `desc`, with [`ImageUsage::COPY_DST`], and
+    /// records copies of `mips` into it, leaving it in
+    /// [`ImageAccess::CopyDestination`] on the queue copying.
+    fn copy_image(&mut self, desc: &ImageDesc<'_>, mips: &[&[u8]]) -> Result<Image> {
+        let image = self.frame.rhi().create_image(&ImageDesc {
+            usage: desc.usage | ImageUsage::COPY_DST,
+            ..*desc
+        })?;
+        let info = *image.info();
+        Self::check_mips(&info, desc.label, mips)?;
+        let recording = Recording::get(&mut self.recording, self.frame)?;
+        recording.begin_image(&image)?;
+        let alignment = info.format.copy_offset_alignment();
+        for (level, data) in (0..).zip(mips) {
+            let size = data.len() as u64;
+            let offset = self.uploader.stage(self.frame, data, size, alignment)?;
+            let staging = self.uploader.staging.get(self.frame);
+            let copy = BufferImageCopy::packed(info.format, offset, info.mip_region(level));
+            with_copies!(recording, encoder => {
+                encoder.copy_buffer_to_image(staging, &image, &[copy])
+            })?;
+        }
+        Ok(image)
     }
 
     /// Checks that `mips` holds one to all of the mips of the image `info`
@@ -309,6 +347,14 @@ impl<'f> Recording<'f> {
                 Self::Graphics(frame.encoder("uploads")?)
             }),
         })
+    }
+
+    /// The encoder recording graphics work after the batch's copies.
+    fn graphics(&mut self) -> &mut CommandEncoder<'f, Graphics> {
+        match self {
+            Self::Transfer { acquires, .. } => acquires,
+            Self::Graphics(encoder) => encoder,
+        }
     }
 
     /// Prepares a new image for copies into it.

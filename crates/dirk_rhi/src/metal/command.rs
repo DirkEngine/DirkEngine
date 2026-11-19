@@ -13,8 +13,8 @@ use objc2_metal::{
 
 use super::{Buffer, Check, Device, Image, Object, usize};
 use crate::{
-    BufferBarrier, BufferCopy, BufferImageCopy, Format, ImageBarrier, ImageCopy, ImageRange,
-    ImageRegion, QueueType, Result,
+    BufferBarrier, BufferCopy, BufferImageCopy, Format, ImageAccess, ImageBarrier, ImageCopy,
+    ImageRange, ImageRegion, QueueType, Result,
 };
 
 /// Creates command buffers for one queue and frame slot. Metal command
@@ -256,6 +256,23 @@ impl CommandBuffer {
                 }
             }
         }
+    }
+
+    /// Generates every mip of `image` from mip 0. Metal orders the levels
+    /// and tracks the hazards around them.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is shared with Vulkan, whose blits can fail"
+    )]
+    pub(crate) fn generate_mips(
+        &mut self,
+        _device: &Device,
+        image: &crate::Image,
+        _before: ImageAccess,
+        _after: ImageAccess,
+    ) -> Result<()> {
+        self.blit().generateMipmapsForTexture(&image.raw.raw);
+        Ok(())
     }
 
     /// Records nothing: Metal tracks every hazard, and its queues need no

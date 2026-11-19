@@ -369,6 +369,117 @@ fn blits_scale_regions_with_filtering() -> Result<()> {
 }
 
 #[test]
+fn generated_mips_filter_every_level_and_layer_in_linear_space() -> Result<()> {
+    with_rhi(|rhi| {
+        // Two layers of 7x5 in one uniform color each, so every mip of a
+        // layer keeps its color however odd sizes are filtered; and a 2x1
+        // black and white image, whose mip averages them in linear space.
+        let colors = [[200, 100, 50, 255], [10, 220, 120, 128]];
+        let layers = Extent3d::new_2d(7, 5);
+        let pair = Extent3d::new_2d(2, 1);
+        let create = |label, extent: Extent3d, array_layers| {
+            rhi.create_image(&ImageDesc {
+                label,
+                dimension: ImageDimension::D2,
+                extent,
+                format: Format::Rgba8Srgb,
+                usage: ImageUsage::COPY_SRC | ImageUsage::COPY_DST,
+                mip_levels: extent.width.max(extent.height).bit_width(),
+                array_layers,
+                samples: SampleCount::X1,
+            })
+        };
+        let layered = create("layers", layers, 2)?;
+        let black_and_white = create("black and white", pair, 1)?;
+        let mut texels: Vec<u8> = colors.iter().flat_map(|color| color.repeat(35)).collect();
+        let pair_offset = texels.len() as u64;
+        texels.extend([0, 0, 0, 255, 255, 255, 255, 255]);
+        let mut staging = buffer(
+            rhi,
+            texels.len() as u64,
+            BufferUsage::COPY_SRC,
+            Memory::Upload,
+        )?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { staging.write(0, &texels)? };
+        // Every mip of both layers, then mip 1 of the pair.
+        let mips: Vec<_> = (0..layered.info().mip_levels)
+            .map(|level| (&layered, layered.info().mip_region(level)))
+            .chain([(&black_and_white, black_and_white.info().mip_region(1))])
+            .collect();
+        let mut offsets = Vec::new();
+        let mut size = 0;
+        for (_, region) in &mips {
+            offsets.push(size);
+            size += u64::from(region.extent.width * region.extent.height * region.layer_count) * 4;
+        }
+        let readback = buffer(rhi, size, BufferUsage::COPY_DST, Memory::Readback)?;
+        let packed = |offset, region| BufferImageCopy::packed(Format::Rgba8Srgb, offset, region);
+        let prepare = |image| ImageBarrier {
+            image,
+            range: ImageRange::ALL,
+            before: ImageAccess::Undefined,
+            after: ImageAccess::CopyDestination,
+            transfer: None,
+        };
+
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("mips")?;
+        // SAFETY: the images are new.
+        unsafe { encoder.barrier(&[], &[prepare(&layered), prepare(&black_and_white)])? };
+        let base = |image: &Image| image.info().mip_region(0);
+        encoder.copy_buffer_to_image(&staging, &layered, &[packed(0, base(&layered))])?;
+        let pair_base = packed(pair_offset, base(&black_and_white));
+        encoder.copy_buffer_to_image(&staging, &black_and_white, &[pair_base])?;
+        assert_invalid(
+            encoder.generate_mips(&layered, ImageAccess::Undefined, ImageAccess::CopySource),
+            "cannot generate mips from Undefined",
+        );
+        for image in [&layered, &black_and_white] {
+            encoder.generate_mips(image, ImageAccess::CopyDestination, ImageAccess::CopySource)?;
+        }
+        for ((image, region), &offset) in mips.iter().zip(&offsets) {
+            encoder.copy_image_to_buffer(image, &readback, &[packed(offset, *region)])?;
+        }
+        // SAFETY: the readback buffer was only copied into.
+        unsafe {
+            encoder.barrier(
+                &[BufferBarrier {
+                    buffer: &readback,
+                    before: BufferAccess::CopyDestination,
+                    after: BufferAccess::HostRead,
+                    transfer: None,
+                }],
+                &[],
+            )?;
+        }
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, TIMEOUT)?;
+
+        // Rounding may differ by one; filtering in sRGB space would give 128
+        // instead of 188 for the pair.
+        let expected: Vec<u8> = mips[..mips.len() - 1]
+            .iter()
+            .flat_map(|(_, region)| {
+                let texels = (region.extent.width * region.extent.height) as usize;
+                colors.iter().flat_map(move |color| color.repeat(texels))
+            })
+            .chain([188, 188, 188, 255])
+            .collect();
+        let pixels = read(&readback, 0, expected.len())?;
+        assert!(
+            pixels
+                .iter()
+                .zip(&expected)
+                .all(|(texel, expected)| texel.abs_diff(*expected) <= 1),
+            "generated {pixels:?} instead of {expected:?}"
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn recording_rejects_invalid_requests() -> Result<()> {
     with_rhi(|rhi| {
         let source = buffer(rhi, 64, BufferUsage::COPY_SRC, Memory::Device)?;

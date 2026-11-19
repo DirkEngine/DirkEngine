@@ -587,7 +587,57 @@ impl CommandEncoder<'_, Graphics> {
         filter: Filter,
     ) -> Result<()> {
         self.check_image_copy("image blit", src, dst, regions)?;
-        let info = src.info();
+        self.check_blit("image blit", src, filter)?;
+        self.raw.blit_image(
+            self.device(),
+            &src.raw,
+            &dst.raw,
+            src.info().format,
+            regions,
+            filter,
+        )
+    }
+
+    /// Generates every mip of every layer of `image` by filtering mip 0
+    /// down, moving the whole image from `before` to `after` with the
+    /// barriers it needs. Mips past the first may hold anything before.
+    ///
+    /// `before` must describe every access since the image's previous
+    /// barrier, including its layout. Like render graph imports, which
+    /// state the access an image is in rather than recording one, it is
+    /// trusted: the typestate or uploads producing the image state it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `image` is from another device, lacks
+    /// the copy usages or those `before` and `after` need, is multisampled,
+    /// its format cannot be blitted with linear filtering, `before`
+    /// discards mip 0 or `after` is [`ImageAccess::Undefined`].
+    pub fn generate_mips(
+        &mut self,
+        image: &Image,
+        before: ImageAccess,
+        after: ImageAccess,
+    ) -> Result<()> {
+        let copies = ImageUsage::COPY_SRC | ImageUsage::COPY_DST;
+        self.check_image(image, copies | before.usage() | after.usage())?;
+        self.check_blit("mip generation", image, Filter::Linear)?;
+        if matches!(before, ImageAccess::Undefined | ImageAccess::Present)
+            || after == ImageAccess::Undefined
+        {
+            return Err(Error::invalid(
+                "mip generation",
+                image.label(),
+                format!("cannot generate mips from {before:?} to {after:?}"),
+            ));
+        }
+        self.raw.generate_mips(self.device(), image, before, after)
+    }
+
+    /// Checks that `image` is single-sampled and its format can be blitted
+    /// with `filter`.
+    fn check_blit(&self, operation: &'static str, image: &Image, filter: Filter) -> Result<()> {
+        let info = image.info();
         let features = self.frame.rhi().capabilities().format(info.format).features;
         let filterable = filter == Filter::Nearest
             || (features.contains(FormatFeatures::FILTER_LINEAR)
@@ -597,22 +647,15 @@ impl CommandEncoder<'_, Graphics> {
             || info.samples != SampleCount::X1
         {
             return Err(Error::invalid(
-                "image blit",
-                dst.label(),
+                operation,
+                image.label(),
                 format!(
                     "{:?} with {:?} samples cannot be blitted with {filter:?} filtering",
                     info.format, info.samples
                 ),
             ));
         }
-        self.raw.blit_image(
-            self.device(),
-            &src.raw,
-            &dst.raw,
-            info.format,
-            regions,
-            filter,
-        )
+        Ok(())
     }
 }
 

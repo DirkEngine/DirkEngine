@@ -274,6 +274,37 @@ fn layered_and_mipped_images_round_trip() -> Result<()> {
 }
 
 #[test]
+fn mipmapped_images_generate_every_mip_from_the_first() -> Result<()> {
+    with_rhi(|rhi| {
+        let mut uploader = Uploader::new(rhi, 256)?;
+        let sampled = ImageAccess::Sampled(ShaderStages::FRAGMENT);
+        // A uniform color keeps its value in every mip of any size.
+        let color = [200, 100, 50, 255];
+        let desc = ImageDesc {
+            label: "mipmapped",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(5, 3),
+            format: Format::Rgba8Srgb,
+            usage: ImageUsage::SAMPLED,
+            mip_levels: 3,
+            array_layers: 1,
+            samples: SampleCount::X1,
+        };
+
+        let frame = rhi.begin_frame()?;
+        let mut uploads = uploader.begin(&frame);
+        let image = uploads.mipmapped_image(&desc, sampled, &color.repeat(15))?;
+        uploads.submit()?;
+        let readback = Readback::image(&frame, &image, sampled)?;
+        frame.finish();
+
+        let expected = [15, 2, 1].map(|texels| color.repeat(texels));
+        assert_eq!(readback.wait(rhi)?, expected);
+        Ok(())
+    })
+}
+
+#[test]
 fn staging_grows_and_each_frame_reuses_its_slot() -> Result<()> {
     with_rhi(|rhi| {
         let mut uploader = Uploader::new(rhi, 16)?;

@@ -113,6 +113,11 @@ frame.finish();                               // closes the frame (also on Drop)
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes outside `PerFrame`, and creating shaders from unvalidated bytes.
 - Dynamic state defaults: viewport and scissor default to the render area.
+- `encoder.generate_mips(&image, before, after)` (graphics queue) filters mip 0 down
+  into every other mip of every layer and owns the transitions in between, so mip
+  chains need neither raw barriers nor per-mip graph passes. Vulkan blits level by
+  level, requiring the format's blit and linear filtering support; Metal uses
+  `generateMipmapsForTexture`. Like a graph import, it trusts `before`.
 - Render passes use dynamic rendering. Attachments are whole single-mip, single-layer 2D
   images (`&Image`, using the view it owns) of one extent; color attachments may resolve
   into a single-sample image. `pass.draw(&pipeline, &push, vertices, instances)` and
@@ -321,7 +326,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
 - Uses the copy queue with ownership transfer when a dedicated one exists.
 - `Uploader` owns the staging buffers; `uploader.begin(&frame)` opens a batch.
   `uploads.buffer(..)`/`uploads.image(..)` return the new resource at once, each
-  with the graphics access it ends in, and `uploads.submit()` must precede the
+  with the graphics access it ends in (`uploads.mipmapped_image(..)` also generates
+  its mips on the graphics queue), and `uploads.submit()` must precede the
   graphics work using them, which then needs no wait.
 
 ## Renderer
@@ -345,8 +351,8 @@ graph.execute(&frame, &mut encoder, &mut transients)?;    // one encoder, one ba
   marks an additive color), on the CPU for textures and in the vertex shader for vertex
   colors, so the UI composites in linear space. Presentation draws the composited image
   into the window, encoding once: in hardware on sRGB surfaces, in the shader otherwise.
-- Model textures get their mips on the CPU, averaged in linear space, until GPU mip
-  generation lands.
+- Model textures upload mip 0 and generate their other mips on the GPU
+  (`Uploads::mipmapped_image`); sRGB formats are filtered in linear space.
 
 ## Later, each as its own small PR
 

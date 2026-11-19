@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use ash::vk;
 
@@ -229,6 +229,53 @@ impl CommandBuffer {
                 filter.vk(),
             );
         }
+        Ok(())
+    }
+
+    /// Generates every mip of `image` from mip 0, blitting each level into
+    /// the next once the previous blit wrote it, and moves the whole image
+    /// from `before` to `after`.
+    pub(crate) fn generate_mips(
+        self,
+        device: &Device,
+        image: &crate::Image,
+        before: ImageAccess,
+        after: ImageAccess,
+    ) -> Result<()> {
+        let info = image.info();
+        let transition = |levels: Range<u32>, before, after| {
+            let range = ImageRange {
+                base_mip_level: levels.start,
+                mip_level_count: levels.end - levels.start,
+                ..ImageRange::ALL
+            };
+            let barrier = ImageBarrier {
+                image,
+                range,
+                before,
+                after,
+                transfer: None,
+            };
+            self.barrier(device, QueueType::Graphics, &[], &[barrier], &[range]);
+        };
+        transition(0..1, before, ImageAccess::CopySource);
+        if info.mip_levels > 1 {
+            transition(1..info.mip_levels, before, ImageAccess::CopyDestination);
+        }
+        for level in 1..info.mip_levels {
+            let region = ImageCopy {
+                src: info.mip_region(level - 1),
+                dst: info.mip_region(level),
+            };
+            let raw = &image.raw;
+            self.blit_image(device, raw, raw, info.format, &[region], Filter::Linear)?;
+            transition(
+                level..level + 1,
+                ImageAccess::CopyDestination,
+                ImageAccess::CopySource,
+            );
+        }
+        transition(0..info.mip_levels, ImageAccess::CopySource, after);
         Ok(())
     }
 
