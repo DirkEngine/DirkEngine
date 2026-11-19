@@ -202,7 +202,7 @@ impl CommandBuffer {
         format: Format,
         regions: &[ImageCopy],
         filter: Filter,
-    ) {
+    ) -> Result<()> {
         let aspects = format.vk_aspects();
         let regions: Vec<_> = regions
             .iter()
@@ -225,6 +225,7 @@ impl CommandBuffer {
                 filter.vk(),
             );
         }
+        Ok(())
     }
 
     /// Records `buffers` and `images` as one dependency, recorded on

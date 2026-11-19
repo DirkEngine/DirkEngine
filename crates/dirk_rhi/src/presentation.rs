@@ -101,12 +101,13 @@ pub struct SwapchainDesc<'a> {
 /// Images abandoned before presentation are released, and the swapchain is
 /// recreated on the next acquisition.
 pub struct Swapchain {
-    /// Dropped before the native swapchain retires their generation.
+    /// Dropped before the native swapchain retires their generation. On
+    /// Metal, the one image, of the drawable acquired last.
     images: Vec<Image>,
+    /// What the images are.
+    info: ImageInfo,
     raw: native::Swapchain,
     label: Box<str>,
-    format: Format,
-    usage: ImageUsage,
     /// The extent to recreate images with.
     extent: (u32, u32),
     /// Whether the swapchain must be recreated before acquiring.
@@ -115,6 +116,16 @@ pub struct Swapchain {
     acquired_in: u64,
     /// An image not presented yet: acquired with a frame slot, or submitted.
     pending: Option<Pending>,
+}
+
+/// An image a native swapchain acquired.
+pub(crate) struct Acquired {
+    pub(crate) index: u32,
+    /// Whether the swapchain no longer matches its surface exactly.
+    pub(crate) suboptimal: bool,
+    /// The image at `index`, when the native swapchain brings one with each
+    /// acquisition, as Metal's drawables do. It replaces the images.
+    pub(crate) image: Option<native::Image>,
 }
 
 /// Where an image left unpresented was in its lifecycle.
@@ -184,10 +195,17 @@ impl Rhi {
         let (raw, format) = native::Swapchain::new(&self.device, surface.raw, desc)?;
         Ok(Swapchain {
             images: Vec::new(),
+            info: ImageInfo {
+                dimension: ImageDimension::D2,
+                extent: Extent3d::new_2d(desc.extent.0, desc.extent.1),
+                format,
+                usage: desc.usage,
+                mip_levels: 1,
+                array_layers: 1,
+                samples: SampleCount::X1,
+            },
             raw,
             label: desc.label.into(),
-            format,
-            usage: desc.usage,
             extent: desc.extent,
             stale: true,
             acquired_in: 0,
@@ -200,7 +218,7 @@ impl Swapchain {
     /// Format of the images.
     #[must_use]
     pub fn format(&self) -> Format {
-        self.format
+        self.info.format
     }
 
     /// Recreates the images at `width` by `height` before the next
@@ -232,21 +250,15 @@ impl Swapchain {
     fn recreate(&mut self) -> Result<()> {
         self.images.clear();
         let (images, (width, height)) = self.raw.configure(&self.label, self.extent)?;
-        let info = ImageInfo {
-            dimension: ImageDimension::D2,
-            extent: Extent3d::new_2d(width, height),
-            format: self.format,
-            usage: self.usage,
-            mip_levels: 1,
-            array_layers: 1,
-            samples: SampleCount::X1,
-        };
-        self.images = images
-            .into_iter()
-            .map(|raw| Image::from_native(raw, info, ViewType::D2, &self.label))
-            .collect();
+        self.info.extent = Extent3d::new_2d(width, height);
+        self.images = images.into_iter().map(|raw| self.wrap(raw)).collect();
         self.stale = false;
         Ok(())
+    }
+
+    /// Wraps one of the native swapchain's images.
+    fn wrap(&self, raw: native::Image) -> Image {
+        Image::from_native(raw, self.info, ViewType::D2, &self.label)
     }
 }
 
@@ -280,7 +292,11 @@ impl Frame<'_> {
         swapchain.settle()?;
         let slot = self.slot();
         let mut retried = false;
-        let (index, suboptimal) = loop {
+        let Acquired {
+            index,
+            suboptimal,
+            image,
+        } = loop {
             if swapchain.stale {
                 swapchain.recreate()?;
             }
@@ -291,6 +307,11 @@ impl Frame<'_> {
                 None => (swapchain.stale, retried) = (true, true),
             }
         };
+        if let Some(raw) = image {
+            let image = swapchain.wrap(raw);
+            swapchain.images.clear();
+            swapchain.images.push(image);
+        }
         swapchain.acquired_in = self.number();
         swapchain.pending = Some(Pending::Acquired(slot));
         // Still presentable; recreated on the next acquisition.

@@ -361,8 +361,9 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         Ok(())
     }
 
-    /// The device commands are recorded for.
-    pub(crate) fn device(&self) -> &native::Device {
+    /// The device commands are recorded for. Borrows the frame, not the
+    /// encoder, so recording can borrow the native commands mutably.
+    pub(crate) fn device(&self) -> &'f native::Device {
         &self.frame.rhi().device
     }
 
@@ -576,7 +577,8 @@ impl CommandEncoder<'_, Graphics> {
     /// Returns [`Error::Invalid`] if an image is from another device, lacks
     /// the copy usage or is multisampled, the format cannot be blitted or
     /// filtered with `filter`, or a region is out of bounds or overlaps
-    /// another.
+    /// another, or a native error if Metal cannot create what it draws
+    /// blits with.
     pub fn blit_image(
         &mut self,
         src: &Image,
@@ -610,8 +612,7 @@ impl CommandEncoder<'_, Graphics> {
             info.format,
             regions,
             filter,
-        );
-        Ok(())
+        )
     }
 }
 

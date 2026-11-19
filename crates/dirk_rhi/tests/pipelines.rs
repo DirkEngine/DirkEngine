@@ -291,6 +291,46 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
 }
 
 #[test]
+fn culling_follows_the_winding_on_screen() -> Result<()> {
+    with_rhi(|rhi| {
+        let vertex = rhi.create_shader::<FillVs, Fill>()?;
+        let fragment = rhi.create_shader::<FillFs, Fill>()?;
+        let targets = [ColorTarget::new(Format::Rgba8Unorm)];
+        let culling_back = |front_face| {
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: "culling",
+                vertex: &vertex,
+                fragment: Some(&fragment),
+                topology: Topology::TriangleList,
+                cull_mode: CullMode::Back,
+                front_face,
+                color_targets: &targets,
+                depth: None,
+                samples: SampleCount::X1,
+            })
+        };
+        let clockwise = culling_back(FrontFace::Clockwise)?;
+        let counter_clockwise = culling_back(FrontFace::CounterClockwise)?;
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "culling",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            // The fill triangle runs from the top left to the top right and
+            // the bottom left: clockwise on screen, so front-facing only for
+            // the first pipeline.
+            let fill = |color| Fill { color, depth: 0.5 };
+            pass.draw(&clockwise, &fill(GREEN), 0..3, 0..1)?;
+            pass.draw(&counter_clockwise, &fill(RED), 0..3, 0..1)?;
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(GREEN)));
+        Ok(())
+    })
+}
+
+#[test]
 fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
     with_rhi(|rhi| {
         let samples = SampleCount::X4;

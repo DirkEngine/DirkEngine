@@ -52,7 +52,8 @@ mod apple {
             bail!("the SPIR-V of `{entry_point}` is not a whole number of words");
         };
         let words: Vec<u32> = words.iter().map(|word| u32::from_le_bytes(*word)).collect();
-        let mut compiler = Compiler::<Msl>::new(Module::from_words(&words)).with_context(context)?;
+        let mut compiler =
+            Compiler::<Msl>::new(Module::from_words(&words)).with_context(context)?;
         let model = match stage {
             Stage::Vertex => ExecutionModel::Vertex,
             Stage::Fragment => ExecutionModel::Fragment,
@@ -92,7 +93,10 @@ mod apple {
         options.version = MslVersion::new(3, 0, 0);
         options.argument_buffers = true;
         options.argument_buffers_tier = ArgumentBuffersTier::Tier2;
-        let msl = compiler.compile(&options).with_context(context)?.to_string();
+        let msl = compiler
+            .compile(&options)
+            .with_context(context)?
+            .to_string();
         lay_out_heap(&msl).with_context(context)
     }
 
@@ -105,7 +109,10 @@ mod apple {
         let Some(start) = msl.find(DECLARATION).map(|start| start + DECLARATION.len()) else {
             return Ok(msl.to_owned());
         };
-        let end = start + msl[start..].find("};").context("unterminated heap struct")?;
+        let end = start
+            + msl[start..]
+                .find("};")
+                .context("unterminated heap struct")?;
         let mut members = BTreeMap::new();
         for line in msl[start..end].lines() {
             let id: u32 = line
@@ -155,12 +162,17 @@ mod apple {
             assert_eq!(
                 ids,
                 [
-                    "0", "16384", "32768", "49152", "65536", "81920", "86016", "90112",
-                    "94208", "95232", "160768"
+                    "0", "16384", "32768", "49152", "65536", "81920", "86016", "90112", "94208",
+                    "95232", "160768"
                 ]
             );
-            assert!(laid_out.contains("m_5 [[id(94208)]]") && laid_out.ends_with("};\nvoid f();\n"));
-            assert_eq!(lay_out_heap("void f();").expect("nothing to lay out"), "void f();");
+            assert!(
+                laid_out.contains("m_5 [[id(94208)]]") && laid_out.ends_with("};\nvoid f();\n")
+            );
+            assert_eq!(
+                lay_out_heap("void f();").expect("nothing to lay out"),
+                "void f();"
+            );
         }
     }
 }
