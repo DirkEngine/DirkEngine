@@ -25,6 +25,7 @@ mod presentation;
 mod queue;
 mod sampler;
 mod shader;
+mod timestamp;
 
 /// Implements `is_from` for native objects holding their device.
 macro_rules! device_children {
@@ -75,3 +76,4 @@ pub use presentation::{
 pub use queue::{Completion, CopyQueue, Graphics, QueueKind, QueueTransfer, QueueType};
 pub use sampler::{AddressMode, Filter, Sampler, SamplerDesc, SamplerInfo};
 pub use shader::{MAX_PUSH_DATA_SIZE, PushData, Shader, ShaderModule, ShaderStage};
+pub use timestamp::Timestamps;
