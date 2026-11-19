@@ -1,8 +1,8 @@
 # Cleanup pass: area agent
 
 You own one area of DirkEngine in a parallel cleanup pass. Your task names the
-area, paths, crates, branch prefix, title scope, issue and `CARGO_BUILD_JOBS`,
-and lists what the other agents own.
+area, paths, crates, branch prefix, issue and `CARGO_BUILD_JOBS`, and lists
+what the other agents own.
 
 Read every file in your area, and `docs/dev/rust-conventions.md`. Make real
 simplifications, not cosmetic churn, and bring the code you touch in line
@@ -10,7 +10,8 @@ with the conventions. Report bigger issues.
 
 ## Rules
 
-- **Change no behavior.** That includes what renders, the order of plugins,
+- **Change no behavior.** That includes what renders, the layout of types
+  shared with shaders and descriptor bindings, the order of plugins,
   subsystems, systems and events, threading and locking, error variants and
   messages, the `.dirkasset` format, CLI flags, help and output, log fields,
   and the editor's UI, in every feature set. Don't use blanket search and
@@ -34,14 +35,14 @@ run `just validate`, then what it and CI don't check:
 - If you touched `src`, the mixed feature sets: `cargo clippy --locked
   --all-targets --no-default-features --features <f> -- -D warnings`, with
   `editor` and with `cli`.
-- If you touched code behind `cfg(validation)`, which release builds leave
-  out, `cargo clippy --locked --release -p <crate> --all-features -- -D
+- If you touched a file that uses `cfg(validation)`, which release builds
+  leave out, `cargo clippy --locked --release -p <crate> --all-features -- -D
   warnings`.
-- If you touched `platform_macos` code, `cargo clippy --locked --target
+- If you changed a crate with macOS-only code, `cargo clippy --locked --target
   aarch64-apple-darwin -p <crate> --all-targets --all-features -- -D
   warnings`. Draft CI skips macOS.
-- No test or CI job renders. If you changed how the renderer, the platform
-  layer or the editor runs, say in the PR that it needs a `just run`.
+- No test or CI job renders. If you changed code that only runs with a GPU
+  or a window, say in the PR that it needs a `just run`.
 
 Prove each "unchanged" claim against the PR's base, such as `--help` output
 or the rustdoc of a public item. Before you call a failing test unrelated,
@@ -64,7 +65,9 @@ pass.
   `git rebase --onto origin/main <old base tip>`, and check it targets
   `main`.
 - Open each PR as a **draft** with `file-pr`, despite its default, titled
-  `refactor(<scope>): <what got simpler>`. Its description fills in
+  `refactor(<scope>): <what got simpler>`. The scope is the crate's name
+  without `dirk_`, or `dirkengine` for `src`. Tooling PRs are `ci:` or
+  `chore:`, and docs PRs `docs:`. The description fills in
   `.github/pull_request_template.md` and says:
   - `Part of #<n>`
   - what was hard to read and how you fixed it

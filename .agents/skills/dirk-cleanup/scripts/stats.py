@@ -5,11 +5,12 @@ Usage: python3 -I stats.py [REPO] [--json OUT]
 Prints a summary and, with --json, writes every per-file record and the
 history to OUT for charts. Cargo.lock is the lockfile, everything under assets/
 is an asset, and generated files are the ones .gitattributes marks
-linguist-generated. The skills in .agents/ aren't counted. Rust lines are classified by a small lexer: a
-line is code, a doc comment (/// or //!), a plain comment or blank, and a line
-with code and a trailing comment counts as code. Test code is whole files under
-tests/, tests.rs files, modules declared behind #[cfg(test)], and inline
-#[cfg(test)] items. Other languages are counted by cloc.
+linguist-generated. The skills in .agents/ and .claude/ aren't counted. Rust
+lines are classified by a small lexer: a line is code, a doc comment (/// or
+//!), a plain comment or blank, and a line with code and a trailing comment
+counts as code. Test code is whole files under tests/, tests.rs files, modules
+declared behind #[cfg(test)], and inline #[cfg(test)] items. Other languages
+are counted by cloc.
 """
 import bisect, csv, io, json, os, re, subprocess, sys
 from collections import defaultdict
@@ -228,15 +229,14 @@ history, cur, running = [], None, defaultdict(int)
 for l in git("log", "--reverse", "--first-parent", "--no-renames", "--numstat",
              "--format=@@%h %aI %s", "HEAD").split("\n"):
     if l.startswith("@@"):
-        if cur: history.append(cur)
+        if cur: history.append({**cur, **running})
         sha, date, *subject = l[2:].split(" ")
         cur = {"sha": sha, "date": date, "subject": " ".join(subject)}
     elif l.strip():
         added, deleted, path = l.split("\t", 2)
         if added != "-" and not path.startswith(SKILLS):
             running[hist_cat(path)] += int(added) - int(deleted)
-            cur.update(running)
-if cur: history.append(cur)
+if cur: history.append({**cur, **running})
 
 # Summary.
 hand = [r for r in records if r["kind"] == "handwritten"]

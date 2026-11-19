@@ -11,7 +11,8 @@ Check every claim in your focus list yourself, against the base branch your
 task gives (`origin/main` unless the PR is stacked). Then look for, most
 important first:
 
-1. Hidden behavior changes: error variants and messages, defaults, the order
+1. Hidden behavior changes: the layout of types shared with shaders and
+   descriptor bindings, error variants and messages, defaults, the order
    of plugins, subsystems, systems and events, locking and threading,
    `.dirkasset` parsing, CLI output, log fields, and code that behaves
    differently with `editor` or `cli` off.

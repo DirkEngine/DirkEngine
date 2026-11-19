@@ -32,7 +32,7 @@ restart, check the ledger and restart only what didn't finish.
    `html_preview` and `html_render`, including growth over time from the
    JSON.
 2. Read the output, then check what the script can't count:
-   - coverage, with `cargo llvm-cov nextest --workspace --all-features`
+   - coverage, with `cargo llvm-cov nextest --locked --workspace --all-features`
    - whether each `#[expect]` reason still holds, and which `expect` calls
      can really panic
    - the deviations `docs/dev/rust-conventions.md` lists, and code that
@@ -63,43 +63,37 @@ boundary, and merge small areas. Every file has exactly one owner.
 | Core | `crates/dirk_engine`, `crates/dirk_universe`, `crates/dirk_events`, `crates/dirk_threads`, `crates/dirk_utils`, `crates/dirk_proc`, `crates/dirk_build` |
 | Features and tooling | the other crates, `src`, `build.rs`, the dot-directories and root files |
 
-A PR's title scope is its crate's name without `dirk_`, such as `renderer`,
-or `dirkengine` for `src`. Tooling PRs are `ci:` or `chore:`. Nobody edits
-`assets` or `.agents`. `docs/`, the crate READMEs and the `AGENTS.md` files
-belong to the docs lane.
-Each area agent opens several focused PRs, on branches named
-`refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
+Nobody edits `assets` or `.agents`. `docs/`, every README and the `AGENTS.md`
+files belong to the docs lane. Each area agent opens several focused PRs, on
+branches named `refactor/cleanup-<YYYY-MM-DD>-<area>-<topic>`.
 
-Open PRs hold their files too (`gh pr list`). Ask the owner before cleaning
-code that an open PR rewrites.
+Open PRs hold their files too: list them all with
+`gh pr list --limit 200 --json number,title,files`. Ask the owner before
+cleaning code that an open PR rewrites.
 
 Builds run in parallel on a machine with no swap. Pick one
-`CARGO_BUILD_JOBS` value for every agent that compiles, and pass it to each.
-Start from 4, which suited 8 implementers and their reviewers on 16 cores and
-58 GB in a piqueld pass. Every worktree builds the whole workspace, shaders included: run `just build`
-here first, so the rust-gpu backend is cached in `~/.cache/rust-gpu` before
-the agents start. A new worktree runs `just build` (`t3.json`) without your
-`CARGO_BUILD_JOBS`, so start the agents two at a time. Run at most 4 reviews
-at a time.
+`CARGO_BUILD_JOBS` value for every agent that compiles, such as 4, and pass
+it to each. Every worktree builds the whole workspace, shaders included: run
+`just build` here first, so the rust-gpu backend is cached in
+`~/.cache/rust-gpu` before the agents start. Run at most 4 reviews at a time.
 
 Open one GitHub issue for the pass, titled as `AGENTS.md` describes, such as
 `refactor: cleanup pass, November 2026`. Each PR says `Part of #<n>`. Tell
-the owner the split in one message and start without waiting.
+the owner the split in one message, with the open PRs that overlap each area.
+Start the areas they leave free without waiting, and wait for the owner on
+the rest.
 
 ### Start the agents
 
 Call `orchestrator_capabilities` once. For each area, start a `delegate_task`
 on Claude Opus 5.5 with `isolation: "worktree"` and `role: "implementation"`.
 The task says to follow `.agents/skills/dirk-cleanup/references/agent-brief.md`.
-It names the area, paths, crates, branch prefix, title scope, issue, what the
-other areas own, and `CARGO_BUILD_JOBS`.
+It names the area, paths, crates, branch prefix, issue, what the other areas
+own, and `CARGO_BUILD_JOBS`.
 
-Start a docs lane the same way, on `docs/cleanup-pass-<YYYY-MM-DD>`. It
-checks `docs/`, the crate READMEs and the `AGENTS.md` files against the code,
-fixes the drift, runs `just doc` and `just doc-test` (each README is its
-crate's rustdoc), and opens a draft PR. It reports stale doc comments and
-crates with no README instead of fixing them, since that means editing the
-area agents' files: send each to the agent that owns it.
+Start a docs lane the same way, with the docs lane's files as its area, on
+`docs/cleanup-pass-<YYYY-MM-DD>`. It fixes drift between the docs and the
+code, and reports stale doc comments: send each to the agent that owns it.
 
 ### Review
 
@@ -135,7 +129,6 @@ delegate, `role: "research"`, to look at how the crates fit together:
 
 - the dependency direction against the layering in
   `docs/dev/rust-conventions.md`, and logic that sits in the wrong crate
-- `ash`, `winit` and `egui` types that leak past the crates that wrap them
 - public items that no other crate needs, and internals that leak across a
   boundary
 - types, conversions and helpers duplicated across crates
@@ -161,8 +154,7 @@ and a fix PR:
 1. Check it against current `main`, with a Sol delegate when there are many.
    Merge duplicate reports, and ask the owner about anything that might be
    intended. A vulnerability stops here: tell the owner only, and open no
-   issue or PR. There's no `SECURITY.md`; the owner can open a private
-   security advisory.
+   issue or PR. The owner can open a private security advisory.
 2. Open a GitHub issue with the `bug` label, titled as `AGENTS.md` describes,
    or reuse the one that exists (`gh issue list --search`). Include the
    `file:line`, what goes wrong and how to reproduce it. If the existing issue
@@ -171,8 +163,7 @@ and a fix PR:
    on `fix/<topic>` from a freshly fetched `origin/main`, with the issue and
    `CARGO_BUILD_JOBS`. It writes a test that fails without the fix, makes the
    smallest fix, runs the agent brief's checks, and opens a draft PR with
-   `file-pr` that says `Fixes #<n>`. When the bug needs a GPU to show, it
-   tests the logic around it instead, or says how it checked the fix.
+   `file-pr` that says `Fixes #<n>`.
 4. Review and ship it as in Review, but without the review brief, which treats
    any behavior change as a finding. The reviewer's task says to work at the
    head SHA without pushing or commenting, revert the fix locally to check the
@@ -189,8 +180,7 @@ report:
 1. The PRs by area: link, lines added and removed, merge order, and the PRs
    that are stacked.
 2. The PRs to try with `just run` before merging, since no test or CI job
-   renders: those that change how the renderer, platform layer or editor
-   runs.
+   renders: those that change code that only runs with a GPU or a window.
 3. Decisions only the owner can make, with your recommendation.
 4. The bugs: each one's issue, fix PR and state.
 5. The boundary themes, and which ones wait for the area PRs.
