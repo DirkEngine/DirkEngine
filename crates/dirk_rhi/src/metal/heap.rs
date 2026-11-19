@@ -37,7 +37,10 @@ pub(super) enum Descriptor<'a> {
 /// How shaders access the resources of an array: sampled textures are read,
 /// storage images and buffers read and written. Indexes `Slots::resident`.
 const fn usage(binding: u32) -> usize {
-    (binding >= heap::STORAGE_IMAGES_2D) as usize
+    matches!(
+        binding,
+        heap::STORAGE_IMAGES_2D..=heap::STORAGE_IMAGES_3D | heap::BUFFERS
+    ) as usize
 }
 
 /// Usages of `Slots::resident`, by index.
@@ -90,8 +93,9 @@ pub(super) struct Heap {
     pub(super) arguments: Object<dyn MTLBuffer>,
     /// Storage buffer lengths, one `u32` per element of the arguments.
     lengths: Object<dyn MTLBuffer>,
-    /// Zeroed 1x1 textures filling empty texture slots, by binding.
-    empty: Vec<Object<dyn MTLTexture>>,
+    /// Zeroed 1x1 textures filling empty texture slots, by binding; `None`
+    /// for the sampler and buffer arrays.
+    empty: Vec<Option<Object<dyn MTLTexture>>>,
     /// Fills empty sampler slots.
     default_sampler: Object<dyn MTLSamplerState>,
     /// Locked to assign, write and empty slots and to make their resources
@@ -116,15 +120,18 @@ impl Heap {
         let arguments = buffer(BUFFER_LENGTHS + 1, 8)?;
         arguments.setLabel(Some(&NSString::from_str("bindless heap")));
         let lengths = buffer(BUFFER_LENGTHS, 4)?;
-        let empty = (heap::TEXTURES_2D..heap::SAMPLERS)
-            .map(|binding| Self::empty_texture(device, binding))
+        let empty = (0..)
+            .zip(CAPACITIES)
+            .map(|(binding, _)| Self::empty_texture(device, binding))
             .collect::<Result<Vec<_>>>()?;
-        Self::zero(queue, &empty)?;
+        Self::zero(queue, empty.iter().flatten())?;
         let default_sampler = Sampler::create(device, &SamplerDesc::default())?;
         let mut slots = Slots::default();
         // The lengths and empty textures stay resident.
         for (binding, texture) in (0..).zip(&empty) {
-            slots.resident[usage(binding)].push(ProtocolObject::from_ref(&**texture), None);
+            if let Some(texture) = texture {
+                slots.resident[usage(binding)].push(ProtocolObject::from_ref(&**texture), None);
+            }
         }
         slots.resident[0].push(ProtocolObject::from_ref(&*lengths), None);
         let heap = Self {
@@ -147,21 +154,39 @@ impl Heap {
         Ok(heap)
     }
 
-    /// A 1x1 texture of the kind the array at `binding` holds.
+    /// A 1x1 texture of the kind the array at `binding` holds, or `None` if
+    /// it holds samplers or buffers.
     fn empty_texture(
         device: &ProtocolObject<dyn MTLDevice>,
         binding: u32,
-    ) -> Result<Object<dyn MTLTexture>> {
+    ) -> Result<Option<Object<dyn MTLTexture>>> {
         let texture_type = match binding {
-            heap::TEXTURES_2D | heap::STORAGE_IMAGES_2D => MTLTextureType::Type2D,
-            heap::TEXTURES_2D_ARRAY | heap::STORAGE_IMAGES_2D_ARRAY => MTLTextureType::Type2DArray,
-            heap::TEXTURES_CUBE => MTLTextureType::TypeCube,
-            heap::TEXTURES_CUBE_ARRAY => MTLTextureType::TypeCubeArray,
-            _ => MTLTextureType::Type3D,
+            heap::TEXTURES_2D | heap::STORAGE_IMAGES_2D | heap::DEPTH_TEXTURES_2D => {
+                MTLTextureType::Type2D
+            }
+            heap::TEXTURES_2D_ARRAY
+            | heap::STORAGE_IMAGES_2D_ARRAY
+            | heap::DEPTH_TEXTURES_2D_ARRAY => MTLTextureType::Type2DArray,
+            heap::TEXTURES_CUBE | heap::DEPTH_TEXTURES_CUBE => MTLTextureType::TypeCube,
+            heap::TEXTURES_CUBE_ARRAY | heap::DEPTH_TEXTURES_CUBE_ARRAY => {
+                MTLTextureType::TypeCubeArray
+            }
+            heap::TEXTURES_3D | heap::STORAGE_IMAGES_3D => MTLTextureType::Type3D,
+            _ => return Ok(None),
         };
         let desc = MTLTextureDescriptor::new();
         desc.setTextureType(texture_type);
-        desc.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        // Depth arrays are declared as depth textures, which need a depth
+        // format.
+        let depth = matches!(
+            binding,
+            heap::DEPTH_TEXTURES_2D..=heap::DEPTH_TEXTURES_CUBE_ARRAY
+        );
+        desc.setPixelFormat(if depth {
+            MTLPixelFormat::Depth32Float
+        } else {
+            MTLPixelFormat::RGBA8Unorm
+        });
         desc.setStorageMode(MTLStorageMode::Private);
         desc.setUsage(if usage(binding) == 0 {
             MTLTextureUsage::ShaderRead
@@ -179,13 +204,13 @@ impl Heap {
         device
             .newTextureWithDescriptor(&desc)
             .check("newTextureWithDescriptor")
-            .map(Object::from)
+            .map(|texture| Some(texture.into()))
     }
 
     /// Zeroes `textures`, waiting for the GPU to finish.
-    fn zero(
+    fn zero<'a>(
         queue: &ProtocolObject<dyn MTLCommandQueue>,
-        textures: &[Object<dyn MTLTexture>],
+        textures: impl Iterator<Item = &'a Object<dyn MTLTexture>>,
     ) -> Result<()> {
         let zeros = queue
             .device()
@@ -263,13 +288,15 @@ impl Heap {
                 self.write_buffer(element, buffer.gpuAddress(), length);
                 return;
             }
-            None if slot.binding == heap::BUFFERS => {
-                // Shaders read nothing from a buffer of zero bytes.
-                self.write_buffer(element, 0, 0);
-                return;
-            }
-            None if slot.binding == heap::SAMPLERS => self.default_sampler.gpuResourceID(),
-            None => self.empty[slot.binding as usize].gpuResourceID(),
+            None => match &self.empty[slot.binding as usize] {
+                Some(texture) => texture.gpuResourceID(),
+                None if slot.binding == heap::SAMPLERS => self.default_sampler.gpuResourceID(),
+                None => {
+                    // Shaders read nothing from a buffer of zero bytes.
+                    self.write_buffer(element, 0, 0);
+                    return;
+                }
+            },
         };
         // SAFETY: `element` is inside the arrays, and resource IDs are eight
         // bytes; no pending work reads this slot.

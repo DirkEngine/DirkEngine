@@ -20,10 +20,21 @@
 //! }
 //! ```
 //!
-//! Indices are memory-safe whatever their value: shaders mask them to their
-//! array's capacity, every slot holds a valid descriptor (a null one once
-//! freed), and each array holds one kind and dimension of resource. A stale
-//! or forged index reads the wrong resource, or zeros, but nothing invalid.
+//! Views of depth images live in their own arrays, which shaders declare as
+//! depth images so they can compare them against a reference through a
+//! comparison sampler, as shadow maps are filtered (see
+//! [`DepthTextureIndex`]).
+//!
+//! Each index reads only the arrays of its kind: its `get` accepts only
+//! their element types, which the shader build checks against the heap's
+//! bindings, and masks the index to their capacity, which is the same for
+//! every image array. Every slot holds a valid descriptor of its array's
+//! kind and dimension: a live resource, or, once freed, a null one (zeros,
+//! or a default sampler). So whatever its value, an index never reads
+//! outside its array or a descriptor of another kind; a stale or forged one
+//! reads the null descriptor or another live resource of that kind. Freed
+//! slots are reused first in, first out, so a stale index reads the null
+//! descriptor for as long as possible.
 
 use core::{fmt, marker::PhantomData};
 
@@ -52,28 +63,39 @@ pub mod heap {
     pub const SAMPLERS: u32 = 8;
     /// Storage buffers.
     pub const BUFFERS: u32 = 9;
+    /// Sampled 2D depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D: u32 = 10;
+    /// Sampled 2D array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_2D_ARRAY: u32 = 11;
+    /// Sampled cube depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE: u32 = 12;
+    /// Sampled cube array depth images, declared as depth images.
+    pub const DEPTH_TEXTURES_CUBE_ARRAY: u32 = 13;
 
-    /// Slots in each texture array.
-    pub const TEXTURE_CAPACITY: u32 = 1 << 14;
-    /// Slots in each storage image array.
-    pub const STORAGE_IMAGE_CAPACITY: u32 = 1 << 12;
+    /// Slots in each image array, sampled, depth and storage alike, so an
+    /// image index masked to it fits every image array.
+    pub const IMAGE_CAPACITY: u32 = 1 << 14;
     /// Slots in the sampler array.
     pub const SAMPLER_CAPACITY: u32 = 1 << 10;
     /// Slots in the storage buffer array.
     pub const BUFFER_CAPACITY: u32 = 1 << 16;
 
     /// Capacity of each array, indexed by binding.
-    pub const CAPACITIES: [u32; 10] = [
-        TEXTURE_CAPACITY,
-        TEXTURE_CAPACITY,
-        TEXTURE_CAPACITY,
-        TEXTURE_CAPACITY,
-        TEXTURE_CAPACITY,
-        STORAGE_IMAGE_CAPACITY,
-        STORAGE_IMAGE_CAPACITY,
-        STORAGE_IMAGE_CAPACITY,
+    pub const CAPACITIES: [u32; 14] = [
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
         SAMPLER_CAPACITY,
         BUFFER_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
+        IMAGE_CAPACITY,
     ];
 
     /// Index of the first element of the array at `binding` when the arrays
@@ -100,14 +122,15 @@ pub mod heap {
         /// Argument buffer element after the arrays: a pointer to one `u32`
         /// per element, the byte length of storage buffers, which shaders
         /// bound their reads with.
-        #[expect(clippy::cast_possible_truncation, reason = "there are ten arrays")]
+        #[expect(clippy::cast_possible_truncation, reason = "there are fourteen arrays")]
         pub const BUFFER_LENGTHS: u32 = super::first_element(super::CAPACITIES.len() as u32);
     }
 }
 
-/// Declares an index into one of the heap's arrays.
+/// Declares an index into the heap's arrays of one kind, and with the `gpu`
+/// feature its shader-side access, to arrays of the `$element` elements.
 macro_rules! indices {
-    ($($(#[$doc:meta])* $name:ident: $capacity:ident,)+) => {$(
+    ($($(#[$doc:meta])* $name:ident: $capacity:ident, $element:ident,)+) => {$(
         $(#[$doc])*
         #[repr(transparent)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, NoUninit)]
@@ -125,19 +148,41 @@ macro_rules! indices {
             pub const fn slot(self) -> u32 {
                 self.0 & (heap::$capacity - 1)
             }
+
+            /// This resource in `array`, the heap's array of its kind and
+            /// view type.
+            #[cfg(feature = "gpu")]
+            #[must_use]
+            #[expect(
+                unsafe_code,
+                reason = "array accesses are unchecked, but the index is masked to the array's capacity"
+            )]
+            pub fn get<R: gpu::$element>(self, array: &spirv_std::RuntimeArray<R>) -> &R {
+                // SAFETY: the slot is masked to the capacity of every array
+                // whose elements are `$element`s.
+                unsafe { array.index(self.slot() as usize) }
+            }
         }
     )+};
 }
 
 indices! {
     /// A sampled image view in the heap: in the texture array of its view
-    /// type, such as [`heap::TEXTURES_2D`].
-    TextureIndex: TEXTURE_CAPACITY,
+    /// type, such as [`heap::TEXTURES_2D`]. Views of depth images have a
+    /// [`DepthTextureIndex`] instead.
+    TextureIndex: IMAGE_CAPACITY, Texture,
+    /// A sampled depth image view in the heap: in the depth texture array of
+    /// its view type, such as [`heap::DEPTH_TEXTURES_2D`]. Shaders declare
+    /// these arrays as depth images (`Image!(2D, type = f32, sampled,
+    /// depth)`), which they can sample, load, or compare against a
+    /// reference with a comparison sampler (`sample_depth_reference`).
+    DepthTextureIndex: IMAGE_CAPACITY, DepthTexture,
     /// A storage image view in the heap: in the storage image array of its
     /// view type, such as [`heap::STORAGE_IMAGES_2D`].
-    StorageImageIndex: STORAGE_IMAGE_CAPACITY,
-    /// A sampler in the heap, at [`heap::SAMPLERS`].
-    SamplerIndex: SAMPLER_CAPACITY,
+    StorageImageIndex: IMAGE_CAPACITY, StorageImage,
+    /// A sampler in the heap, at [`heap::SAMPLERS`]. Comparison samplers
+    /// share the array; shaders use them only with depth comparisons.
+    SamplerIndex: SAMPLER_CAPACITY, HeapSampler,
 }
 
 /// A storage buffer in the heap, at [`heap::BUFFERS`], read by shaders as an
@@ -260,42 +305,109 @@ element_generic! {
     BufferSlice { buffer, first, len }
 }
 
-/// Shader-side access to the heap's arrays.
+/// Shader-side access to the heap: the element types of its arrays, and
+/// storage buffers.
 #[cfg(feature = "gpu")]
 #[expect(
     unsafe_code,
     reason = "array accesses are unchecked, but every index is masked to the array's capacity"
 )]
-mod gpu {
-    use spirv_std::{RuntimeArray, TypedBuffer};
+pub mod gpu {
+    use spirv_std::{
+        RuntimeArray, Sampler, TypedBuffer,
+        image::{Arrayed, Dimensionality, Image, ImageDepth, Multisampled, SampleType, Sampled},
+    };
 
-    use super::{BufferIndex, BufferSlice, SamplerIndex, StorageImageIndex, TextureIndex};
+    use super::{BufferIndex, BufferSlice};
 
-    impl TextureIndex {
-        /// This texture in `textures`, the heap's array of its view type.
-        #[must_use]
-        pub fn get<I>(self, textures: &RuntimeArray<I>) -> &I {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { textures.index(self.slot() as usize) }
-        }
+    mod sealed {
+        /// Prevents element types outside this module.
+        pub trait Sealed {}
     }
 
-    impl StorageImageIndex {
-        /// This image in `images`, the heap's array of its view type.
-        #[must_use]
-        pub fn get<I>(self, images: &RuntimeArray<I>) -> &I {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { images.index(self.slot() as usize) }
-        }
+    /// Elements of the heap's arrays of sampled color images, which
+    /// [`TextureIndex`](super::TextureIndex) reads: single-sampled sampled
+    /// 2D, 2D array, cube, cube array and 3D images not declared as depth
+    /// images.
+    pub trait Texture: sealed::Sealed {}
+
+    /// Elements of the heap's arrays of sampled depth images, which
+    /// [`DepthTextureIndex`](super::DepthTextureIndex) reads: single-sampled
+    /// sampled 2D, 2D array, cube and cube array images declared as depth
+    /// images.
+    pub trait DepthTexture: sealed::Sealed {}
+
+    /// Elements of the heap's arrays of storage images, which
+    /// [`StorageImageIndex`](super::StorageImageIndex) reads: single-sampled
+    /// storage 2D, 2D array and 3D images not declared as depth images.
+    pub trait StorageImage: sealed::Sealed {}
+
+    /// The element of the heap's sampler array, which
+    /// [`SamplerIndex`](super::SamplerIndex) reads.
+    pub trait HeapSampler: sealed::Sealed {}
+
+    impl sealed::Sealed for Sampler {}
+    impl HeapSampler for Sampler {}
+
+    /// Makes the images of each dimensionality, arrayedness, depth and
+    /// sampling, of any sampled type and format, elements of `$trait`.
+    macro_rules! elements {
+        ($($trait:ident: $(($dim:ident, $arrayed:ident, $depth:ident, $sampled:ident)),+;)+) => {$($(
+            impl<S: SampleType<FORMAT, COMPONENTS>, const FORMAT: u32, const COMPONENTS: u32>
+                sealed::Sealed
+                for Image<
+                    S,
+                    { Dimensionality::$dim as u32 },
+                    { ImageDepth::$depth as u32 },
+                    { Arrayed::$arrayed as u32 },
+                    { Multisampled::False as u32 },
+                    { Sampled::$sampled as u32 },
+                    FORMAT,
+                    COMPONENTS,
+                >
+            {
+            }
+
+            impl<S: SampleType<FORMAT, COMPONENTS>, const FORMAT: u32, const COMPONENTS: u32> $trait
+                for Image<
+                    S,
+                    { Dimensionality::$dim as u32 },
+                    { ImageDepth::$depth as u32 },
+                    { Arrayed::$arrayed as u32 },
+                    { Multisampled::False as u32 },
+                    { Sampled::$sampled as u32 },
+                    FORMAT,
+                    COMPONENTS,
+                >
+            {
+            }
+        )+)+};
     }
 
-    impl SamplerIndex {
-        /// This sampler in `samplers`, the heap's sampler array.
-        #[must_use]
-        pub fn get<S>(self, samplers: &RuntimeArray<S>) -> &S {
-            // SAFETY: the slot is masked to the array's capacity.
-            unsafe { samplers.index(self.slot() as usize) }
-        }
+    elements! {
+        Texture:
+            (TwoD, False, Unknown, Yes),
+            (TwoD, False, False, Yes),
+            (TwoD, True, Unknown, Yes),
+            (TwoD, True, False, Yes),
+            (Cube, False, Unknown, Yes),
+            (Cube, False, False, Yes),
+            (Cube, True, Unknown, Yes),
+            (Cube, True, False, Yes),
+            (ThreeD, False, Unknown, Yes),
+            (ThreeD, False, False, Yes);
+        DepthTexture:
+            (TwoD, False, True, Yes),
+            (TwoD, True, True, Yes),
+            (Cube, False, True, Yes),
+            (Cube, True, True, Yes);
+        StorageImage:
+            (TwoD, False, Unknown, No),
+            (TwoD, False, False, No),
+            (TwoD, True, Unknown, No),
+            (TwoD, True, False, No),
+            (ThreeD, False, Unknown, No),
+            (ThreeD, False, False, No);
     }
 
     impl<T> BufferIndex<T> {
