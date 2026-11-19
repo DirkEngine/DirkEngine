@@ -8,7 +8,7 @@ use dirk_universe::{
         Changes, Query,
         filter::{Changed, Without},
     },
-    systems::{Commands, DeltaTime, IntoSystem, System},
+    systems::{Commands, DeltaTime, System},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -706,37 +706,6 @@ fn additions_replacements_and_reinsertions_have_distinct_change_semantics() {
             vec![],
         ]
     );
-}
-
-#[test]
-fn change_detection_survives_an_observer_skipping_ticks() {
-    use std::{cell::RefCell, rc::Rc};
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let observer_seen = seen.clone();
-    let mut observer = (move |query: Query<&Counter, Changed<Counter>>| {
-        observer_seen
-            .borrow_mut()
-            .push(query.iter().map(|counter| counter.0).collect::<Vec<_>>());
-    })
-    .into_system();
-    let mut universe = Universe::builder()
-        .with_world(World::builder("w").with_entity(Entity::builder().with_component(Counter(0))))
-        .with_system(|mut query: Query<&mut Counter>| {
-            for mut counter in &mut query {
-                counter.0 += 1;
-            }
-        })
-        .build()
-        .expect("systems should schedule");
-    let commands = RefCell::new(universe.handle().command_buffer());
-    universe.tick(0.0);
-    observer.run(&mut universe, 0.0, &commands);
-    for _ in 0..3 {
-        universe.tick(0.0);
-    }
-    observer.run(&mut universe, 0.0, &commands);
-    observer.run(&mut universe, 0.0, &commands);
-    assert_eq!(*seen.borrow(), vec![vec![1], vec![4], vec![]]);
 }
 
 #[test]

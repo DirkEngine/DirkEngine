@@ -5,11 +5,7 @@ use std::any::TypeId;
 use crate::{
     Entity, EntityBuilder, InWorld, Universe, World, WorldId,
     components::Component,
-    query::{
-        Query,
-        filter::{With, Without},
-    },
-    systems::IntoSystem,
+    query::filter::{With, Without},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Component)]
@@ -527,80 +523,4 @@ fn with_and_without_filters_compose() {
             neither.raw()
         ]
     );
-}
-
-#[test]
-fn function_system_iterates_filtered_query() {
-    use std::{cell::RefCell, rc::Rc};
-
-    let mut universe = Universe::builder()
-        .with_world(World::builder("w"))
-        .build()
-        .expect("systems should schedule");
-    universe.tick(0.0);
-    let [world] = world_ids(&universe);
-
-    let _included = spawn_entity(
-        &mut universe,
-        world,
-        Entity::builder().with_component(Health(10)),
-    );
-    let _excluded = spawn_entity(
-        &mut universe,
-        world,
-        Entity::builder()
-            .with_component(Health(20))
-            .with_component(Mana(5)),
-    );
-
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let system_seen = Rc::clone(&seen);
-    let mut system = (move |query: Query<'_, &Health, Without<Mana>>| {
-        system_seen
-            .borrow_mut()
-            .extend(query.iter().map(|health| health.0));
-    })
-    .into_system();
-
-    let commands = std::cell::RefCell::new(universe.handle().command_buffer());
-    system.run(&mut universe, 0.016, &commands);
-
-    assert_eq!(*seen.borrow(), vec![10]);
-}
-
-#[test]
-fn function_system_sums_all_matching_entities() {
-    use std::{cell::Cell, rc::Rc};
-
-    let mut universe = Universe::builder()
-        .with_world(World::builder("w"))
-        .build()
-        .expect("systems should schedule");
-    universe.tick(0.0);
-    let [world] = world_ids(&universe);
-
-    for health in [1, 2, 3] {
-        spawn_entity(
-            &mut universe,
-            world,
-            Entity::builder().with_component(Health(health)),
-        );
-    }
-    spawn_entity(
-        &mut universe,
-        world,
-        Entity::builder().with_component(Mana(4)),
-    );
-
-    let total = Rc::new(Cell::new(0));
-    let system_total = Rc::clone(&total);
-    let mut system = (move |query: Query<'_, &Health>| {
-        system_total.set(system_total.get() + query.iter().map(|health| health.0).sum::<u32>());
-    })
-    .into_system();
-
-    let commands = std::cell::RefCell::new(universe.handle().command_buffer());
-    system.run(&mut universe, 0.016, &commands);
-
-    assert_eq!(total.get(), 6);
 }

@@ -13,7 +13,7 @@ use std::{
 use crate::{
     CommandBuffer, Universe,
     components::Component,
-    macros::sealed::Sealed,
+    macros::sealed,
     query::{Changes, Query, QueryData, filter::QueryFilter},
     schedule::{Access, SystemConfig, SystemId},
 };
@@ -28,8 +28,19 @@ pub struct SystemContext<'u> {
 }
 
 /// Data supplied to one system invocation: queries, [`Commands`],
-/// [`DeltaTime`], or tuples of these.
-pub trait SystemParam: Sealed {
+/// [`DeltaTime`], or tuples of these. Sealed, so the access every parameter
+/// declares can be trusted:
+///
+/// ```compile_fail
+/// # use dirk_universe::{prelude::*, schedule::Access, systems::{SystemContext, SystemParam}};
+/// # #[derive(Debug, Component)] struct Health(u32);
+/// impl SystemParam for &Health {
+///     type Item<'u> = ();
+///     fn fetch<'u>(_: &SystemContext<'u>) -> Self::Item<'u> {}
+///     fn register_access(_: &mut Access) {}
+/// }
+/// ```
+pub trait SystemParam: sealed::SystemParam {
     /// The value supplied while the universe is borrowed for this invocation.
     type Item<'u>;
 
@@ -67,7 +78,7 @@ macro_rules! impl_system_param_for_tuple {
 }
 all_tuples!(impl_system_param_for_tuple);
 
-impl<D: QueryData, F: QueryFilter> Sealed for Query<'_, D, F> {}
+impl<D: QueryData, F: QueryFilter> sealed::SystemParam for Query<'_, D, F> {}
 impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
     type Item<'u> = Query<'u, D, F>;
 
@@ -81,7 +92,7 @@ impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
     }
 }
 
-impl<C: Component> Sealed for Changes<'_, C> {}
+impl<C: Component> sealed::SystemParam for Changes<'_, C> {}
 impl<C: Component> SystemParam for Changes<'_, C> {
     type Item<'u> = Changes<'u, C>;
 
@@ -114,7 +125,7 @@ impl DerefMut for Commands<'_> {
     }
 }
 
-impl Sealed for Commands<'_> {}
+impl sealed::SystemParam for Commands<'_> {}
 impl SystemParam for Commands<'_> {
     type Item<'u> = Commands<'u>;
 
@@ -133,7 +144,7 @@ impl SystemParam for Commands<'_> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeltaTime(pub f64);
 
-impl Sealed for DeltaTime {}
+impl sealed::SystemParam for DeltaTime {}
 impl SystemParam for DeltaTime {
     type Item<'u> = Self;
 
@@ -211,12 +222,6 @@ pub trait IntoSystem<Marker>: Sized + 'static {
     #[doc(hidden)]
     fn into_config(self) -> SystemConfig;
 
-    /// Converts this value into the internal system representation.
-    #[doc(hidden)]
-    fn into_system(self) -> Box<dyn ErasedSystem> {
-        self.into_config().system
-    }
-
     /// Runs this system before `other`, overriding any order derived from
     /// the data they access.
     fn before<M>(self, other: impl SystemLabel<M>) -> SystemConfig {
@@ -241,8 +246,7 @@ impl IntoSystem<()> for SystemConfig {
 }
 
 /// Internal execution interface used by the universe's system list.
-#[doc(hidden)]
-pub trait ErasedSystem: 'static {
+pub(crate) trait ErasedSystem: 'static {
     /// Runs a system once and advances its change-detection counter.
     fn run(&mut self, universe: &mut Universe, delta_time: f64, commands: &RefCell<CommandBuffer>);
 }

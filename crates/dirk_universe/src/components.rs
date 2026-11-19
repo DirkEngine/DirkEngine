@@ -1,6 +1,6 @@
 //! Component definitions and storage.
 
-use crate::{Entity, macros::sealed::Sealed};
+use crate::{Entity, macros::sealed};
 use std::{
     any::{Any, TypeId},
     cell::{Cell, Ref, RefCell, RefMut},
@@ -20,22 +20,22 @@ pub trait Component: 'static + Sized + Debug + Send {
 pub use dirk_proc::Component;
 
 /// Whether systems and commands may write a component.
-pub trait Mutability: Sealed {}
+pub trait Mutability: sealed::Mutability {}
 
 /// Components that systems edit and commands insert or remove.
 pub enum Mutable {}
-impl Sealed for Mutable {}
+impl sealed::Mutability for Mutable {}
 impl Mutability for Mutable {}
 
 /// Components that queries can read but only the engine writes.
 pub enum ReadOnly {}
-impl Sealed for ReadOnly {}
+impl sealed::Mutability for ReadOnly {}
 impl Mutability for ReadOnly {}
 
 /// Components computed from others by `UniverseBuilder::with_derived`.
 /// Queries can read them, but only their derivation writes them.
 pub enum Derived {}
-impl Sealed for Derived {}
+impl sealed::Mutability for Derived {}
 impl Mutability for Derived {}
 
 /// A component that `&mut C` queries, commands and entity builders may write.
