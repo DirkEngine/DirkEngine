@@ -1,4 +1,5 @@
-//! Shaders, graphics pipelines, render passes and draws.
+//! Shaders, graphics pipelines, render passes, and draws reading the
+//! bindless heap.
 #![expect(
     unsafe_code,
     reason = "Host reads and writes of a buffer are unsafe; the tests wait for the GPU first."
@@ -8,14 +9,19 @@ mod support;
 
 use std::time::Duration;
 
+use bytemuck::NoUninit;
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ColorAttachment,
     ColorTarget, CommandEncoder, CompareOp, CullMode, DepthAttachment, DepthBias, DepthState,
-    Error, Extent3d, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, Image,
-    ImageDesc, ImageDimension, ImageUsage, IndexFormat, Indices, LoadOp, Memory, Rect,
-    RenderPassDesc, Result, Rhi, SampleCount, StoreOp, Topology, Viewport,
+    Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format, FrontFace, Graphics, GraphicsPipeline,
+    GraphicsPipelineDesc, HeapIndices, Image, ImageAccess, ImageDesc, ImageDimension, ImageUsage,
+    ImageView, IndexFormat, Indices, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result, Rhi,
+    SampleCount, Sampler, SamplerDesc, SamplerIndex, Shader, ShaderStages, StoreOp, Topology,
+    Viewport,
 };
-use dirk_rhi_test_shaders::{Fill, FillFs, FillVs};
+use dirk_rhi_test_shaders::{
+    ColorFs, Fill, FillFs, FillVs, Sliced, SlicedVs, Textured, TexturedFs, TexturedVs, Vertex,
+};
 use support::with_rhi;
 
 const SIZE: u32 = 8;
@@ -38,17 +44,28 @@ fn attachment(rhi: &Rhi, format: Format, usage: ImageUsage, samples: SampleCount
     })
 }
 
-/// A pipeline filling `color_targets` with the fill shaders.
-fn fill_pipeline(
+/// A pipeline rendering to `color_targets` with shaders `V` and `F`.
+fn graphics_pipeline<V: Shader<Push = P>, F: Shader<Push = P>, P: PushData>(
     rhi: &Rhi,
     color_targets: &[ColorTarget],
     depth: Option<DepthState>,
     samples: SampleCount,
-) -> Result<GraphicsPipeline<Fill>> {
-    let vertex = rhi.create_shader::<FillVs>()?;
-    let fragment = rhi.create_shader::<FillFs>()?;
+) -> Result<GraphicsPipeline<P>> {
+    let shaders = (rhi.create_shader::<V>()?, rhi.create_shader::<F>()?);
+    pipeline(rhi, shaders, color_targets, depth, samples)
+}
+
+/// A pipeline rendering to `color_targets` with a vertex and a fragment
+/// shader.
+fn pipeline<P: PushData>(
+    rhi: &Rhi,
+    (vertex, fragment): (dirk_rhi::ShaderModule<P>, dirk_rhi::ShaderModule<P>),
+    color_targets: &[ColorTarget],
+    depth: Option<DepthState>,
+    samples: SampleCount,
+) -> Result<GraphicsPipeline<P>> {
     rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
-        label: "fill",
+        label: fragment.entry_point(),
         vertex: &vertex,
         fragment: Some(&fragment),
         topology: Topology::default(),
@@ -142,7 +159,7 @@ fn assert_invalid<T>(result: Result<T>, reason: &str) {
 #[test]
 fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
     with_rhi(|rhi| {
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
@@ -213,7 +230,7 @@ fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
 fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
     with_rhi(|rhi| {
         let format = Format::Depth32Float;
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba8Unorm)],
             Some(DepthState {
@@ -261,7 +278,12 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
 fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
     with_rhi(|rhi| {
         let samples = SampleCount::X4;
-        let pipeline = fill_pipeline(rhi, &[ColorTarget::new(Format::Rgba8Unorm)], None, samples)?;
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            samples,
+        )?;
         let multisampled = attachment(
             rhi,
             Format::Rgba8Unorm,
@@ -364,7 +386,7 @@ fn pipelines_are_validated_at_creation() -> Result<()> {
 #[test]
 fn draws_and_passes_are_validated() -> Result<()> {
     with_rhi(|rhi| {
-        let pipeline = fill_pipeline(
+        let pipeline = graphics_pipeline::<FillVs, FillFs, Fill>(
             rhi,
             &[ColorTarget::new(Format::Rgba16Float)],
             None,
@@ -424,7 +446,7 @@ fn draws_and_passes_are_validated() -> Result<()> {
         })?;
         assert_invalid(pass.draw(&pipeline, &fill, 0..3, 0..1), "not this pass's");
         assert_invalid(pass.draw(&pipeline, &fill, 3..3, 0..1), "not this pass's");
-        let rgba8 = fill_pipeline(
+        let rgba8 = graphics_pipeline::<FillVs, FillFs, Fill>(
             frame.rhi(),
             &[ColorTarget::new(Format::Rgba8Unorm)],
             None,
@@ -605,4 +627,332 @@ fn desc_of(image: &Image) -> ImageDesc<'static> {
         samples: info.samples,
         rest: None,
     }
+}
+
+/// A 2x2 texture, red and green above blue and white, uploaded and drawn
+/// over the target by a quad pulling its vertices through the heap.
+struct TexturedQuad {
+    texels: [[u8; 4]; 4],
+    texture: Image,
+    staging: Buffer,
+    vertices: Buffer,
+    pipeline: GraphicsPipeline<Textured>,
+}
+
+impl TexturedQuad {
+    fn new(rhi: &Rhi) -> Result<Self> {
+        let texels = [RED, GREEN, BLUE, [1.0; 4]].map(unorm);
+        let texture = rhi.create_image(&ImageDesc {
+            label: "checker",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(2, 2),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED | ImageUsage::COPY_DST,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let mut staging = rhi.create_buffer(&BufferDesc {
+            label: "texels",
+            size: 16,
+            usage: BufferUsage::COPY_SRC,
+            memory: Memory::Upload,
+        })?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { staging.write(0, texels.as_flattened())? };
+        // Two triangles covering the target; clip-space y points down.
+        let corner = |x: f32, y: f32| Vertex {
+            position: [x * 2.0 - 1.0, y * 2.0 - 1.0],
+            uv: [x, y],
+        };
+        let quad = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+        ]
+        .map(|(x, y)| corner(x, y));
+        let mut vertices = rhi.create_buffer(&BufferDesc {
+            label: "quad",
+            size: size_of_val(&quad) as u64,
+            usage: BufferUsage::STORAGE,
+            memory: Memory::Upload,
+        })?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { vertices.write(0, bytemuck::cast_slice(&quad))? };
+        let pipeline = graphics_pipeline::<TexturedVs, TexturedFs, Textured>(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        Ok(Self {
+            texels,
+            texture,
+            staging,
+            vertices,
+            pipeline,
+        })
+    }
+
+    /// A sampler reading the texture's texels as they are.
+    fn sampler(rhi: &Rhi) -> Result<Sampler> {
+        rhi.create_sampler(&SamplerDesc {
+            label: "nearest",
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            mipmap_filter: Filter::Nearest,
+            ..SamplerDesc::default()
+        })
+    }
+
+    /// Push data drawing the quad with `sampler`.
+    #[expect(
+        clippy::expect_used,
+        reason = "Test helpers fail the test by panicking."
+    )]
+    fn push(&self, sampler: SamplerIndex) -> Textured {
+        Textured {
+            vertices: self
+                .vertices
+                .index()
+                .expect("storage buffers have an index"),
+            texture: self
+                .texture
+                .view()
+                .and_then(ImageView::index)
+                .expect("sampled images have an index"),
+            sampler,
+        }
+    }
+
+    /// Uploads the texture and draws the quad over `target` with `push`.
+    fn draw(
+        &self,
+        encoder: &mut CommandEncoder<'_>,
+        target: &Image,
+        push: &Textured,
+    ) -> Result<()> {
+        encoder.copy_buffer_to_image(
+            &self.staging,
+            &self.texture,
+            &[BufferImageCopy::packed(
+                Format::Rgba8Unorm,
+                0,
+                self.texture.info().mip_region(0),
+            )],
+        )?;
+        let mut pass = encoder.render_pass(&RenderPassDesc {
+            label: "textured quad",
+            colors: &[cleared(target)],
+            depth: None,
+        })?;
+        pass.draw(&self.pipeline, push, 0..6, 0..1)
+    }
+
+    /// Checks that `pixels` show each texel over a quarter of the target.
+    fn assert_drawn(&self, pixels: &[[u8; 4]]) {
+        for (index, pixel) in pixels.iter().enumerate() {
+            let (x, y) = (index % SIZE as usize, index / SIZE as usize);
+            let texel =
+                usize::from(x >= SIZE as usize / 2) + 2 * usize::from(y >= SIZE as usize / 2);
+            assert_eq!(*pixel, self.texels[texel], "pixel ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn draws_pull_vertices_and_sample_textures_through_the_heap() -> Result<()> {
+    with_rhi(|rhi| {
+        let quad = TexturedQuad::new(rhi)?;
+        let sampler = TexturedQuad::sampler(rhi)?;
+        let push = quad.push(sampler.index());
+        let pixels = render(rhi, |encoder, target| quad.draw(encoder, target, &push))?;
+        quad.assert_drawn(&pixels);
+        Ok(())
+    })
+}
+
+#[test]
+fn shaders_read_frame_allocations_through_the_heap() -> Result<()> {
+    with_rhi(|rhi| {
+        // The fragment shader reads no push data.
+        let shaders = (
+            rhi.create_shader::<SlicedVs>()?,
+            rhi.create_shader::<ColorFs>()?.with_push(),
+        );
+        let pipeline = pipeline(
+            rhi,
+            shaders,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        // Two triangles covering the target.
+        let quad = [(0, 0), (1, 0), (0, 1), (0, 1), (1, 0), (1, 1)].map(|(x, y): (u8, u8)| {
+            let corner = |at| f32::from(at) * 2.0 - 1.0;
+            Vertex {
+                position: [corner(x), corner(y)],
+                uv: [0.0; 2],
+            }
+        });
+        let colors = [RED, GREEN].map(|color| u32::from_le_bytes(unorm(color)));
+
+        let pixels = render(rhi, |encoder, target| {
+            let frame = encoder.frame();
+            // An earlier allocation puts the slices past their buffer's start.
+            frame.alloc(&[0_u8; 3])?;
+            let (vertices, colors) = (frame.alloc(&quad)?, frame.alloc(&colors)?);
+            let push = Sliced {
+                vertices: vertices.index(),
+                colors: colors.index(),
+            };
+            assert!(push.vertices.first() > 0);
+            assert_eq!(u64::from(push.colors.first()) * 4, colors.offset());
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "sliced quad",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            // The second instance reads the second color.
+            pass.draw(&pipeline, &push, 0..6, 1..2)
+        })?;
+        assert!(pixels.iter().all(|&pixel| pixel == unorm(GREEN)));
+        Ok(())
+    })
+}
+
+#[test]
+fn heap_slots_are_reused_once_the_gpu_is_done() -> Result<()> {
+    with_rhi(|rhi| {
+        let frame = rhi.begin_frame()?;
+        let first = frame.rhi().create_sampler(&SamplerDesc::default())?;
+        let slot = first.index();
+        // The frame's work may still read the dropped sampler's slot.
+        drop(first);
+        let second = frame.rhi().create_sampler(&SamplerDesc::default())?;
+        assert_ne!(second.index(), slot);
+        frame.finish();
+        for _ in 0..FRAMES_IN_FLIGHT {
+            rhi.begin_frame()?.finish();
+        }
+        assert_eq!(rhi.create_sampler(&SamplerDesc::default())?.index(), slot);
+        Ok(())
+    })
+}
+
+/// Push data reading a sampler through the heap, as frame allocations hold
+/// it.
+#[derive(Clone, Copy, NoUninit, HeapIndices)]
+#[repr(C)]
+struct Material {
+    sampler: SamplerIndex,
+}
+
+/// Checks that the slot of `sampler`, dropped before the last frame, which
+/// read it, is reused only once that frame completed.
+fn assert_freed_after_the_last_frame(rhi: &mut Rhi, sampler: SamplerIndex) -> Result<()> {
+    let frame = rhi.begin_frame()?;
+    let other = frame.rhi().create_sampler(&SamplerDesc::default())?;
+    assert_ne!(other.index(), sampler, "the slot is reused while read");
+    frame.finish();
+    rhi.begin_frame()?.finish();
+    let next = rhi.create_sampler(&SamplerDesc::default())?;
+    assert_eq!(
+        next.index(),
+        sampler,
+        "the slot is reused once its work completed"
+    );
+    Ok(())
+}
+
+#[test]
+fn draws_keep_the_resources_they_index_until_they_complete() -> Result<()> {
+    with_rhi(|rhi| {
+        let quad = TexturedQuad::new(rhi)?;
+        let sampler = TexturedQuad::sampler(rhi)?;
+        let push = quad.push(sampler.index());
+        // Dropped before the frame drawing with it.
+        drop(sampler);
+        let pixels = render(rhi, |encoder, target| quad.draw(encoder, target, &push))?;
+        quad.assert_drawn(&pixels);
+        assert_freed_after_the_last_frame(rhi, push.sampler)
+    })
+}
+
+#[test]
+fn frame_allocations_keep_the_resources_they_index_until_they_complete() -> Result<()> {
+    with_rhi(|rhi| {
+        let sampler = rhi.create_sampler(&SamplerDesc::default())?.index();
+        let frame = rhi.begin_frame()?;
+        frame.alloc(&[Material { sampler }])?;
+        frame.finish();
+        assert_freed_after_the_last_frame(rhi, sampler)
+    })
+}
+
+#[test]
+fn freed_slots_read_again_are_reused_once_that_work_completes() -> Result<()> {
+    with_rhi(|rhi| {
+        let sampler = rhi.create_sampler(&SamplerDesc::default())?.index();
+        for _ in 0..=FRAMES_IN_FLIGHT {
+            rhi.begin_frame()?.finish();
+        }
+        // The slot is free now; a stale index reads it again.
+        let frame = rhi.begin_frame()?;
+        frame.alloc(&[Material { sampler }])?;
+        frame.finish();
+        assert_freed_after_the_last_frame(rhi, sampler)
+    })
+}
+
+#[test]
+fn only_shader_visible_resources_have_indices() -> Result<()> {
+    with_rhi(|rhi| {
+        let buffer = |usage| {
+            rhi.create_buffer(&BufferDesc {
+                label: "buffer",
+                size: 16,
+                usage,
+                memory: Memory::Device,
+            })
+        };
+        assert!(buffer(BufferUsage::COPY_DST)?.index::<u32>().is_none());
+        assert!(buffer(BufferUsage::STORAGE)?.index::<u32>().is_some());
+
+        let image = |dimension, array_layers, usage| {
+            rhi.create_image(&ImageDesc {
+                label: "image",
+                dimension,
+                extent: Extent3d::new_2d(4, 4),
+                format: Format::Rgba8Unorm,
+                usage,
+                mip_levels: 1,
+                array_layers,
+                samples: SampleCount::X1,
+                rest: None,
+            })
+        };
+        let indices = |image: &Image| {
+            let view = image.view().expect("these images have a view");
+            (view.index().is_some(), view.storage_index().is_some())
+        };
+        let both = ImageUsage::SAMPLED | ImageUsage::STORAGE;
+        let flat = image(ImageDimension::D2, 1, both)?;
+        assert_eq!(indices(&flat), (true, true));
+        // Shaders write it in place, and sample it in the same layout.
+        assert_eq!(
+            flat.info().rest,
+            ImageAccess::StorageWrite(ShaderStages::all())
+        );
+        let target = image(ImageDimension::D2, 1, ImageUsage::COLOR_ATTACHMENT)?;
+        assert_eq!(indices(&target), (false, false));
+        // Cubes are only sampled through the heap.
+        let cube = image(ImageDimension::Cube, 6, both)?;
+        assert_eq!(indices(&cube), (true, false));
+        Ok(())
+    })
 }

@@ -1,4 +1,4 @@
-use crate::{Error, Result, Rhi, native};
+use crate::{Error, Result, Rhi, SamplerIndex, native};
 
 /// How texels are filtered between samples.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -80,7 +80,6 @@ pub struct SamplerInfo {
 
 /// How shaders sample images. Destroyed when dropped.
 pub struct Sampler {
-    #[expect(dead_code, reason = "read when the bindless heap uses samplers")]
     raw: native::Sampler,
     info: SamplerInfo,
     label: Box<str>,
@@ -134,6 +133,12 @@ impl Sampler {
     #[must_use]
     pub fn info(&self) -> &SamplerInfo {
         &self.info
+    }
+
+    /// The sampler's index in the heap's sampler array.
+    #[must_use]
+    pub fn index(&self) -> SamplerIndex {
+        SamplerIndex::new(self.raw.slot())
     }
 
     /// The sampler's debug label.

@@ -23,6 +23,7 @@ unsafe-modules = [
     "dirk_rhi::native",
     "dirk_rhi::shader",
     "dirk_rhi_test_shaders::generated",
+    "dirk_shaders::bindless",
     "frames",
     "pipelines",
     "resources",

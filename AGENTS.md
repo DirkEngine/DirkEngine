@@ -33,7 +33,7 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   to SPIR-V by the renderer's build script with rust-gpu.
 - `dirk_editor`: the editor's menus, settings and universe windows.
 - `dirk_proc`: the procedural macros (`#[derive(Event)]`,
-  `#[derive(Component)]`).
+  `#[derive(Component)]`, `#[derive(HeapIndices)]`).
 - `dirk_utils`, `dirk_build`: small shared utilities, and build script helpers.
 
 `docs/dev/rust-conventions.md` describes how the crates depend on each other.
