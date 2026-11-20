@@ -1,0 +1,548 @@
+//! Shaders, graphics pipelines, render passes and draws.
+
+mod support;
+
+use std::time::Duration;
+
+use dirk_rhi::{
+    Buffer, BufferAccess, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ColorAttachment,
+    ColorTarget, CommandEncoder, CompareOp, CullMode, DepthAttachment, DepthBias, DepthState,
+    Error, Extent3d, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, Image,
+    ImageDesc, ImageDimension, ImageUsage, IndexFormat, Indices, LoadOp, Memory, Rect,
+    RenderPassDesc, Result, Rhi, SampleCount, StoreOp, Topology, Viewport,
+};
+use dirk_rhi_test_shaders::{Fill, FillFs, FillVs};
+use support::with_rhi;
+
+const SIZE: u32 = 8;
+const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// An 8x8 2D attachment of `format` with `samples`.
+fn attachment(rhi: &Rhi, format: Format, usage: ImageUsage, samples: SampleCount) -> Result<Image> {
+    rhi.create_image(&ImageDesc {
+        label: "attachment",
+        dimension: ImageDimension::D2,
+        extent: Extent3d::new_2d(SIZE, SIZE),
+        format,
+        usage,
+        mip_levels: 1,
+        array_layers: 1,
+        samples,
+        rest: None,
+    })
+}
+
+/// A pipeline filling `color_targets` with the fill shaders.
+fn fill_pipeline(
+    rhi: &Rhi,
+    color_targets: &[ColorTarget],
+    depth: Option<DepthState>,
+    samples: SampleCount,
+) -> Result<GraphicsPipeline<Fill>> {
+    let vertex = rhi.create_shader::<FillVs>()?;
+    let fragment = rhi.create_shader::<FillFs>()?;
+    rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+        label: "fill",
+        vertex: &vertex,
+        fragment: Some(&fragment),
+        topology: Topology::default(),
+        cull_mode: CullMode::default(),
+        front_face: FrontFace::default(),
+        color_targets,
+        depth,
+        samples,
+    })
+}
+
+/// Clears an 8x8 `Rgba8Unorm` target to black, lets `record` render to it
+/// and returns its pixels.
+fn render(
+    rhi: &mut Rhi,
+    record: impl FnOnce(&mut CommandEncoder<'_>, &Image) -> Result<()>,
+) -> Result<Vec<[u8; 4]>> {
+    let target = attachment(
+        rhi,
+        Format::Rgba8Unorm,
+        ImageUsage::COLOR_ATTACHMENT | ImageUsage::COPY_SRC,
+        SampleCount::X1,
+    )?;
+    let readback = rhi.create_buffer(&BufferDesc {
+        label: "readback",
+        size: u64::from(SIZE * SIZE * 4),
+        usage: BufferUsage::COPY_DST,
+        memory: Memory::Readback,
+    })?;
+    let frame = rhi.begin_frame()?;
+    let mut encoder = frame.encoder::<Graphics>("render")?;
+    record(&mut encoder, &target)?;
+    encoder.copy_image_to_buffer(
+        &target,
+        &readback,
+        &[BufferImageCopy::packed(
+            Format::Rgba8Unorm,
+            0,
+            target.info().mip_region(0),
+        )],
+    )?;
+    // SAFETY: orders the copy before host reads.
+    unsafe {
+        encoder.barrier(
+            &[BufferBarrier {
+                buffer: &readback,
+                before: BufferAccess::CopyDestination,
+                after: BufferAccess::HostRead,
+                transfer: None,
+            }],
+            &[],
+        )?;
+    }
+    let done = frame.submit(encoder)?;
+    frame.finish();
+    rhi.wait(done, Duration::from_secs(10))?;
+    let mut pixels = vec![[0; 4]; (SIZE * SIZE) as usize];
+    // SAFETY: the copy completed, followed by a barrier to host reads.
+    unsafe { readback.read(0, pixels.as_flattened_mut())? };
+    Ok(pixels)
+}
+
+/// The 8-bit color of `color`.
+fn unorm(color: [f32; 4]) -> [u8; 4] {
+    // Test colors are exactly zero or one.
+    color.map(|channel| if channel > 0.5 { 255 } else { 0 })
+}
+
+/// A color attachment cleared to black.
+fn cleared(image: &Image) -> ColorAttachment<'_> {
+    ColorAttachment {
+        image,
+        load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+        store: StoreOp::Store,
+        resolve: None,
+    }
+}
+
+/// Asserts that `result` was rejected with a reason mentioning `reason`.
+fn assert_invalid<T>(result: Result<T>, reason: &str) {
+    match result {
+        Err(Error::Invalid { reason: why, .. }) => {
+            assert!(why.contains(reason), "`{why}` does not mention `{reason}`");
+        }
+        Err(error) => panic!("expected an invalid request, got {error}"),
+        Ok(_) => panic!("expected an invalid request, but it was accepted"),
+    }
+}
+
+#[test]
+fn draws_and_indexed_draws_fill_their_scissor() -> Result<()> {
+    with_rhi(|rhi| {
+        let pipeline = fill_pipeline(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let mut indices = rhi.create_buffer(&BufferDesc {
+            label: "indices",
+            size: 8,
+            usage: BufferUsage::INDEX,
+            memory: Memory::Upload,
+        })?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { indices.write(0, bytemuck::cast_slice(&[7_u16, 0, 1, 2]))? };
+        let half = SIZE / 2;
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "halves",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            pass.set_scissor(Rect {
+                x: 0,
+                y: 0,
+                width: half,
+                height: SIZE,
+            })?;
+            let red = Fill {
+                color: RED,
+                depth: 0.5,
+            };
+            pass.draw(&pipeline, &red, 0..3, 0..1)?;
+            pass.set_scissor(Rect {
+                x: half,
+                y: 0,
+                width: half,
+                height: SIZE,
+            })?;
+            let green = Fill {
+                color: GREEN,
+                depth: 0.5,
+            };
+            let indices = Indices {
+                buffer: &indices,
+                format: IndexFormat::U16,
+                offset: 2,
+                range: 0..3,
+                base_vertex: 0,
+            };
+            pass.draw_indexed(&pipeline, &green, indices, 0..1)?;
+            Ok(())
+        })?;
+        for (index, pixel) in pixels.iter().enumerate() {
+            let left = index % (SIZE as usize) < half as usize;
+            assert_eq!(
+                *pixel,
+                unorm(if left { RED } else { GREEN }),
+                "pixel {index}"
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
+    with_rhi(|rhi| {
+        let format = Format::Depth32Float;
+        let pipeline = fill_pipeline(
+            rhi,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            Some(DepthState {
+                format,
+                write: true,
+                compare: CompareOp::Less,
+                bias: DepthBias::default(),
+            }),
+            SampleCount::X1,
+        )?;
+        let depth = attachment(
+            rhi,
+            format,
+            ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            SampleCount::X1,
+        )?;
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "depth test",
+                colors: &[cleared(target)],
+                depth: Some(DepthAttachment {
+                    image: &depth,
+                    load: LoadOp::Clear(1.0),
+                    store: StoreOp::Discard,
+                }),
+            })?;
+            let near = Fill {
+                color: RED,
+                depth: 0.25,
+            };
+            let far = Fill {
+                color: GREEN,
+                depth: 0.75,
+            };
+            pass.draw(&pipeline, &near, 0..3, 0..1)?;
+            pass.draw(&pipeline, &far, 0..3, 0..1)?;
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(RED)));
+        Ok(())
+    })
+}
+
+#[test]
+fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
+    with_rhi(|rhi| {
+        let samples = SampleCount::X4;
+        let pipeline = fill_pipeline(rhi, &[ColorTarget::new(Format::Rgba8Unorm)], None, samples)?;
+        let multisampled = attachment(
+            rhi,
+            Format::Rgba8Unorm,
+            ImageUsage::COLOR_ATTACHMENT,
+            samples,
+        )?;
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "resolve",
+                colors: &[ColorAttachment {
+                    image: &multisampled,
+                    load: LoadOp::Discard,
+                    store: StoreOp::Discard,
+                    resolve: Some(target),
+                }],
+                depth: None,
+            })?;
+            let blue = Fill {
+                color: BLUE,
+                depth: 0.5,
+            };
+            pass.draw(&pipeline, &blue, 0..3, 0..1)?;
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(BLUE)));
+        Ok(())
+    })
+}
+
+#[test]
+fn pipelines_are_validated_at_creation() -> Result<()> {
+    with_rhi(|rhi| {
+        let vertex = rhi.create_shader::<FillVs>()?;
+        let fragment = rhi.create_shader::<FillFs>()?;
+        let color = [ColorTarget::new(Format::Rgba8Unorm)];
+        let desc = GraphicsPipelineDesc {
+            label: "invalid",
+            vertex: &vertex,
+            fragment: Some(&fragment),
+            topology: Topology::default(),
+            cull_mode: CullMode::default(),
+            front_face: FrontFace::default(),
+            color_targets: &color,
+            depth: None,
+            samples: SampleCount::X1,
+        };
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                vertex: &fragment,
+                fragment: Some(&vertex),
+                ..desc
+            }),
+            "not a vertex and a fragment shader",
+        );
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                fragment: None,
+                ..desc
+            }),
+            "need a fragment shader",
+        );
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                color_targets: &[ColorTarget::new(Format::Depth32Float)],
+                ..desc
+            }),
+            "cannot be a color target",
+        );
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                color_targets: &[],
+                depth: Some(DepthState {
+                    format: Format::Rgba8Unorm,
+                    write: true,
+                    compare: CompareOp::Less,
+                    bias: DepthBias::default(),
+                }),
+                ..desc
+            }),
+            "cannot be a depth target",
+        );
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                color_targets: &[ColorTarget::new(Format::Rgba8Unorm); 9],
+                ..desc
+            }),
+            "exceed the limit",
+        );
+        assert_invalid(
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                color_targets: &[],
+                ..desc
+            }),
+            "needs a color or depth target",
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn draws_and_passes_are_validated() -> Result<()> {
+    with_rhi(|rhi| {
+        let pipeline = fill_pipeline(
+            rhi,
+            &[ColorTarget::new(Format::Rgba16Float)],
+            None,
+            SampleCount::X1,
+        )?;
+        let target = attachment(
+            rhi,
+            Format::Rgba8Unorm,
+            ImageUsage::COLOR_ATTACHMENT,
+            SampleCount::X1,
+        )?;
+        let smaller = rhi.create_image(&ImageDesc {
+            extent: Extent3d::new_2d(SIZE / 2, SIZE / 2),
+            ..desc_of(&target)
+        })?;
+        let mipped = rhi.create_image(&ImageDesc {
+            mip_levels: 2,
+            ..desc_of(&target)
+        })?;
+        let indices: Buffer = rhi.create_buffer(&BufferDesc {
+            label: "indices",
+            size: 6,
+            usage: BufferUsage::INDEX,
+            memory: Memory::Device,
+        })?;
+        let fill = Fill {
+            color: RED,
+            depth: 0.5,
+        };
+
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("invalid draws")?;
+        assert_invalid(
+            encoder
+                .render_pass(&RenderPassDesc {
+                    label: "mismatched",
+                    colors: &[cleared(&target), cleared(&smaller)],
+                    depth: None,
+                })
+                .map(|_| ()),
+            "unlike",
+        );
+        assert_invalid(
+            encoder
+                .render_pass(&RenderPassDesc {
+                    label: "mipped",
+                    colors: &[cleared(&mipped)],
+                    depth: None,
+                })
+                .map(|_| ()),
+            "single-mip",
+        );
+        let mut pass = encoder.render_pass(&RenderPassDesc {
+            label: "valid",
+            colors: &[cleared(&target)],
+            depth: None,
+        })?;
+        assert_invalid(pass.draw(&pipeline, &fill, 0..3, 0..1), "not this pass's");
+        let rgba8 = fill_pipeline(
+            frame.rhi(),
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+        let index = |offset, range| Indices {
+            buffer: &indices,
+            format: IndexFormat::U16,
+            offset,
+            range,
+            base_vertex: 0,
+        };
+        assert_invalid(
+            pass.draw_indexed(&rgba8, &fill, index(2, 0..3), 0..1),
+            "exceed",
+        );
+        assert_invalid(
+            pass.draw_indexed(&rgba8, &fill, index(1, 0..2), 0..1),
+            "misaligned",
+        );
+        assert_invalid(
+            pass.set_scissor(Rect {
+                x: 4,
+                y: 0,
+                width: SIZE,
+                height: 1,
+            }),
+            "render area",
+        );
+        pass.end();
+        frame.finish();
+        Ok(())
+    })
+}
+
+#[test]
+fn viewports_are_validated() -> Result<()> {
+    with_rhi(|rhi| {
+        let usage = ImageUsage::COLOR_ATTACHMENT;
+        let target = attachment(rhi, Format::Rgba8Unorm, usage, SampleCount::X1)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("viewports")?;
+        let mut pass = encoder.render_pass(&RenderPassDesc {
+            label: "viewports",
+            colors: &[cleared(&target)],
+            depth: None,
+        })?;
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        pass.set_viewport(viewport)?;
+        assert_invalid(
+            pass.set_viewport(Viewport {
+                width: 0.0,
+                ..viewport
+            }),
+            "not empty",
+        );
+        // Larger and further out than any device allows.
+        for viewport in [
+            Viewport {
+                width: 1e9,
+                ..viewport
+            },
+            Viewport {
+                y: -1e9,
+                ..viewport
+            },
+        ] {
+            assert_invalid(pass.set_viewport(viewport), "viewport limits");
+        }
+        pass.end();
+        frame.finish();
+        Ok(())
+    })
+}
+
+/// The description `image` was created with.
+#[test]
+fn leaked_render_passes_end_before_the_next_command() -> Result<()> {
+    with_rhi(|rhi| {
+        let pixels = render(rhi, |encoder, target| {
+            let pass = encoder.render_pass(&RenderPassDesc {
+                label: "leaked",
+                colors: &[ColorAttachment {
+                    load: LoadOp::Clear(RED),
+                    ..cleared(target)
+                }],
+                depth: None,
+            })?;
+            std::mem::forget(pass);
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(RED)));
+
+        // A pass leaked last ends as its encoder is submitted.
+        let usage = ImageUsage::COLOR_ATTACHMENT;
+        let target = attachment(rhi, Format::Rgba8Unorm, usage, SampleCount::X1)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("leaked last")?;
+        std::mem::forget(encoder.render_pass(&RenderPassDesc {
+            label: "leaked last",
+            colors: &[cleared(&target)],
+            depth: None,
+        })?);
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, Duration::from_secs(10))
+    })
+}
+
+fn desc_of(image: &Image) -> ImageDesc<'static> {
+    let info = image.info();
+    ImageDesc {
+        label: "variant",
+        dimension: info.dimension,
+        extent: info.extent,
+        format: info.format,
+        usage: info.usage,
+        mip_levels: info.mip_levels,
+        array_layers: info.array_layers,
+        samples: info.samples,
+        rest: None,
+    }
+}

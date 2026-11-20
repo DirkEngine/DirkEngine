@@ -113,7 +113,7 @@ impl Capabilities {
 }
 
 /// Numeric device limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// Largest buffer, in bytes.
     pub max_buffer_size: u64,
@@ -128,6 +128,15 @@ pub struct Limits {
     /// Highest sampler anisotropy, as a whole level. One when anisotropic
     /// filtering is unsupported.
     pub max_sampler_anisotropy: u16,
+    /// Most color targets a pipeline or render pass may have.
+    pub max_color_targets: u32,
+    /// Largest push data, in bytes.
+    pub max_push_data_size: u32,
+    /// Largest viewport width and height, in pixels.
+    pub max_viewport_dimensions: [u32; 2],
+    /// Lowest and highest coordinate a viewport's edges may lie at, in
+    /// pixels.
+    pub viewport_bounds: [f32; 2],
 }
 
 bitflags! {
