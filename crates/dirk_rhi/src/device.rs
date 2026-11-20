@@ -137,6 +137,9 @@ pub struct Limits {
     /// Lowest and highest coordinate a viewport's edges may lie at, in
     /// pixels.
     pub viewport_bounds: [f32; 2],
+    /// Largest buffer with [`BufferUsage::STORAGE`](crate::BufferUsage::STORAGE),
+    /// in bytes.
+    pub max_storage_buffer_size: u64,
 }
 
 bitflags! {

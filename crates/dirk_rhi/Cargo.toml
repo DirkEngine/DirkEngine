@@ -13,6 +13,7 @@ documentation.workspace = true
 [dependencies]
 bitflags.workspace = true
 bytemuck.workspace = true
+dirk_shaders.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

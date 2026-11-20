@@ -118,8 +118,10 @@ frame.finish();                               // closes the frame (also on Drop)
   an optional `QueueTransfer` recorded on both queues.
 - No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync)
   apart from `gpu-allocator`'s allocator, locked only to allocate and free memory, the
-  list of dropped objects, locked to add and collect them, and the list of new images'
-  first transitions, locked to add one and to take them at a graphics submission; only
+  list of dropped objects, locked to add and collect them, the bindless heap's slots,
+  locked to assign, write and empty one (which also synchronizes descriptor writes), and
+  the list of new images' first transitions, locked to add one and to take them at a
+  graphics submission; only
   queue submission/present take that queue's lock, and waits hold none.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes (`Buffer::write`), and creating shaders from unvalidated bytes.
@@ -183,21 +185,43 @@ frame.finish();                               // closes the frame (also on Drop)
 
 ## Binding model: bindless, verified at compile time
 
-- One global resource heap.
-  - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND` arrays
-    for sampled images, storage images, samplers, storage buffers (Vulkan 1.2 descriptor
-    indexing). Freed slots are rewritten to a valid default descriptor before reuse.
+- One global resource heap: one array per kind of resource and, for images, per view
+  type, so every slot of an array holds the descriptor type and dimension shaders declare
+  for it. Bindings and power-of-two capacities are constants in
+  `dirk_shaders::bindless::heap`: textures 2D, 2D array, cube, cube array and 3D, and
+  storage images 2D, 2D array and 3D (declared without a format; cubes have no storage
+  index), 16384 each, one capacity for every image array; samplers (1024) and storage
+  buffers (65536).
+  - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND |
+    UPDATE_UNUSED_WHILE_PENDING` arrays (Vulkan 1.2 descriptor indexing). Every slot is
+    written at creation, and rewritten when freed, to a null descriptor
+    (`VK_EXT_robustness2`'s `nullDescriptor`, now required) or, for samplers, a default
+    sampler. Devices whose update-after-bind limits cannot hold the heap are rejected.
+    Sampled descriptors use the `READ_ONLY_OPTIMAL` layout, which `ImageAccess::Sampled`
+    now maps to; storage descriptors use `GENERAL`.
   - Metal: one tier-2 argument buffer with the same arrays.
 - Every `ImageView`/`Sampler`/`Buffer` created with a shader-visible usage gets a slot at
-  creation and returns it through the deferred free path. `view.index() -> TextureIndex`.
+  creation and returns it through the deferred free path, so a slot is reused only once
+  the GPU is done with its frame. `view.index() -> Option<TextureIndex>` (sampled usage),
+  `view.storage_index() -> Option<StorageImageIndex>`, `sampler.index() -> SamplerIndex`,
+  `buffer.index::<T>() -> Option<BufferIndex<T>>` (storage usage; `T` is chosen by the
+  reader and memory-safe whatever it is). Storage buffers are limited to the device's
+  storage buffer range at creation, frame memory included. A frame allocation's
+  `slice.index() -> BufferSlice<T>` is its buffer's `BufferIndex<T>`, its first element and
+  its length.
 - One global pipeline layout: the heap + a push-constant block (<= 128 bytes).
 - **Vertex pulling.** Pipelines have no vertex input layouts; shaders read vertices from
   storage buffers by index. Index buffers are still bound directly.
 - No bind groups, bind group layouts, per-set pipeline layouts, descriptor pools per group,
   dynamic offsets, or set-tuple macros.
 - **Compile-time verification.** `dirk_shaders` defines typed indices (`TextureIndex`,
-  `SamplerIndex`, `BufferIndex<T>`) and each pipeline's push-data struct (`#[repr(C)]`,
-  `NoUninit`). Shaders and host share these exact Rust types.
+  `StorageImageIndex`, `SamplerIndex`, `BufferIndex<T>`, `BufferSlice<T>`, all `NoUninit`) and each
+  pipeline's push-data struct (`#[repr(C)]`, `NoUninit`). Shaders and host share these
+  exact Rust types. With its `gpu` feature, shader crates read the heap through them
+  (`push.texture.get(textures)`, `push.vertices.get(buffers)[i]`, `push.objects.get(buffers,
+  i)` for a slice, which checks `i` against its length), declaring the arrays
+  as entry point parameters at the documented bindings; the shader build declares the
+  descriptor indexing capabilities, and accesses are `NonUniform`.
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
   The shader build names each entry point's push data type, the one its
   `#[spirv(push_constant)]` parameter refers to (`()` without one), as `Shader::Push`;
@@ -205,8 +229,15 @@ frame.finish();                               // closes the frame (also on Drop)
   shaders of one push type (a shader reading none joins others with `with_push`). The
   build also reflects each push block's size, and a `const` assertion fails the build if
   it disagrees with the type's.
-- Stale indices are memory-safe (they read a valid default or a live resource); in debug
-  builds a generation check may report them.
+- Indices read only the arrays of their kind: `get` accepts only those arrays' element
+  types (sealed traits over the `spirv_std` image, sampler and buffer types), the shader
+  build checks every array a shader declares against the heap's bindings, and `get` masks
+  the index to the capacity of every array of its kind. Each slot holds a descriptor of
+  the array's kind and dimension: a live resource, or, once freed, a null one. So an
+  index of any value reads inside its array: a stale or forged one reads the null
+  descriptor or another live resource of its kind. Freed slots are reused first in, first
+  out, so stale indices read the null descriptor for as long as possible. In debug builds
+  a generation check may report them later.
 
 ## Render graph (`dirk_render_utils`)
 
