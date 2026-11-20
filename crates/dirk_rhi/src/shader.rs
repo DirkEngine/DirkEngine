@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use bytemuck::NoUninit;
 
-use crate::{Error, Result, Rhi, ShaderStages, native};
+use crate::{Error, HeapIndices, Result, Rhi, ShaderStages, native};
 
 /// Largest push data any pipeline may use, in bytes. Every device supports
 /// it.
@@ -10,11 +10,12 @@ pub const MAX_PUSH_DATA_SIZE: u32 = 128;
 
 /// Data pushed to a pipeline's shaders with each draw: a `#[repr(C)]` struct
 /// shared with the shaders, without padding, at most [`MAX_PUSH_DATA_SIZE`]
-/// bytes and a multiple of four bytes long. Pipelines without push data use
-/// `()`.
-pub trait PushData: NoUninit {}
+/// bytes and a multiple of four bytes long, deriving
+/// [`HeapIndices`](trait@HeapIndices) so draws keep the resources it indexes
+/// until their work completes. Pipelines without push data use `()`.
+pub trait PushData: NoUninit + HeapIndices {}
 
-impl<T: NoUninit> PushData for T {}
+impl<T: NoUninit + HeapIndices> PushData for T {}
 
 /// The stage a shader entry point runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
