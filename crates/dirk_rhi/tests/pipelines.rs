@@ -9,10 +9,10 @@ use dirk_rhi::{
     ColorTarget, CommandEncoder, CompareOp, ComputePipelineDesc, CullMode, DepthAttachment,
     DepthBias, DepthState, DrawArguments, DrawIndexedArguments, Error, Extent3d, FRAMES_IN_FLIGHT,
     Filter, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, HeapIndices,
-    Image, ImageAccess, ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageUsage, ImageView,
-    IndexBuffer, IndexFormat, Indices, IndirectDraws, LoadOp, Memory, PushData, Rect,
-    RenderPassDesc, Result, Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, Shader,
-    ShaderStages, StoreOp, Subresource, Topology, Viewport,
+    Image, ImageBarrier, ImageDesc, ImageDimension, ImageRange, ImageUsage, ImageView, IndexBuffer,
+    IndexFormat, Indices, IndirectDraws, LoadOp, Memory, PushData, Rect, RenderPassDesc, Result,
+    Rhi, SampleCount, Sampler, SamplerDesc, SamplerIndex, Shader, ShaderStages, StoreOp,
+    Subresource, Topology, Viewport,
 };
 use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{

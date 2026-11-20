@@ -466,8 +466,11 @@ format capabilities follow Apple's feature tables, conservatively.
   and compute encoders make every heap resident with one `useHeap` each, O(heaps). Metal
   makes heaps resident for reads only and does not cover texture views, which shader
   validation enforces, so encoders also declare, with one `useResources` per usage, the
-  resources that needs: storage buffers and storage images read-write, and texture views
-  in the heap, which are subviews, read. The bindless heap keeps that list as slots are filled and emptied.
+  resources that needs: texture views in the heap, which are subviews, read, before every
+  draw and dispatch, and storage buffers and storage images read-write, once a bound
+  pipeline writes storage (the shader build reflects which shaders do: `Shader::WRITES_STORAGE`);
+  read-only passes rely on `useHeap`. Storage subviews are in both lists. The bindless heap
+  keeps the lists as slots are filled and emptied.
   Both the heap list and the declared list carry a generation; command buffers keep a
   snapshot and check both generations (two atomic loads) before every draw and dispatch,
   so resources created while an encoder records, even in a new heap, are resident before
