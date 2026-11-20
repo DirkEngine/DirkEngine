@@ -196,6 +196,10 @@ impl Adapter {
                 } else {
                     1
                 },
+                max_color_targets: limits.max_color_attachments,
+                max_push_data_size: limits.max_push_constants_size,
+                max_viewport_dimensions: limits.max_viewport_dimensions,
+                viewport_bounds: limits.viewport_bounds_range,
             },
             features: optional,
             dedicated_copy_queue: families.copy != families.graphics,
