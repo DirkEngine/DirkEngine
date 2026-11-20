@@ -5,6 +5,8 @@ members = [
     "apps/*",
     "crates/*",
     "crates/dirk_renderer/shaders",
+    "crates/dirk_rhi/test-shaders",
+    "crates/dirk_rhi/test-shaders/gpu",
 ]
 
 [workspace.package]

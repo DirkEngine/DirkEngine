@@ -104,9 +104,9 @@ pub(crate) struct Transition {
 /// The barriers moving the images a command touches into the accesses it
 /// needs, and back to their resting access after it.
 #[derive(Default)]
-struct Wrap {
-    before: Vec<Transition>,
-    after: Vec<Transition>,
+pub(crate) struct Wrap {
+    pub(crate) before: Vec<Transition>,
+    pub(crate) after: Vec<Transition>,
 }
 
 /// Records commands for queue `Q` within a [`Frame`], which it cannot
@@ -148,6 +148,12 @@ pub struct CommandEncoder<'f, Q: QueueKind = Graphics> {
     /// The transitions raw barriers recorded, in order: the last one
     /// covering a subresource left it in its `after` access.
     moved: Vec<Transition>,
+    /// Whether a render pass began and did not end. Passes borrow their
+    /// encoder, so one still open when the encoder is used again was leaked,
+    /// such as with `mem::forget`; see [`CommandEncoder::end_pass`].
+    pub(crate) rendering: bool,
+    /// The barriers back to rest recorded when the open render pass ends.
+    pub(crate) after_pass: Vec<Transition>,
     queue: PhantomData<Q>,
 }
 
@@ -158,6 +164,8 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             raw,
             waits: [0; QueueType::COUNT],
             moved: Vec::new(),
+            rendering: false,
+            after_pass: Vec::new(),
             queue: PhantomData,
         }
     }
@@ -234,10 +242,22 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
             ));
         }
         if !away.is_empty() {
+            self.end_pass();
             self.transition(&away);
             self.moved.extend(away);
         }
         Ok(())
+    }
+
+    /// Ends the render pass begun last if it is open: when it drops, or, if
+    /// it was leaked, before recording any other command, which may not be
+    /// recorded inside a pass, or submitting.
+    pub(crate) fn end_pass(&mut self) {
+        if std::mem::take(&mut self.rendering) {
+            self.raw.end_rendering(self.device());
+            let after = std::mem::take(&mut self.after_pass);
+            self.transition(&after);
+        }
     }
 
     /// Makes the GPU wait for `completion` before running these commands,
@@ -302,6 +322,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         ) {
             return invalid(reason);
         }
+        self.end_pass();
         self.raw
             .copy_buffer(self.device(), &src.raw, &dst.raw, regions);
         Ok(())
@@ -507,6 +528,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                 Err(reason) => return invalid(reason),
             }
         }
+        self.end_pass();
         self.raw
             .barrier(self.device(), Q::TYPE, buffers, &transitions);
         self.moved.extend(transitions);
@@ -517,7 +539,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     /// `image` into `access` for a command, and back to rest after it:
     /// none if a barrier recorded here left them in `access`, and none
     /// before reading it in its resting access.
-    fn enter(
+    pub(crate) fn enter(
         &self,
         wrap: &mut Wrap,
         image: &Image,
@@ -607,6 +629,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         wrap: &Wrap,
         record: impl FnOnce(&mut native::CommandBuffer, &native::Device),
     ) {
+        self.end_pass();
         self.transition(&wrap.before);
         let frame = self.frame;
         record(&mut self.raw, &frame.rhi().device);
@@ -621,12 +644,12 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// The device commands are recorded for.
-    fn device(&self) -> &native::Device {
+    pub(crate) fn device(&self) -> &native::Device {
         &self.frame.rhi().device
     }
 
     /// Checks that `buffer` is from this device and has `usage`.
-    fn check_buffer(&self, buffer: &Buffer, usage: BufferUsage) -> Result<()> {
+    pub(crate) fn check_buffer(&self, buffer: &Buffer, usage: BufferUsage) -> Result<()> {
         let invalid = |reason| Err(Error::invalid("buffer", buffer.label(), reason));
         if !buffer.raw.is_from(self.device()) {
             return invalid("belongs to another device".to_owned());
@@ -638,7 +661,7 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// Checks that `image` is from this device and has `usage`.
-    fn check_image(&self, image: &Image, usage: ImageUsage) -> Result<()> {
+    pub(crate) fn check_image(&self, image: &Image, usage: ImageUsage) -> Result<()> {
         let invalid = |reason| Err(Error::invalid("image", image.label(), reason));
         if !image.raw.is_from(self.device()) {
             return invalid("belongs to another device".to_owned());

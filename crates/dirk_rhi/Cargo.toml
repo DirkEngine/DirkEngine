@@ -22,6 +22,9 @@ tracing.workspace = true
 ash.workspace = true
 gpu-allocator.workspace = true
 
+[dev-dependencies]
+dirk_rhi_test_shaders = { version = "0.1.0", path = "test-shaders" }
+
 # The workspace lints (../../Cargo.toml), except `unsafe_code`: the RHI calls
 # the native graphics API, and every unsafe block says why its call is sound.
 [lints.rust]
