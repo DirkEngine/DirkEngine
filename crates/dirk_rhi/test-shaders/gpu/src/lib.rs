@@ -10,7 +10,7 @@ use dirk_shaders::bindless::{
 };
 use spirv_std::{
     Image, RuntimeArray, Sampler, TypedBuffer,
-    glam::{UVec3, Vec2, Vec4, vec4},
+    glam::{UVec2, UVec3, Vec2, Vec4, vec4},
     spirv,
 };
 
@@ -274,4 +274,31 @@ pub fn paint_cs(
             .get(images)
             .write(id.truncate(), Vec4::from_array(push.color));
     }
+}
+
+/// Push data of the storage reading shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
+pub struct Stored {
+    /// A 2D storage image.
+    pub image: StorageImageIndex,
+    /// A buffer of at least two elements.
+    pub numbers: BufferIndex<u32>,
+}
+
+/// Writes texel (0, 0) of `push.image` with element 1 of `push.numbers` as
+/// its blue channel; reads storage, but writes none.
+#[spirv(fragment)]
+pub fn stored_fs(
+    #[spirv(push_constant)] push: &Stored,
+    #[spirv(descriptor_set = 0, binding = 5)] images: &RuntimeArray<
+        Image!(2D, type = f32, sampled = false),
+    >,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] buffers: &RuntimeArray<
+        TypedBuffer<[u32]>,
+    >,
+    color: &mut Vec4,
+) {
+    let texel: Vec4 = push.image.get(images).read(UVec2::ZERO);
+    *color = texel.with_z(push.numbers.get(buffers)[1] as f32);
 }

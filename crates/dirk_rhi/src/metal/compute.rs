@@ -4,18 +4,20 @@ use dirk_shaders::bindless::heap::metal::PUSH_BUFFER;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
 
-use super::{Check, CommandBuffer, Device, Object, device::Garbage, pass::Push};
+use super::{Check, CommandBuffer, Device, Object, device::Garbage, heap::Usage, pass::Push};
 use crate::{ComputePipelineDesc, Error, PushData, Result};
 
 /// Identifies a compute pipeline while it is alive, to skip rebinding it.
 pub(super) type ComputePipelineId = *const ProtocolObject<dyn MTLComputePipelineState>;
 
-/// A Metal compute pipeline and the threadgroup size its dispatches use,
-/// the shader's workgroup size.
+/// A Metal compute pipeline, the threadgroup size its dispatches use, the
+/// shader's workgroup size, and the usage they need resources declared up
+/// to.
 pub(crate) struct ComputePipeline {
     pub(super) device: Arc<Device>,
     raw: Object<dyn MTLComputePipelineState>,
     threads: MTLSize,
+    usage: Usage,
 }
 
 impl ComputePipeline {
@@ -56,6 +58,7 @@ impl ComputePipeline {
                 height,
                 depth,
             },
+            usage: Usage::of_pipeline(desc.shader.writes_storage()),
         })
     }
 }
@@ -78,7 +81,7 @@ impl CommandBuffer {
     ) {
         let id: ComputePipelineId = &raw const *pipeline.raw;
         let bound = self.compute_pipeline;
-        let encoder = self.compute(device);
+        let encoder = self.compute(device, pipeline.usage);
         if bound != Some(id) {
             encoder.setComputePipelineState(&pipeline.raw);
         }

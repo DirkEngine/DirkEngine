@@ -206,7 +206,8 @@ frame.finish();                               // closes the frame (also on Drop)
 - Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
   shader crate from a build script into one SPIR-V module per entry point and generates a
   type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (code, stage,
-  push data type, reflected push data size and, for compute shaders, workgroup size). The code is the backend's: SPIR-V, or for Apple targets the
+  push data type, reflected push data size, whether it writes storage buffers or images and, for
+  compute shaders, workgroup size). The code is the backend's: SPIR-V, or for Apple targets the
   Metal Shading Language that SPIRV-Cross translates it to at build time (see
   [Metal](#metal)); only Apple hosts compile SPIRV-Cross. Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way

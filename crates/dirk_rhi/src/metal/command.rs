@@ -35,7 +35,7 @@ use parking_lot::Mutex;
 use super::{
     Buffer, Check, Device, Image, Object,
     compute::ComputePipelineId,
-    heap::{Declared, Heap},
+    heap::{Declared, Heap, Usage},
     usize,
 };
 use crate::{
@@ -147,8 +147,9 @@ struct Residency {
     heaps: Vec<Object<dyn MTLHeap>>,
     /// Alive until the frame closes, which command buffers cannot outlive.
     declared: Declared,
-    /// Whether the open encoder made these resident.
-    resident: bool,
+    /// The usage up to which the open encoder made these resident, heaps
+    /// included; `None` if it made nothing resident.
+    resident: Option<Usage>,
 }
 
 /// A command buffer being recorded.
@@ -160,6 +161,9 @@ pub(crate) struct CommandBuffer {
     residency: Box<Residency>,
     /// Primitives the bound pipeline draws.
     pub(super) primitive: MTLPrimitiveType,
+    /// The usage the bound graphics pipeline needs resources declared up
+    /// to.
+    pub(super) usage: Usage,
     /// The bound index buffer, its offset and type.
     pub(super) indices: Option<(Object<dyn MTLBuffer>, u64, MTLIndexType)>,
     /// The compute pipeline bound to the open compute encoder.
@@ -216,6 +220,7 @@ impl CommandPool {
             }),
             residency: Box::default(),
             primitive: MTLPrimitiveType::Triangle,
+            usage: Usage::Read,
             indices: None,
             compute_pipeline: None,
         })
@@ -236,7 +241,7 @@ impl CommandBuffer {
             encoder.wait(fence);
         }
         self.order.since.push(self.order.fences.lock().take());
-        self.residency.resident = false;
+        self.residency.resident = None;
         self.encoder = encoder;
     }
 
@@ -290,10 +295,12 @@ impl CommandBuffer {
     }
 
     /// The open compute encoder, beginning one, which binds the heap, if
-    /// needed, with every heap resident.
+    /// needed, with every heap resident and resources declared up to
+    /// `usage`.
     pub(super) fn compute(
         &mut self,
         device: &Device,
+        usage: Usage,
     ) -> &ProtocolObject<dyn MTLComputeCommandEncoder> {
         if !matches!(self.encoder, Encoder::Compute(_)) {
             self.open(|commands| {
@@ -311,7 +318,7 @@ impl CommandBuffer {
                 Encoder::Compute(encoder)
             });
         }
-        self.make_resident(device);
+        self.make_resident(device, usage);
         match &self.encoder {
             Encoder::Compute(encoder) => encoder,
             _ => unreachable!("a compute encoder was just begun"),
@@ -341,12 +348,12 @@ impl CommandBuffer {
         }
     }
 
-    /// Makes every heap, and the resources the bindless heap declares,
-    /// resident for the open render or compute encoder, unless it did since
-    /// they last changed: before every draw and dispatch, since shaders
-    /// reach resources created at any time through the bindless heap.
-    /// Costs two atomic loads when nothing changed.
-    pub(super) fn make_resident(&mut self, device: &Device) {
+    /// Makes every heap, and the resources the bindless heap declares up to
+    /// `usage`, resident for the open render or compute encoder, unless it
+    /// did since they last changed: before every draw and dispatch, since
+    /// shaders reach resources created at any time through the bindless
+    /// heap. Costs two atomic loads when nothing changed.
+    pub(super) fn make_resident(&mut self, device: &Device, usage: Usage) {
         let generations = [device.allocator.generation(), device.heap.generation()];
         if self.residency.generations != generations {
             let (heaps, (declared_generation, declared)) =
@@ -355,21 +362,28 @@ impl CommandBuffer {
                 generations: [heaps.0, declared_generation],
                 heaps: heaps.1,
                 declared,
-                resident: false,
+                resident: None,
             };
         }
-        if self.residency.resident {
+        let resident = self.residency.resident;
+        if resident >= Some(usage) {
             return;
         }
         let Residency {
             heaps, declared, ..
         } = &*self.residency;
+        // The heaps, unless resident already, and the usages not declared
+        // yet.
+        let heaps = heaps.iter().filter(|_| resident.is_none());
+        let usages = Usage::ALL
+            .into_iter()
+            .filter(|declare| Some(*declare) > resident && *declare <= usage);
         match &self.encoder {
             Encoder::Render(encoder) => {
                 for heap in heaps {
                     encoder.useHeap_stages(heap, RENDER_STAGES);
                 }
-                Heap::declare(declared, |resources, count, usage| {
+                Heap::declare(declared, usages, |resources, count, usage| {
                     // SAFETY: `declared` holds live resources; see
                     // `Residency`.
                     unsafe {
@@ -386,7 +400,7 @@ impl CommandBuffer {
                 for heap in heaps {
                     encoder.useHeap(heap);
                 }
-                Heap::declare(declared, |resources, count, usage| {
+                Heap::declare(declared, usages, |resources, count, usage| {
                     // SAFETY: as above.
                     unsafe { encoder.useResources_count_usage(resources, count, usage) };
                 });
@@ -395,7 +409,7 @@ impl CommandBuffer {
                 unreachable!("only draws and dispatches reach the bindless heap")
             }
         }
-        self.residency.resident = true;
+        self.residency.resident = Some(usage);
     }
 }
 

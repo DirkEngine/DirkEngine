@@ -128,6 +128,7 @@ impl CommandBuffer {
         let bias = pipeline.bias;
         encoder.setDepthBias_slopeScale_clamp(bias.constant, bias.slope, bias.clamp);
         self.primitive = pipeline.primitive;
+        self.usage = pipeline.usage;
     }
 
     /// Pushes `data` to every stage; nothing when it is empty.
@@ -182,7 +183,7 @@ impl CommandBuffer {
     }
 
     pub(crate) fn draw(&mut self, device: &Device, vertices: Range<u32>, instances: Range<u32>) {
-        self.make_resident(device);
+        self.make_resident(device, self.usage);
         // SAFETY: see the recording note above.
         unsafe {
             self.render()
@@ -203,7 +204,7 @@ impl CommandBuffer {
         base_vertex: i32,
         instances: Range<u32>,
     ) {
-        self.make_resident(device);
+        self.make_resident(device, self.usage);
         let (buffer, offset, format) = self
             .indices
             .as_ref()
@@ -238,7 +239,7 @@ impl CommandBuffer {
         offset: u64,
         count: u32,
     ) {
-        self.make_resident(device);
+        self.make_resident(device, self.usage);
         for draw in 0..u64::from(count) {
             let offset = offset + draw * size_of::<DrawArguments>() as u64;
             // SAFETY: see the recording note above; the arguments fit the
@@ -262,7 +263,7 @@ impl CommandBuffer {
         offset: u64,
         count: u32,
     ) {
-        self.make_resident(device);
+        self.make_resident(device, self.usage);
         let (indices, index_offset, format) = self
             .indices
             .clone()

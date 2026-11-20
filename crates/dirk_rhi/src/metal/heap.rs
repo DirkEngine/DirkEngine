@@ -7,8 +7,9 @@
 //! Every resource lives in one of the device's heaps, which encoders make
 //! resident with `useHeap`. Metal makes heaps resident for reads only, and
 //! texture views apart from their heap, so encoders also declare what that
-//! does not cover with `useResources`: storage buffers and images, which
-//! shaders may write, and the subviews of images.
+//! does not cover with `useResources`: the subviews of images, read by any
+//! draw or dispatch, and storage buffers and images, written only by
+//! pipelines whose shaders write storage.
 
 use std::{
     ptr::NonNull,
@@ -34,9 +35,8 @@ use crate::{Error, Memory, Result, SamplerDesc, heap::FreeSlots};
 pub(super) struct Slot {
     pub(super) binding: u32,
     pub(super) index: u32,
-    /// The usage encoders declare its resource with, as an index into
-    /// [`USAGES`], if they do.
-    declared: Option<usize>,
+    /// Whether encoders declare its resource with each [`Usage`].
+    declared: [bool; 2],
 }
 
 impl Slot {
@@ -57,14 +57,44 @@ pub(super) enum Descriptor<'a> {
 }
 
 /// How encoders declare resources `useHeap` does not cover, indexing
-/// [`Declared`]: storage resources for writes, subviews for reads.
-const USAGES: [MTLResourceUsage; 2] = [
-    MTLResourceUsage::Read,
-    MTLResourceUsage(MTLResourceUsage::Read.0 | MTLResourceUsage::Write.0),
-];
+/// [`Declared`]. Ordered: encoders declare every usage up to the one their
+/// pipelines need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Usage {
+    /// Subviews, which every draw and dispatch declares, since any shader
+    /// may sample them.
+    Read,
+    /// Storage buffers and images, which only pipelines writing storage
+    /// declare: the heaps make them resident for reads.
+    ReadWrite,
+}
 
-/// Resources encoders declare with one `useResources` call per usage, by
-/// index into [`USAGES`]; contiguous for those calls.
+impl Usage {
+    pub(super) const ALL: [Self; 2] = [Self::Read, Self::ReadWrite];
+
+    /// The usage a pipeline needs resources declared up to: read-write if
+    /// its shaders write storage.
+    pub(super) const fn of_pipeline(writes_storage: bool) -> Self {
+        if writes_storage {
+            Self::ReadWrite
+        } else {
+            Self::Read
+        }
+    }
+
+    /// The equivalent Metal usage.
+    const fn mtl(self) -> MTLResourceUsage {
+        match self {
+            Self::Read => MTLResourceUsage::Read,
+            Self::ReadWrite => {
+                MTLResourceUsage(MTLResourceUsage::Read.0 | MTLResourceUsage::Write.0)
+            }
+        }
+    }
+}
+
+/// Resources encoders declare with one `useResources` call per [`Usage`],
+/// by its index; contiguous for those calls.
 pub(super) type Declared = [Vec<NonNull<ProtocolObject<dyn MTLResource>>>; 2];
 
 /// Free slots of each array, and the resources of filled ones encoders
@@ -77,9 +107,9 @@ struct Slots {
     /// The slot each declared resource fills, alongside `declared`; `None`
     /// for the heap's own empty storage images.
     owners: [Vec<Option<Slot>>; 2],
-    /// Where each declared slot's resource is in `declared`, by binding
-    /// and slot.
-    positions: [Vec<usize>; CAPACITIES.len()],
+    /// Where each declared slot's resource is in `declared`, by usage,
+    /// binding and slot.
+    positions: [[Vec<usize>; CAPACITIES.len()]; 2],
 }
 
 // SAFETY: the declared pointers are thread-safe Metal resources, kept alive
@@ -88,15 +118,16 @@ struct Slots {
 unsafe impl Send for Slots {}
 
 impl Slots {
-    /// Declares `resource`, filling `owner`, with usage `usage`.
+    /// Declares `resource`, filling `owner`, with `usage`.
     fn declare(
         &mut self,
         resource: &ProtocolObject<dyn MTLResource>,
-        usage: usize,
+        usage: Usage,
         owner: Option<Slot>,
     ) {
+        let usage = usage as usize;
         if let Some(slot) = owner {
-            let positions = &mut self.positions[slot.binding as usize];
+            let positions = &mut self.positions[usage][slot.binding as usize];
             if positions.len() <= slot.index as usize {
                 positions.resize(slot.index as usize + 1, 0);
             }
@@ -106,27 +137,37 @@ impl Slots {
         self.owners[usage].push(owner);
     }
 
-    /// Stops declaring the resource filling `slot`, with usage `usage`.
-    fn forget(&mut self, slot: Slot, usage: usize) {
-        let position = self.positions[slot.binding as usize][slot.index as usize];
+    /// Stops declaring the resource filling `slot` with `usage`.
+    fn forget(&mut self, slot: Slot, usage: Usage) {
+        let usage = usage as usize;
+        let positions = &mut self.positions[usage];
+        let position = positions[slot.binding as usize][slot.index as usize];
         self.declared[usage].swap_remove(position);
         self.owners[usage].swap_remove(position);
         if let Some(Some(moved)) = self.owners[usage].get(position).copied() {
-            self.positions[moved.binding as usize][moved.index as usize] = position;
+            positions[moved.binding as usize][moved.index as usize] = position;
         }
     }
 }
 
+impl Slot {
+    /// The usages encoders declare its resource with.
+    fn usages(self) -> impl Iterator<Item = Usage> {
+        Usage::ALL
+            .into_iter()
+            .filter(move |usage| self.declared[*usage as usize])
+    }
+}
+
 impl Descriptor<'_> {
-    /// The usage encoders declare the resource with, as an index into
-    /// [`USAGES`], filling a slot at `binding`; `None` if `useHeap` covers
-    /// it. Views are told apart by their parent texture.
-    fn declared(&self, binding: u32) -> Option<usize> {
+    /// Whether encoders declare the resource with each [`Usage`], filling a
+    /// slot at `binding`: subviews, told apart by their parent texture, for
+    /// reads, and storage resources for writes. A storage subview is both.
+    fn declared(&self, binding: u32) -> [bool; 2] {
         match self {
-            Self::Buffer(_) => Some(1),
-            Self::Texture(_) if is_storage(binding) => Some(1),
-            Self::Texture(texture) => texture.parentTexture().map(|_| 0),
-            Self::Sampler(_) => None,
+            Self::Buffer(_) => [false, true],
+            Self::Texture(texture) => [texture.parentTexture().is_some(), is_storage(binding)],
+            Self::Sampler(_) => [false; 2],
         }
     }
 }
@@ -182,7 +223,7 @@ impl Heap {
         // forged indices.
         for (binding, texture) in (0..).zip(&empty) {
             if let Some(texture) = texture.as_ref().filter(|_| is_storage(binding)) {
-                slots.declare(ProtocolObject::from_ref(&**texture), 1, None);
+                slots.declare(ProtocolObject::from_ref(&**texture), Usage::ReadWrite, None);
             }
         }
         let heap = Self {
@@ -426,22 +467,25 @@ impl Heap {
         (self.generation(), slots.declared.clone())
     }
 
-    /// Passes each usage's resources in `declared` to `declare`, as Metal's
-    /// `useResources` takes them: `count` at `resources`.
+    /// Passes the resources in `declared` of each usage in `usages` to
+    /// `declare`, as Metal's `useResources` takes them: `count` at
+    /// `resources`.
     pub(super) fn declare(
         declared: &Declared,
+        usages: impl Iterator<Item = Usage>,
         mut declare: impl FnMut(
             NonNull<NonNull<ProtocolObject<dyn MTLResource>>>,
             usize,
             MTLResourceUsage,
         ),
     ) {
-        for (resources, usage) in declared.iter().zip(USAGES) {
+        for usage in usages {
+            let resources = &declared[usage as usize];
             if !resources.is_empty() {
                 declare(
                     NonNull::from(resources.as_slice()).cast(),
                     resources.len(),
-                    usage,
+                    usage.mtl(),
                 );
             }
         }
@@ -467,8 +511,10 @@ impl Device {
             Descriptor::Buffer(buffer) => ProtocolObject::from_ref(buffer),
             Descriptor::Sampler(_) => return Ok(slot),
         };
-        if let Some(usage) = slot.declared {
+        for usage in slot.usages() {
             slots.declare(resource, usage, Some(slot));
+        }
+        if slot.declared.contains(&true) {
             heap.generation.fetch_add(1, Ordering::Release);
         }
         Ok(slot)
@@ -480,8 +526,10 @@ impl Device {
         let mut slots = self.heap.slots.lock();
         self.heap.write(slot, None);
         slots.free[slot.binding as usize].release(slot.index);
-        if let Some(usage) = slot.declared {
+        for usage in slot.usages() {
             slots.forget(slot, usage);
+        }
+        if slot.declared.contains(&true) {
             self.heap.generation.fetch_add(1, Ordering::Release);
         }
     }

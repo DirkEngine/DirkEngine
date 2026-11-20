@@ -3,7 +3,7 @@
 //! check, and the setup those tests share with the crates built on the RHI.
 
 pub use dirk_rhi_test_shaders_gpu::{
-    Count, DepthCompare, Fill, Instanced, Paint, Sliced, Textured, Vertex,
+    Count, DepthCompare, Fill, Instanced, Paint, Sliced, Stored, Textured, Vertex,
 };
 
 #[expect(

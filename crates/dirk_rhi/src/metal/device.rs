@@ -257,6 +257,10 @@ impl Device {
     /// Number of submitted command buffers that failed, which Metal always
     /// counts. Metal's API validation, enabled by `MTL_DEBUG_LAYER=1`, aborts
     /// on misuse instead of counting it.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is shared with Vulkan, which counts only with validation"
+    )]
     pub(crate) fn validation_error_count(&self) -> Option<usize> {
         Some(self.health.errors.load(Ordering::Relaxed))
     }

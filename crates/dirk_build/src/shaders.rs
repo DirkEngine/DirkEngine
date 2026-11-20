@@ -4,7 +4,7 @@ mod msl;
 mod push;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env,
     fmt::Write as _,
     fs::{self, File},
@@ -29,8 +29,9 @@ use rspirv::{
 ///
 /// The generated file declares a type per entry point, named after it in
 /// `PascalCase` (`main_vs` becomes `MainVs`), implementing `dirk_rhi::Shader`
-/// with the stage, push data size and, for compute shaders, workgroup size
-/// reflected from its module, and the push data type its
+/// with the stage, push data size, whether it writes storage buffers or
+/// images and, for compute shaders, workgroup size reflected from its
+/// module, and the push data type its
 /// `#[spirv(push_constant)]` parameter refers to in the crate's source; see
 /// [`push`]. Modules of shaders reading a push data block of another size
 /// than that type fail the build, as do modules declaring resources other
@@ -98,20 +99,23 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
             "/// The `{entry_point}` shader entry point.\n\
              pub struct {name};\n\
              // SAFETY: rust-gpu compiled this entry point for Vulkan 1.3, the\n\
-             // shader build reflected its stage and push data size, found its\n\
-             // push data type in its source, checked the heap arrays it\n\
-             // declares, and translated it for Metal on Apple targets.\n\
+             // shader build reflected its stage, push data size and storage\n\
+             // writes, found its push data type in its source, checked the\n\
+             // heap arrays it declares, and translated it for Metal on Apple\n\
+             // targets.\n\
              unsafe impl dirk_rhi::Shader for {name} {{\n    \
                  type Push = {push};\n    \
                  const ENTRY_POINT: &'static str = {entry_point:?};\n    \
                  const STAGE: dirk_rhi::ShaderStage = dirk_rhi::ShaderStage::{stage:?};\n    \
                  const PUSH_SIZE: usize = {push_size};\n    \
+                 const WRITES_STORAGE: bool = {writes_storage};\n    \
                  const WORKGROUP_SIZE: [u32; 3] = {workgroup_size:?};\n    \
                  const CODE: &'static [u8] = include_bytes!({path:?});\n\
              }}\n",
             name = type_name(&entry_point),
             stage = reflected.stage,
             push_size = reflected.push_size,
+            writes_storage = reflected.writes_storage,
             workgroup_size = reflected.workgroup_size,
         )?;
     }
@@ -149,6 +153,8 @@ struct Reflected {
     stage: Stage,
     /// Size of the push data block, zero without one.
     push_size: u32,
+    /// Whether it writes storage buffers or images.
+    writes_storage: bool,
     /// Invocations per workgroup along each axis, for compute shaders;
     /// zeros for other stages.
     workgroup_size: [u32; 3],
@@ -175,6 +181,9 @@ impl Reflected {
         Types(&module)
             .check_bindings()
             .with_context(|| format!("checking the heap arrays `{entry_point}` declares"))?;
+        let writes_storage = Types(&module)
+            .writes_storage()
+            .with_context(|| format!("reflecting the storage `{entry_point}` writes"))?;
         let workgroup_size = match stage {
             Stage::Compute => Self::workgroup_size(&module)
                 .with_context(|| format!("`{entry_point}` declares no workgroup size"))?,
@@ -183,6 +192,7 @@ impl Reflected {
         Ok(Self {
             stage,
             push_size,
+            writes_storage,
             workgroup_size,
         })
     }
@@ -256,6 +266,57 @@ impl Types<'_> {
             );
         }
         Ok(())
+    }
+
+    /// Whether the module writes storage buffers or images: stores or
+    /// atomics other than loads through pointers into storage buffers or
+    /// image texels, or image writes, which only storage images take.
+    fn writes_storage(&self) -> anyhow::Result<bool> {
+        let functions = &self.0.functions;
+        // The type of every pointer the module defines.
+        let types: HashMap<u32, u32> = self
+            .0
+            .types_global_values
+            .iter()
+            .chain(functions.iter().flat_map(|function| {
+                function
+                    .parameters
+                    .iter()
+                    .chain(function.blocks.iter().flat_map(|block| &block.instructions))
+            }))
+            .filter_map(|instruction| Some((instruction.result_id?, instruction.result_type?)))
+            .collect();
+        let instructions = functions
+            .iter()
+            .flat_map(|function| &function.blocks)
+            .flat_map(|block| &block.instructions);
+        for instruction in instructions {
+            let opcode = instruction.class.opcode;
+            if opcode == Op::ImageWrite {
+                return Ok(true);
+            }
+            let writes_through_pointer =
+                matches!(opcode, Op::Store | Op::CopyMemory | Op::CopyMemorySized)
+                    || (instruction.class.opname.starts_with("OpAtomic")
+                        && opcode != Op::AtomicLoad);
+            if !writes_through_pointer {
+                continue;
+            }
+            let pointer = id_operand(instruction, 0)?;
+            let ty = types
+                .get(&pointer)
+                .with_context(|| format!("pointer {pointer} has no type"))?;
+            let class = self.get(*ty)?.operands.first();
+            if matches!(
+                class,
+                Some(Operand::StorageClass(
+                    StorageClass::StorageBuffer | StorageClass::Image
+                ))
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The elements of the runtime array `variable` points to.
@@ -448,7 +509,7 @@ mod tests {
     use dirk_shaders::bindless::heap;
     use rspirv::{
         dr::{Builder, Operand},
-        spirv::{Decoration, Dim, ImageFormat, StorageClass},
+        spirv::{Decoration, Dim, FunctionControl, ImageFormat, StorageClass},
     };
 
     use super::{Types, type_name};
@@ -495,5 +556,37 @@ mod tests {
         assert!(check(heap::TEXTURES_2D, 2, 2).is_err(), "storage");
         assert!(check(heap::SAMPLERS, 2, 1).is_err(), "not samplers");
         assert!(check(64, 2, 1).is_err(), "no array there");
+    }
+
+    /// Whether a module storing a `u32` to a variable of `class`, or only
+    /// loading it, writes storage.
+    fn writes(class: StorageClass, store: bool) -> anyhow::Result<bool> {
+        let mut builder = Builder::new();
+        let (void, uint) = (builder.type_void(), builder.type_int(32, 0));
+        let pointer = builder.type_pointer(None, class, uint);
+        let variable = builder.variable(pointer, None, class, None);
+        let function = builder.type_function(void, []);
+        builder.begin_function(void, None, FunctionControl::NONE, function)?;
+        builder.begin_block(None)?;
+        if store {
+            let zero = builder.constant_bit32(uint, 0);
+            builder.store(variable, zero, None, [])?;
+        } else {
+            builder.load(uint, None, variable, None, [])?;
+        }
+        builder.ret()?;
+        builder.end_function()?;
+        Types(&builder.module()).writes_storage()
+    }
+
+    #[test]
+    fn only_stores_to_storage_write_it() -> anyhow::Result<()> {
+        assert!(writes(StorageClass::StorageBuffer, true)?, "storage stores");
+        assert!(
+            !writes(StorageClass::StorageBuffer, false)?,
+            "storage loads"
+        );
+        assert!(!writes(StorageClass::Private, true)?, "private stores");
+        Ok(())
     }
 }
