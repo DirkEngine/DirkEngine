@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 bytemuck.workspace = true
+dirk_shaders = { workspace = true, features = ["gpu"] }
 spirv-std.workspace = true
 
 # spirv-std needs glam's integer vectors, which the workspace enables.

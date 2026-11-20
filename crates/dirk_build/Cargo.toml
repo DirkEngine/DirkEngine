@@ -14,6 +14,7 @@ documentation.workspace = true
 anyhow.workspace = true
 cargo_metadata.workspace = true
 cargo-gpu-install.workspace = true
+dirk_shaders.workspace = true
 quote.workspace = true
 rspirv.workspace = true
 syn.workspace = true

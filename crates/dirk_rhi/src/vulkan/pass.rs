@@ -74,6 +74,7 @@ impl CommandBuffer {
             info = info.stencil_attachment(stencil);
         }
         device.begin_label(self.raw, desc.label);
+        device.bind_heap(self.raw);
         // SAFETY: see the recording note above.
         unsafe { device.raw.cmd_begin_rendering(self.raw, &info) };
         #[expect(
@@ -127,9 +128,13 @@ impl CommandBuffer {
         // SAFETY: see the recording note above; push data is at most the
         // layout's range.
         unsafe {
-            device
-                .raw
-                .cmd_push_constants(self.raw, device.pipeline_layout, PUSH_STAGES, 0, data);
+            device.raw.cmd_push_constants(
+                self.raw,
+                device.heap.pipeline_layout,
+                PUSH_STAGES,
+                0,
+                data,
+            );
         }
     }
 

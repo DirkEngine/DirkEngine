@@ -2,4 +2,8 @@
 
 #![no_std]
 
+// Lets `#[derive(HeapIndices)]` name this crate from inside it.
+extern crate self as dirk_shaders;
+
+pub mod bindless;
 pub mod types;

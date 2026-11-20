@@ -98,6 +98,9 @@ pub(crate) struct Transition {
     /// The image's resting access, which an [`ImageAccess::Undefined`]
     /// `before` is ordered after on the graphics queue.
     pub(crate) rest: ImageAccess,
+    /// Whether the image has storage usage: shaders then reach it in one
+    /// layout whatever the access, which its descriptors name.
+    pub(crate) storage: bool,
     pub(crate) transfer: Option<QueueTransfer>,
 }
 
