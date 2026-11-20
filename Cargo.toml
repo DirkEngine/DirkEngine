@@ -6,6 +6,8 @@ members = [
     "apps/*",
     "crates/*",
     "crates/dirk_renderer/shaders",
+    "crates/dirk_rhi/test-shaders",
+    "crates/dirk_rhi/test-shaders/gpu",
     "tools/xtask",
 ]
 
@@ -54,6 +56,9 @@ dirk_engine   = { version = "0.1.0", path = "crates/dirk_engine" }
 dirk_editor   = { version = "0.1.0", path = "crates/dirk_editor" }
 
 dirk_shaders  = { version = "0.1.0", path = "crates/dirk_shaders" }
+dirk_rhi      = { version = "0.1.0", path = "crates/dirk_rhi" }
+dirk_rhi_test_shaders = { version = "0.1.0", path = "crates/dirk_rhi/test-shaders" }
+dirk_rhi_test_shaders_gpu = { version = "0.1.0", path = "crates/dirk_rhi/test-shaders/gpu" }
 
 # Main Engine Dependencies
 winit = "0.31.0-beta.3"

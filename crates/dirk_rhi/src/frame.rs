@@ -195,6 +195,7 @@ impl Frame<'_> {
     /// access the copy queue cannot reach, without releasing it to the
     /// graphics queue; or a native error such as [`Error::DeviceLost`].
     pub fn submit<Q: QueueKind>(&self, mut encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+        encoder.end_pass();
         if !std::ptr::eq(encoder.frame, self) {
             return Err(Error::invalid(
                 "submission",

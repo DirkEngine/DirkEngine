@@ -1,0 +1,24 @@
+[package]
+name = "dirk_rhi_test_shaders"
+description = "Shaders for dirk_rhi's native tests, built like the engine's"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+dirk_rhi.workspace = true
+dirk_rhi_test_shaders_gpu.workspace = true
+
+# Only the generated `Shader` implementations name `dirk_rhi`, which
+# cargo-machete does not see.
+[package.metadata.cargo-machete]
+ignored = ["dirk_rhi"]
+
+[build-dependencies]
+anyhow.workspace = true
+dirk_build.workspace = true
+
+[lints]
+workspace = true

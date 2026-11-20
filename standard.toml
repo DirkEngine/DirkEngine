@@ -21,7 +21,10 @@ unsafe-modules = [
     "dirk_rhi::command",
     "dirk_rhi::frame",
     "dirk_rhi::native",
+    "dirk_rhi::shader",
+    "dirk_rhi_test_shaders::generated",
     "frames",
+    "pipelines",
     "resources",
 ]
 
@@ -100,5 +103,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 190 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 192 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]

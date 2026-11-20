@@ -105,6 +105,12 @@ impl Image {
         self.raw
     }
 
+    /// The view rendered to when the image is an attachment, which its
+    /// attachment usage gave it.
+    pub(super) fn attachment_view(&self) -> vk::ImageView {
+        self.view.map_or_else(vk::ImageView::null, |view| view.raw)
+    }
+
     /// The image's view, if it has one.
     pub(crate) fn view(&self) -> Option<ImageView> {
         self.view
@@ -151,7 +157,7 @@ impl ImageUsage {
 
 impl SampleCount {
     /// The equivalent Vulkan sample count.
-    const fn vk(self) -> vk::SampleCountFlags {
+    pub(super) const fn vk(self) -> vk::SampleCountFlags {
         match self {
             Self::X1 => vk::SampleCountFlags::TYPE_1,
             Self::X2 => vk::SampleCountFlags::TYPE_2,
