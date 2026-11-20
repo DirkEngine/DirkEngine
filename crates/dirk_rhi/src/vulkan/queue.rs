@@ -67,7 +67,8 @@ impl Queue {
 impl Device {
     /// Submits recorded `commands`, in order, to `queue` after the GPU
     /// reaches each queue's value in `waits`, and returns the value the
-    /// submission signals. Only this queue's lock is held.
+    /// submission signals. Only this queue's lock is held, and the heap's
+    /// while submitting, so no slot the commands read is written meanwhile.
     pub(crate) fn submit(
         &self,
         queue: QueueType,
@@ -105,12 +106,14 @@ impl Device {
             .wait_semaphore_infos(&wait_infos[..wait_count])
             .command_buffer_infos(&commands)
             .signal_semaphore_infos(&signal);
-        // SAFETY: the queue is locked, the commands were recorded for its
-        // family, and waits refer to values already submitted.
-        unsafe {
-            self.raw
-                .queue_submit2(*vk_queue, &[submit], vk::Fence::null())
-        }
+        self.submit_reading_heap(|| {
+            // SAFETY: the queue is locked, the commands were recorded for its
+            // family, and waits refer to values already submitted.
+            unsafe {
+                self.raw
+                    .queue_submit2(*vk_queue, &[submit], vk::Fence::null())
+            }
+        })
         .check("vkQueueSubmit2")?;
         target.submitted.store(value, Ordering::Release);
         Ok(value)
