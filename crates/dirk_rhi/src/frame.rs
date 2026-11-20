@@ -190,11 +190,8 @@ impl Frame<'_> {
     ///
     /// Returns [`Error::Invalid`] if the encoder belongs to another frame, or
     /// a native error such as [`Error::DeviceLost`].
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "submitting consumes the encoder so its commands cannot be submitted twice"
-    )]
-    pub fn submit<Q: QueueKind>(&self, encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+    pub fn submit<Q: QueueKind>(&self, mut encoder: CommandEncoder<'_, Q>) -> Result<Completion> {
+        encoder.end_pass();
         if !std::ptr::eq(encoder.frame, self) {
             return Err(Error::invalid(
                 "submission",
