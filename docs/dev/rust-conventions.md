@@ -70,10 +70,12 @@ doesn't trigger the lint.
 ## Unsafe code
 
 Only `dirk_renderer` and `dirk_rhi` may use `unsafe`, to call the native
-graphics API (Vulkan through ash); every other crate forbids it, except that
-`dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`) deny it and expect it
-where they include the `unsafe` `Shader` implementations the shader build
-generates. Keep it in the modules that wrap a native object, and give
+graphics API (Vulkan through ash); every other crate forbids it, except two
+that deny it and expect it where needed: `dirk_shaders`, for the shaders'
+unchecked heap accesses and the `unsafe` `HeapIndices` trait, and `dirk_rhi`'s
+test shaders (`dirk_rhi_test_shaders`), for the `unsafe` `Shader`
+implementations the shader build generates. Keep it in the modules that wrap
+a native object, and give
 every `unsafe` block a `// SAFETY:` comment stating why it is sound: which
 handles are valid and owned, which lock provides the external synchronization
 Vulkan requires, and how long the memory a call reads lives. An `unsafe fn`
@@ -106,8 +108,8 @@ from its signature. Each crate's README is its crate documentation
 ## Deviations
 
 - `dirk_renderer` and `dirk_rhi` redeclare the workspace lints to allow
-  `unsafe_code`, and `dirk_rhi_test_shaders` to deny it rather than forbid
-  it.
+  `unsafe_code`, and `dirk_shaders` and `dirk_rhi_test_shaders` to deny it
+  rather than forbid it.
 - Asset loaders return `anyhow::Error`, which `dirk_assets` wraps in
   `Error::AssetLoadError`, so a loader's own errors aren't typed yet.
 - `dirk_engine`, `dirk_shaders`, the shaders (`dirk_shaders_gpu`),

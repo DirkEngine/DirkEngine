@@ -66,7 +66,10 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
 - Recording is scoped to a `Frame`. A resource dropped while frame F is open (or after it)
   is tagged with F; once every submission made up to and including frame F has completed
   on every queue, its native object is destroyed. This is provable without per-command
-  resource tracking because encoders cannot outlive their frame.
+  resource tracking because encoders cannot outlive their frame. Bindless indices, which
+  are plain numbers, are the exception: later frames may still read an object's heap
+  slots through them, which keeps it longer (see
+  [Slots live until their last use](#binding-model-bindless-verified-at-compile-time)).
 - Freed entries are collected when a frame begins (it already waits for its slot), and on
   `Rhi::wait_idle` / `Drop for Rhi`.
 - Beginning frame F waits for each queue's last submission as recorded when frame
@@ -123,17 +126,19 @@ frame.finish();                               // closes the frame (also on Drop)
   the devices it was tested on have none.
 - No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync)
   apart from `gpu-allocator`'s allocator, locked only to allocate and free memory, the
-  list of dropped objects, locked to add and collect them, the list of new images'
-  first transitions, locked to add one, to take them at a graphics submission, to forget
-  those a copy queue submission takes over and to forget dropped images' when a frame
-  begins or they are destroyed, and the list of images dropped since the last frame
-  began, locked to add one, to take them and to remove one as it is destroyed; only
-  queue submission/present take that queue's lock, and waits hold none.
+  list of dropped objects, locked to add and collect them, the bindless heap's slots,
+  locked to assign, write and empty one (which also synchronizes descriptor writes) and
+  while submitting, so no slot is written meanwhile, the list of new images' first
+  transitions, locked to add one, to take them at a graphics submission, to forget those
+  a copy queue submission takes over and to forget dropped images' when a frame begins or
+  they are destroyed, and the list of images dropped since the last frame began, locked
+  to add one, to take them and to remove one as it is destroyed; only queue
+  submission/present take that queue's lock, and waits hold none.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes (`Buffer::write`), and creating shaders from unvalidated bytes.
 - **Images have a resting access.** `ImageInfo::rest`, chosen by `ImageDesc::rest` or
-  defaulting from the usage (`ImageAccess::resting`: sampled by every stage, else storage
-  read/write, else the attachment, else copy source, else copy destination), is the access
+  defaulting from the usage (`ImageAccess::resting`: storage read/write by every stage,
+  else sampled by every stage, else the attachment, else copy source, else copy destination), is the access
   every image is in between submissions, so nothing safe takes a caller's word for an
   image's state:
   - New images start undefined; `create_image` queues their transition to rest, which the
@@ -141,13 +146,15 @@ frame.finish();                               // closes the frame (also on Drop)
     over (uploads), since the copy queue cannot reach graphics accesses, once its encoder is
     submitted: an encoder dropped unsubmitted leaves the image to the graphics queue. An
     image dropped before then keeps its transition, which commands recorded meanwhile
-    expect, until the next frame begins or the image is destroyed: encoders cannot
+    expect, until the next frame begins, before the image is destroyed: encoders cannot
     outlive their frame, so no command recorded later expects it. Beginning a frame moves
     the frame dropped objects are tagged with before it forgets, so an image dropped on
     another thread too late to be forgotten is tagged with the new frame, whose
     submissions may still record its transition, and is destroyed only after them.
-    Destroying an image forgets what is left of it before the driver can reuse its
-    handle, so a new image given the same handle keeps its own transition.
+    The graveyard destroys an image only once the frame after the one it is tagged with
+    has begun, which forgot its transition, so a new image the driver gives the same
+    handle never matches a stale entry; destroying an image still forgets what is left of
+    it, as a safeguard.
   - Safe commands (`copy_buffer_to_image`, `copy_image_to_buffer`, `copy_image`,
     `blit_image`) move the subresources they touch from rest into their access and back,
     with no barrier where the access is the resting one and only read.
@@ -186,7 +193,7 @@ frame.finish();                               // closes the frame (also on Drop)
 - Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
   shader crate from a build script into one SPIR-V module per entry point and generates a
   type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (SPIR-V, stage,
-  reflected push data size, push data type). Implementing it is the only `unsafe` step; creating modules
+  reflected push data size, whether it writes storage buffers or images, push data type). Implementing it is the only `unsafe` step; creating modules
   from it is safe. `dirk_rhi`'s tests build their shaders the same way
   (`crates/dirk_rhi/test-shaders`).
 - `rhi.create_shader::<S>() -> ShaderModule<S::Push>`, where `S::Push` is the push data
@@ -205,21 +212,79 @@ frame.finish();                               // closes the frame (also on Drop)
 
 ## Binding model: bindless, verified at compile time
 
-- One global resource heap.
-  - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND` arrays
-    for sampled images, storage images, samplers, storage buffers (Vulkan 1.2 descriptor
-    indexing). Freed slots are rewritten to a valid default descriptor before reuse.
+- One global resource heap: one array per kind of resource and, for images, per view
+  type, so every slot of an array holds the descriptor type and dimension shaders declare
+  for it. Bindings and power-of-two capacities are constants in
+  `dirk_shaders::bindless::heap`: textures 2D, 2D array, cube, cube array and 3D, and
+  storage images 2D, 2D array and 3D (declared without a format; cubes have no storage
+  index), 16384 each, one capacity for every image array; samplers (1024) and storage
+  buffers (65536).
+  - Vulkan: one descriptor set (set 0) with `UPDATE_AFTER_BIND | PARTIALLY_BOUND |
+    UPDATE_UNUSED_WHILE_PENDING` arrays (Vulkan 1.2 descriptor indexing). Every slot is
+    written at creation, and rewritten when freed, to a null descriptor
+    (`VK_EXT_robustness2`'s `nullDescriptor`, now required) or, for samplers, a default
+    sampler. Devices whose update-after-bind limits cannot hold the heap are rejected.
+    Graphics shaders reach the writable storage arrays, so `vertexPipelineStoresAndAtomics`
+    and `fragmentStoresAndAtomics` are required.
+    Storage descriptors use `GENERAL`, and sampled descriptors the `READ_ONLY_OPTIMAL`
+    layout `ImageAccess::Sampled` maps to, except for images with storage usage: those rest
+    in storage reads and writes (`GENERAL`), and are sampled in `GENERAL` too, which their
+    sampled descriptors name, so dispatches and draws find them in the layout every
+    descriptor of theirs names. Their storage accesses' masks include sampled reads, so
+    barriers into and out of rest order sampling too. Metal has no layouts.
   - Metal: one tier-2 argument buffer with the same arrays.
 - Every `ImageView`/`Sampler`/`Buffer` created with a shader-visible usage gets a slot at
-  creation and returns it through the deferred free path. `view.index() -> TextureIndex`.
+  creation and returns it through the deferred free path, so a slot is reused only once
+  the GPU is done with every frame that read it (below). `view.index() -> Option<TextureIndex>` (sampled usage),
+  `view.storage_index() -> Option<StorageImageIndex>`, `sampler.index() -> SamplerIndex`,
+  `buffer.index::<T>() -> Option<BufferIndex<T>>` (storage usage; `T` is chosen by the
+  reader and memory-safe whatever it is). Storage buffers are limited to the device's
+  storage buffer range at creation, frame memory included. A frame allocation's
+  `slice.index() -> BufferSlice<T>` is its buffer's `BufferIndex<T>`, its first element and
+  its length.
+- **Slots live until their last use.** Indices are `Copy` numbers, so they may be used
+  after their owner dropped. The RHI records, per slot, the last frame whose work may read
+  it, whenever it sees an index: in the push data of every draw, and in the
+  elements of frame allocations. Both list their indices through the `unsafe` trait
+  `dirk_shaders::bindless::HeapIndices`, which `PushData` and `frame.alloc` require;
+  `#[derive(HeapIndices)]` lists the indices of every field (each field's type implements
+  it too: indices, scalars, arrays), so it is never written by hand. Every array an index
+  kind reads shares that kind's record, one `u64` per slot, since a `TextureIndex` may read
+  any texture array.
+  - A dropped object is freed, its slots emptied before its native object is destroyed,
+    once a frame after its last use (its drop, or a recorded read) closed and every frame
+    that read its slots completed. So an index kept past its owner's drop stays valid
+    through the next frame, and for as long as every frame uses it; `wait_idle` keeps
+    what the next frame may still read. Taking an index from its owner (`view.index()`)
+    needs no record: it happens before the drop, whose frame tags the object anyway.
+  - Slots are reused first in, first out, and only once no recorded read is pending: a
+    freed slot read again through a stale index is skipped until that frame completes.
+  - Recording a read is a relaxed load and, the first time a frame reads the slot, a
+    relaxed store, on the open frame's thread: no lock, allocation or hashing per draw.
+    Reads are checked when frames begin, with no frame open, and when a slot is taken,
+    under the heap's lock, which submissions hold too: either the submission came first
+    and the check sees its reads, or the slot was written before the submission, which
+    reads the new descriptor (Vulkan's `UPDATE_AFTER_BIND`; Metal reads the argument
+    buffer when the work runs). So no slot is written while pending work may read it
+    through an index the RHI saw, as `UPDATE_UNUSED_WHILE_PENDING` requires.
+  - The RHI never sees indices in other memory: storage buffers written once (such as a
+    material table) or by the GPU, frame memory of earlier frames, or indices shaders
+    compute. Work reading those relies on its caller to keep their owners alive until it
+    completes; otherwise they are stale, reading the empty descriptor or another resource
+    of their kind, and their slots may be written while that work runs.
 - One global pipeline layout: the heap + a push-constant block (<= 128 bytes).
 - **Vertex pulling.** Pipelines have no vertex input layouts; shaders read vertices from
   storage buffers by index. Index buffers are still bound directly.
 - No bind groups, bind group layouts, per-set pipeline layouts, descriptor pools per group,
   dynamic offsets, or set-tuple macros.
 - **Compile-time verification.** `dirk_shaders` defines typed indices (`TextureIndex`,
-  `SamplerIndex`, `BufferIndex<T>`) and each pipeline's push-data struct (`#[repr(C)]`,
-  `NoUninit`). Shaders and host share these exact Rust types.
+  `StorageImageIndex`, `SamplerIndex`, `BufferIndex<T>`, `BufferSlice<T>`, all `NoUninit`) and each
+  pipeline's push-data struct (`#[repr(C)]`, `NoUninit`, `HeapIndices`). Shaders and host share these
+  exact Rust types. With its `gpu` feature, shader crates read the heap through them
+  (`push.texture.get(textures)`, `push.vertices.get(buffers)[i]`, `push.objects.get(buffers,
+  i)` for a slice, which checks `i` against its length), declaring the arrays
+  as entry point parameters at the documented bindings; the shader build declares the
+  descriptor indexing capabilities, and accesses are `NonUniform`.
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
   The shader build names each entry point's push data type, the one its
   `#[spirv(push_constant)]` parameter refers to (`()` without one), as `Shader::Push`;
@@ -227,8 +292,33 @@ frame.finish();                               // closes the frame (also on Drop)
   shaders of one push type (a shader reading none joins others with `with_push`). The
   build also reflects each push block's size, and a `const` assertion fails the build if
   it disagrees with the type's.
-- Stale indices are memory-safe (they read a valid default or a live resource); in debug
-  builds a generation check may report them.
+- Indices read only the arrays of their kind: `get` accepts only those arrays' element
+  types (sealed traits over the `spirv_std` image, sampler and buffer types), the shader
+  build checks every array a shader declares against the heap's bindings, and `get` masks
+  the index to the capacity of every array of its kind. Each slot holds a descriptor of
+  the array's kind and dimension: a live resource, or, once freed, a null one. So an
+  index of any value reads inside its array: a stale or forged one reads the null
+  descriptor or another live resource of its kind. Freed slots are reused first in, first
+  out, so stale indices read the null descriptor for as long as possible. In debug builds
+  a generation check may report them later.
+- **What safe code is guaranteed, and what is the caller's.** Whatever the indices, the GPU
+  reads no descriptor outside the heap's arrays or of another kind (above), so indices
+  are plain numbers: constructing one (`TextureIndex::new`) is safe, since shaders can
+  compute any index anyway, and a forged index only reads a live or null resource of its
+  kind. Beyond that, tracking proves only what it sees: the resource and slot of every
+  index in push data and frame allocations live, unwritten, until the work reading them
+  completes. The rest is the caller's:
+  - Indices the RHI does not see (in buffers written by uploads, `Buffer::write` or the
+    GPU, in frame memory of earlier frames, or computed by shaders) need their owners
+    kept alive until the work reading them completes. Otherwise their slots may be emptied
+    and filled again while that work runs, which Vulkan forbids under
+    `UPDATE_UNUSED_WHILE_PENDING` (validation reports it) and which reads the old, null or
+    new descriptor on Metal.
+  - Heap reads bypass the images' accesses: barriers or the render graph's shader
+    declarations order them after writes, and shaders read images only in their resting
+    access or a declared shader access, never an image the current render pass renders
+    to. Otherwise they read undefined values (a mismatched layout, a race, a feedback
+    loop), though never outside the image.
 
 ## Render graph (`dirk_render_utils`)
 

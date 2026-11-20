@@ -5,6 +5,7 @@ mod buffer;
 mod command;
 mod convert;
 mod device;
+mod heap;
 mod image;
 mod instance;
 mod pass;
@@ -15,7 +16,7 @@ mod sampler;
 pub(crate) use buffer::{Buffer, BufferId};
 pub(crate) use command::{CommandBuffer, CommandPool};
 pub(crate) use device::Device;
-pub(crate) use image::{Image, ImageId, ImageView};
+pub(crate) use image::{Image, ImageId};
 pub(crate) use pipeline::{GraphicsPipeline, PipelineId, ShaderModule};
 pub(crate) use sampler::Sampler;
 

@@ -9,8 +9,8 @@ use bytemuck::NoUninit;
 use tracing::error;
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, CommandEncoder, Completion, Error, Graphics, Memory,
-    QueueKind, QueueType, Result, Rhi, native,
+    Buffer, BufferDesc, BufferIndex, BufferSlice, BufferUsage, CommandEncoder, Completion, Error,
+    Graphics, HeapIndices, Memory, QueueKind, QueueType, Result, Rhi, native,
 };
 
 /// What every frame allocation starts at and reserves a multiple of, in
@@ -38,7 +38,7 @@ pub(crate) struct FrameSlot {
 /// Headless work uses frames too.
 ///
 /// Beginning a frame waits until the frame [`FRAMES_IN_FLIGHT`] frames
-/// earlier has completed on every queue, then frees the objects dropped by
+/// earlier has completed on every queue, then frees the objects last used by
 /// its end. Finishing or dropping the frame closes it; encoders and
 /// [allocations](Frame::alloc) cannot outlive it.
 ///
@@ -68,12 +68,15 @@ pub struct Frame<'r> {
 /// `len` elements of `T` a frame copied into host-visible memory that only
 /// its own work reads. The memory has [`BufferUsage::COPY_SRC`],
 /// [`BufferUsage::INDEX`] and [`BufferUsage::STORAGE`], so the elements can
-/// be copied from, drawn as indices or read by shaders.
+/// be copied from, drawn as indices or read by shaders through
+/// [`index`](Self::index).
 ///
 /// It borrows its frame: the memory is reused once the frame's slot comes
 /// round again, after the frame's work completed.
 pub struct FrameSlice<'f, T> {
     buffer: &'f Buffer,
+    /// The buffer's slot in the heap.
+    slot: u32,
     /// Index of the first element in the buffer, read as an array of `T`.
     first: u32,
     len: u32,
@@ -82,8 +85,9 @@ pub struct FrameSlice<'f, T> {
 
 impl Rhi {
     /// Begins the next frame. Waits for the work of the frame
-    /// [`FRAMES_IN_FLIGHT`] frames earlier, frees the objects dropped by its
-    /// end and recycles its command pools.
+    /// [`FRAMES_IN_FLIGHT`] frames earlier, frees the objects last used by its
+    /// end, dropped or read through their heap indices, and recycles its
+    /// command pools.
     ///
     /// # Errors
     ///
@@ -117,7 +121,8 @@ impl Rhi {
     }
 
     /// Waits until all submitted work completes, then frees every dropped
-    /// object.
+    /// object but those the next frame may still read, through indices used
+    /// in the last frame or kept past a drop since it began.
     ///
     /// # Errors
     ///
@@ -245,12 +250,15 @@ impl Frame<'_> {
     /// after it up to the next multiple of 16 are reserved for it too, so
     /// copies may round its size up to whole words.
     ///
+    /// The resources the elements index are kept until this frame's work
+    /// completes, as with push data; see [`HeapIndices`](trait@HeapIndices).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Invalid`] if the data ends past element `u32::MAX`
     /// of its buffer, or a buffer of its own exceeds the device's limits; or
     /// a native error if memory cannot be allocated or flushed.
-    pub fn alloc<T: NoUninit>(&self, data: &[T]) -> Result<FrameSlice<'_, T>> {
+    pub fn alloc<T: NoUninit + HeapIndices>(&self, data: &[T]) -> Result<FrameSlice<'_, T>> {
         let bytes: &[u8] = bytemuck::cast_slice(data);
         let reserved = (bytes.len() as u64).next_multiple_of(ALIGNMENT);
         let offset = self
@@ -263,6 +271,13 @@ impl Frame<'_> {
                 (memory, offset)
             }
             _ => (self.oversized(reserved)?, 0),
+        };
+        let Some(slot) = buffer.raw.slot() else {
+            return Err(Error::invalid(
+                "frame allocation",
+                buffer.label(),
+                "its memory has no heap slot",
+            ));
         };
         let first = offset / FrameSlice::<T>::ELEMENT_SIZE;
         let end = first + data.len() as u64;
@@ -279,8 +294,10 @@ impl Frame<'_> {
             // since beginning the frame waited for the slot's previous work.
             unsafe { buffer.raw.write(offset, bytes)? };
         }
+        self.reads(data);
         Ok(FrameSlice {
             buffer,
+            slot,
             first,
             len: end - first,
             element: PhantomData,
@@ -296,6 +313,12 @@ impl Frame<'_> {
         // SAFETY: the `Arc` keeps the buffer where it is until the frame,
         // which the returned reference borrows, drops it.
         Ok(unsafe { &*lent })
+    }
+
+    /// Records that this frame's work reads the slots of the indices
+    /// `value` holds, so their resources are kept until it completes.
+    pub(crate) fn reads(&self, value: &(impl HeapIndices + ?Sized)) {
+        self.rhi.device.reads().record(value, self.number);
     }
 
     /// Closes the frame. Dropping it does the same.
@@ -362,6 +385,13 @@ impl<'f, T> FrameSlice<'f, T> {
     #[must_use]
     pub fn size(&self) -> u64 {
         u64::from(self.len) * Self::ELEMENT_SIZE
+    }
+
+    /// Where shaders read the elements: the slice of the heap's storage
+    /// buffer holding them.
+    #[must_use]
+    pub fn index(&self) -> BufferSlice<T> {
+        BufferSlice::new(BufferIndex::new(self.slot), self.first, self.len)
     }
 }
 

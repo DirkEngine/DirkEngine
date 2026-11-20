@@ -230,9 +230,9 @@ impl ColorTarget {
 
 /// Describes a graphics pipeline whose shaders read push data `P`.
 ///
-/// Pipelines have no vertex input layouts: shaders derive their vertices
-/// from their index and push data. Viewport and scissor are set per render
-/// pass.
+/// Pipelines have no vertex input layouts: shaders read vertices from
+/// storage buffers through the bindless heap. Viewport and scissor are set
+/// per render pass.
 #[derive(Clone, Copy)]
 pub struct GraphicsPipelineDesc<'a, P: PushData> {
     /// Debug label, shown by debugging tools and in errors.
