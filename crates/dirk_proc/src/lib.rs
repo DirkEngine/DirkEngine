@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, parse_macro_input};
+use syn::{Data, DeriveInput, parse_macro_input, parse_quote};
 
 mod event;
 
@@ -150,6 +150,94 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     quote! {
         impl #impl_generics ::dirk_universe::components::Component for #name #ty_generics #where_clause {
             type Mutability = #mutability;
+        }
+    }
+    .into()
+}
+
+/// Derive `dirk_shaders`' `HeapIndices` trait for a struct, listing the heap
+/// indices of every field, each of whose types must implement it too. Push
+/// data and the elements of frame allocations derive it, so the RHI keeps
+/// the resources they index until the work reading them completes. Generic
+/// structs list the fields of their type parameters, which must implement
+/// it:
+///
+/// ```rust
+/// # extern crate self as dirk_shaders;
+/// # pub mod bindless {
+/// #     pub enum HeapIndex { Sampler(u32) }
+/// #     pub unsafe trait HeapIndices {
+/// #         fn heap_indices<V: FnMut(HeapIndex)>(&self, visit: &mut V);
+/// #     }
+/// #     unsafe impl HeapIndices for u32 {
+/// #         fn heap_indices<V: FnMut(HeapIndex)>(&self, _: &mut V) {}
+/// #     }
+/// #     #[derive(Clone, Copy)]
+/// #     pub struct SamplerIndex(pub u32);
+/// #     unsafe impl HeapIndices for SamplerIndex {
+/// #         fn heap_indices<V: FnMut(HeapIndex)>(&self, visit: &mut V) {
+/// #             visit(HeapIndex::Sampler(self.0));
+/// #         }
+/// #     }
+/// # }
+/// # use bindless::{HeapIndex, HeapIndices, SamplerIndex};
+/// # use dirk_proc::HeapIndices;
+/// #[derive(HeapIndices)]
+/// struct Push<T> { sampler: SamplerIndex, value: T }
+///
+/// # fn main() {
+/// let push = Push { sampler: SamplerIndex(3), value: 7_u32 };
+/// let mut samplers = Vec::new();
+/// push.heap_indices(&mut |HeapIndex::Sampler(slot)| samplers.push(slot));
+/// assert_eq!(samplers, [3]);
+/// # }
+/// ```
+///
+/// Enums and unions hold indices the derive cannot list, so it rejects them:
+///
+/// ```compile_fail
+/// # use dirk_proc::HeapIndices;
+/// #[derive(HeapIndices)]
+/// enum Push { Texture(u32) }
+/// ```
+#[proc_macro_derive(HeapIndices)]
+pub fn derive_heap_indices(input: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(input as DeriveInput);
+    let Data::Struct(data) = &input.data else {
+        return syn::Error::new(
+            input.ident.span(),
+            "`HeapIndices` can only be derived for structs",
+        )
+        .to_compile_error()
+        .into();
+    };
+    let trait_path = quote!(::dirk_shaders::bindless::HeapIndices);
+    let fields: Vec<_> = data.fields.members().collect();
+    if !input.generics.params.is_empty() {
+        let types: Vec<_> = data.fields.iter().map(|field| field.ty.clone()).collect();
+        let where_clause = input.generics.make_where_clause();
+        for ty in types {
+            where_clause.predicates.push(parse_quote!(#ty: #trait_path));
+        }
+    }
+    // Structs without fields visit nothing.
+    let visit = if fields.is_empty() {
+        quote!(_visit)
+    } else {
+        quote!(visit)
+    };
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        // SAFETY: lists the indices of every field, each of which lists its
+        // own.
+        unsafe impl #impl_generics #trait_path for #name #ty_generics #where_clause {
+            fn heap_indices<V: FnMut(::dirk_shaders::bindless::HeapIndex)>(
+                &self,
+                #visit: &mut V,
+            ) {
+                #(#trait_path::heap_indices(&self.#fields, #visit);)*
+            }
         }
     }
     .into()

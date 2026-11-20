@@ -3,24 +3,25 @@ use std::sync::Arc;
 use ash::vk;
 use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 
-use super::{Check, Device, device::Garbage};
+use super::{
+    Check, Device,
+    device::Garbage,
+    heap::{Descriptor, Slot},
+};
 use crate::{ImageDesc, ImageDimension, ImageUsage, SampleCount, ViewType};
 
 /// Identifies an image while it exists.
 pub(crate) type ImageId = vk::Image;
 
-/// A Vulkan image, its memory and its view.
+/// A Vulkan image, its memory and its view of every mip and layer.
 pub(crate) struct Image {
     pub(super) device: Arc<Device>,
     pub(super) raw: vk::Image,
     allocation: Allocation,
-    view: Option<ImageView>,
-}
-
-/// A view of every mip and layer of an image, owned by the image.
-#[derive(Clone, Copy)]
-pub(crate) struct ImageView {
-    pub(super) raw: vk::ImageView,
+    view: Option<vk::ImageView>,
+    /// The view's slots in the heap: sampled with sampled usage, and storage
+    /// with storage usage when its view type has a storage array.
+    slots: [Option<Slot>; 2],
 }
 
 impl Image {
@@ -64,6 +65,7 @@ impl Image {
             raw,
             allocation: Allocation::default(),
             view: None,
+            slots: [None; 2],
         };
         // SAFETY: `raw` was created from this device.
         let requirements = unsafe { device.raw.get_image_memory_requirements(raw) };
@@ -95,7 +97,14 @@ impl Image {
             let view =
                 unsafe { device.raw.create_image_view(&info, None) }.check("vkCreateImageView")?;
             device.name(view, desc.label);
-            image.view = Some(ImageView { raw: view });
+            image.view = Some(view);
+            let (sampled, storage) = view_type.heap_bindings();
+            if desc.usage.contains(ImageUsage::SAMPLED) {
+                image.slots[0] = Some(device.add_to_heap(sampled, Descriptor::Image(view))?);
+            }
+            if let Some(storage) = storage.filter(|_| desc.usage.contains(ImageUsage::STORAGE)) {
+                image.slots[1] = Some(device.add_to_heap(storage, Descriptor::Image(view))?);
+            }
         }
         Ok(image)
     }
@@ -108,12 +117,12 @@ impl Image {
     /// The view rendered to when the image is an attachment, which its
     /// attachment usage gave it.
     pub(super) fn attachment_view(&self) -> vk::ImageView {
-        self.view.map_or_else(vk::ImageView::null, |view| view.raw)
+        self.view.unwrap_or_default()
     }
 
-    /// The image's view, if it has one.
-    pub(crate) fn view(&self) -> Option<ImageView> {
-        self.view
+    /// The heap slots of the image's view: sampled and storage.
+    pub(crate) fn slots(&self) -> [Option<u32>; 2] {
+        self.slots.map(|slot| slot.map(|slot| slot.index))
     }
 }
 
@@ -122,8 +131,9 @@ impl Drop for Image {
         self.device.forget_initialization(self.raw);
         self.device.bury(Garbage::Image {
             raw: self.raw,
-            view: self.view.map(|view| view.raw),
+            view: self.view,
             allocation: std::mem::take(&mut self.allocation),
+            slots: self.slots,
         });
     }
 }
