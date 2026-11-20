@@ -1,0 +1,20 @@
+[package]
+name = "dirk_rhi_test_shaders_gpu"
+description = "rust-gpu shaders for dirk_rhi's native tests"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+bytemuck.workspace = true
+spirv-std.workspace = true
+
+# spirv-std needs glam's integer vectors, which the workspace enables.
+[target.'cfg(target_arch = "spirv")'.dependencies]
+glam.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }

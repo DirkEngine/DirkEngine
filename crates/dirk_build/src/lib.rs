@@ -2,6 +2,8 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
+pub mod shaders;
+
 /// Returns the directory of the current cargo workspace
 ///
 /// # Panics

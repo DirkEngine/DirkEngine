@@ -1,0 +1,563 @@
+use std::ops::Range;
+
+use crate::{
+    Buffer, BufferUsage, CommandEncoder, Error, Graphics, GraphicsPipeline, Image, ImageAccess,
+    ImageDimension, ImageUsage, MAX_COLOR_TARGETS, PushData, Result, SampleCount, command::Wrap,
+    native, pipeline::Targets,
+};
+
+impl crate::Limits {
+    /// Most color targets a pipeline or render pass may have: the device's
+    /// limit, at most [`MAX_COLOR_TARGETS`].
+    pub(crate) fn color_targets(&self) -> usize {
+        (self.max_color_targets as usize).min(MAX_COLOR_TARGETS)
+    }
+}
+
+/// What a render pass does with an attachment's contents when it begins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LoadOp<T> {
+    /// Keep the contents.
+    Load,
+    /// Clear to a value.
+    Clear(T),
+    /// Discard the contents, which become undefined.
+    Discard,
+}
+
+/// What a render pass does with an attachment's contents when it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StoreOp {
+    /// Keep what the pass rendered.
+    Store,
+    /// Discard it, such as a multisampled target once resolved.
+    Discard,
+}
+
+/// A color attachment of a render pass: a single-mip, single-layer 2D image
+/// with [`ImageUsage::COLOR_ATTACHMENT`], rendered to through the
+/// [`ImageAccess::ColorAttachment`] access.
+#[derive(Clone, Copy)]
+pub struct ColorAttachment<'a> {
+    /// The image rendered to.
+    pub image: &'a Image,
+    /// What happens to its contents when the pass begins; clear colors are
+    /// linear RGBA.
+    pub load: LoadOp<[f32; 4]>,
+    /// What happens to them when it ends.
+    pub store: StoreOp,
+    /// A single-sample image of the same format and extent that the
+    /// multisampled `image` is averaged into when the pass ends, through the
+    /// color attachment access too.
+    pub resolve: Option<&'a Image>,
+}
+
+/// The depth attachment of a render pass: a single-mip, single-layer 2D
+/// depth image with [`ImageUsage::DEPTH_STENCIL_ATTACHMENT`], rendered to
+/// through the [`ImageAccess::DepthStencilAttachment`] access. Stencil, if
+/// the format has it, is loaded and stored like depth and cleared to zero.
+#[derive(Clone, Copy)]
+pub struct DepthAttachment<'a> {
+    /// The image rendered to.
+    pub image: &'a Image,
+    /// What happens to its depth when the pass begins; clear values are in
+    /// `0.0..=1.0`.
+    pub load: LoadOp<f32>,
+    /// What happens to it when it ends.
+    pub store: StoreOp,
+}
+
+/// Describes a render pass.
+#[derive(Clone, Copy)]
+pub struct RenderPassDesc<'a> {
+    /// Debug label, shown by debugging tools and in errors.
+    pub label: &'a str,
+    /// Color attachments, in the order pipelines declare their targets.
+    pub colors: &'a [ColorAttachment<'a>],
+    /// The depth attachment, if any.
+    pub depth: Option<DepthAttachment<'a>>,
+}
+
+impl<'a> RenderPassDesc<'a> {
+    /// Every image the pass renders to, color attachments and their resolve
+    /// targets, then depth, with the access it renders through.
+    fn attachments(&self) -> impl Iterator<Item = (&'a Image, ImageAccess)> + Clone + 'a {
+        let colors = self
+            .colors
+            .iter()
+            .flat_map(|color| [Some(color.image), color.resolve])
+            .flatten()
+            .map(|image| (image, ImageAccess::ColorAttachment));
+        let depth = self
+            .depth
+            .map(|depth| (depth.image, ImageAccess::DepthStencilAttachment));
+        colors.chain(depth)
+    }
+}
+
+/// The region of the render area primitives are mapped to, and its depth
+/// range.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// Left edge, in pixels.
+    pub x: f32,
+    /// Top edge, in pixels.
+    pub y: f32,
+    /// Width, in pixels.
+    pub width: f32,
+    /// Height, in pixels.
+    pub height: f32,
+    /// Depth that clip-space depth 0 maps to, in `0.0..=1.0`.
+    pub min_depth: f32,
+    /// Depth that clip-space depth 1 maps to, in `0.0..=1.0`.
+    pub max_depth: f32,
+}
+
+/// A rectangle of pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Rect {
+    /// Left edge.
+    pub x: u32,
+    /// Top edge.
+    pub y: u32,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+}
+
+/// Type of the indices in an index buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IndexFormat {
+    /// 16-bit indices.
+    U16,
+    /// 32-bit indices.
+    U32,
+}
+
+impl IndexFormat {
+    /// Size of one index in bytes.
+    #[must_use]
+    pub const fn size(self) -> u64 {
+        match self {
+            Self::U16 => 2,
+            Self::U32 => 4,
+        }
+    }
+}
+
+/// Indices read by an indexed draw.
+#[derive(Clone)]
+pub struct Indices<'a> {
+    /// A buffer with [`BufferUsage::INDEX`], in the
+    /// [`BufferAccess::Index`](crate::BufferAccess::Index) state.
+    pub buffer: &'a Buffer,
+    /// Type of its indices.
+    pub format: IndexFormat,
+    /// Offset of index zero, in bytes; a multiple of the index size.
+    pub offset: u64,
+    /// The indices drawn.
+    pub range: Range<u32>,
+    /// Added to each index before reading the vertex.
+    pub base_vertex: i32,
+}
+
+/// Records draws into attachments. Ends when dropped, and borrows its
+/// encoder until then (or, if leaked, until the encoder records another
+/// command or is submitted):
+/// ```compile_fail
+/// use dirk_rhi::{Buffer, BufferCopy, CommandEncoder, RenderPassDesc, Result};
+/// fn copy_in_pass(
+///     encoder: &mut CommandEncoder<'_>,
+///     desc: &RenderPassDesc<'_>,
+///     buffer: &Buffer,
+///     copy: BufferCopy,
+/// ) -> Result<()> {
+///     let pass = encoder.render_pass(desc)?;
+///     encoder.copy_buffer(buffer, buffer, &[copy])?;
+///     pass.end();
+///     Ok(())
+/// }
+/// ```
+///
+/// Only graphics encoders begin render passes:
+/// ```compile_fail
+/// use dirk_rhi::{CopyQueue, Frame, RenderPassDesc, Result};
+/// fn copy_pass(frame: &Frame<'_>, desc: &RenderPassDesc<'_>) -> Result<()> {
+///     let mut encoder = frame.encoder::<CopyQueue>("copies")?;
+///     encoder.render_pass(desc)?.end();
+///     Ok(())
+/// }
+/// ```
+///
+/// Draws only accept the pipeline's push data type:
+/// ```compile_fail
+/// use dirk_rhi::{GraphicsPipeline, RenderPass, Result};
+/// fn draw(pass: &mut RenderPass<'_, '_>, pipeline: &GraphicsPipeline<[f32; 4]>) -> Result<()> {
+///     pass.draw(pipeline, &[0_u32; 4], 0..3, 0..1)
+/// }
+/// ```
+pub struct RenderPass<'e, 'f> {
+    encoder: &'e mut CommandEncoder<'f, Graphics>,
+    targets: Targets,
+    /// Size of the render area, which every attachment covers.
+    extent: (u32, u32),
+    /// The pipeline bound last, to skip rebinding it.
+    pipeline: Option<native::PipelineId>,
+    /// The index buffer and its offset and format bound last.
+    indices: Option<(native::BufferId, u64, IndexFormat)>,
+}
+
+impl<'f> CommandEncoder<'f, Graphics> {
+    /// Begins a render pass. Viewport and scissor cover the whole render
+    /// area, the extent shared by every attachment, until changed. The pass
+    /// moves its attachments from their resting access into their attachment
+    /// access, and back when it ends, like any safe command; see
+    /// [`CommandEncoder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the pass has no attachment or too many,
+    /// or an attachment is from another device, lacks the attachment usage,
+    /// is not a single-mip, single-layer 2D image of a fitting format or is
+    /// attached twice, as attachments or resolve targets, a clear depth is
+    /// outside `0.0..=1.0`, or the attachments differ in extent or sample
+    /// count, a resolve target does not match its
+    /// attachment, or an attachment is not where the pass can reach it.
+    pub fn render_pass<'e>(&'e mut self, desc: &RenderPassDesc<'_>) -> Result<RenderPass<'e, 'f>> {
+        let (targets, extent) = self.check_pass(desc)?;
+        let mut wrap = Wrap::default();
+        for (image, access) in desc.attachments() {
+            self.enter(&mut wrap, image, [image.info().mip_region(0)], access)?;
+        }
+        self.end_pass();
+        self.transition(&wrap.before);
+        self.raw.begin_rendering(self.device(), desc, extent);
+        self.rendering = true;
+        self.after_pass = wrap.after;
+        Ok(RenderPass {
+            encoder: self,
+            targets,
+            extent,
+            pipeline: None,
+            indices: None,
+        })
+    }
+
+    /// Validates a render pass and returns its targets and extent.
+    fn check_pass(&self, desc: &RenderPassDesc<'_>) -> Result<(Targets, (u32, u32))> {
+        let invalid = |reason: String| Err(Error::invalid("render pass", desc.label, reason));
+        let limit = self.frame.rhi().capabilities().limits.color_targets();
+        if desc.colors.len() > limit {
+            return invalid(format!(
+                "{} color attachments exceed the limit of {limit}",
+                desc.colors.len()
+            ));
+        }
+        // One layout per image: attaching it twice would need two.
+        for (index, (image, _)) in desc.attachments().enumerate() {
+            if desc
+                .attachments()
+                .skip(index + 1)
+                .any(|(other, _)| other.raw.id() == image.raw.id())
+            {
+                return invalid(format!("`{}` is attached twice", image.label()));
+            }
+        }
+        let mut images = desc
+            .colors
+            .iter()
+            .map(|color| color.image)
+            .chain(desc.depth.map(|depth| depth.image));
+        let Some(first) = images.next() else {
+            return invalid("a render pass needs an attachment".to_owned());
+        };
+        let extent = (first.info().extent.width, first.info().extent.height);
+        let samples = first.info().samples;
+        if let Some(image) = images.find(|image| {
+            let info = image.info();
+            (info.extent.width, info.extent.height) != extent || info.samples != samples
+        }) {
+            return invalid(format!(
+                "`{}` is {:?} with {:?} samples, unlike `{}`",
+                image.label(),
+                image.info().extent,
+                image.info().samples,
+                first.label()
+            ));
+        }
+        let mut targets = Targets {
+            samples,
+            ..Targets::default()
+        };
+        for (slot, color) in targets.colors.iter_mut().zip(desc.colors) {
+            self.check_attachment(desc, color.image, ImageUsage::COLOR_ATTACHMENT)?;
+            if let Some(resolve) = color.resolve {
+                self.check_attachment(desc, resolve, ImageUsage::COLOR_ATTACHMENT)?;
+                let (info, target) = (color.image.info(), resolve.info());
+                if info.samples == SampleCount::X1
+                    || target.samples != SampleCount::X1
+                    || info.format != target.format
+                    || info.extent != target.extent
+                {
+                    return invalid(format!(
+                        "`{}` cannot be resolved into `{}`: resolves average a multisampled \
+                         image into a single-sample one of the same format and extent",
+                        color.image.label(),
+                        resolve.label()
+                    ));
+                }
+            }
+            *slot = Some(color.image.info().format);
+        }
+        if let Some(depth) = desc.depth {
+            self.check_attachment(desc, depth.image, ImageUsage::DEPTH_STENCIL_ATTACHMENT)?;
+            if let LoadOp::Clear(value) = depth.load
+                && !(0.0..=1.0).contains(&value)
+            {
+                return invalid(format!("clear depth {value} is outside 0.0..=1.0"));
+            }
+            targets.depth = Some(depth.image.info().format);
+        }
+        Ok((targets, extent))
+    }
+
+    /// Checks that `image` can be an attachment with `usage`.
+    fn check_attachment(
+        &self,
+        desc: &RenderPassDesc<'_>,
+        image: &Image,
+        usage: ImageUsage,
+    ) -> Result<()> {
+        self.check_image(image, usage)?;
+        let info = image.info();
+        let depth = usage == ImageUsage::DEPTH_STENCIL_ATTACHMENT;
+        if info.dimension != ImageDimension::D2
+            || info.mip_levels != 1
+            || info.array_layers != 1
+            || info.format.is_depth_stencil() != depth
+        {
+            return Err(Error::invalid(
+                "render pass",
+                desc.label,
+                format!(
+                    "`{}` is not a single-mip, single-layer 2D {} image",
+                    image.label(),
+                    if depth { "depth" } else { "color" }
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RenderPass<'_, '_> {
+    /// Draws `instances` of the vertices in `vertices` with `pipeline`,
+    /// whose shaders read `push`. Records nothing if a range is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the pipeline belongs to another device
+    /// or its targets differ from the pass's, or a range is reversed.
+    pub fn draw<P: PushData>(
+        &mut self,
+        pipeline: &GraphicsPipeline<P>,
+        push: &P,
+        vertices: Range<u32>,
+        instances: Range<u32>,
+    ) -> Result<()> {
+        if self.check(pipeline, &vertices, &instances)? {
+            self.prepare(pipeline, push);
+            self.encoder
+                .raw
+                .draw(self.encoder.device(), vertices, instances);
+        }
+        Ok(())
+    }
+
+    /// Draws `instances` of the vertices `indices` refer to with
+    /// `pipeline`, whose shaders read `push`. Records nothing if a range is
+    /// empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the pipeline belongs to another device
+    /// or its targets differ from the pass's, a range is reversed, or the
+    /// index buffer is from another device, lacks the index usage, or is
+    /// too small for the range or misaligned.
+    pub fn draw_indexed<P: PushData>(
+        &mut self,
+        pipeline: &GraphicsPipeline<P>,
+        push: &P,
+        indices: Indices<'_>,
+        instances: Range<u32>,
+    ) -> Result<()> {
+        let draws = self.check(pipeline, &indices.range, &instances)?;
+        let Indices {
+            buffer,
+            format,
+            offset,
+            ..
+        } = indices;
+        self.encoder.check_buffer(buffer, BufferUsage::INDEX)?;
+        let end = u64::from(indices.range.end)
+            .checked_mul(format.size())
+            .and_then(|size| size.checked_add(offset));
+        if !offset.is_multiple_of(format.size()) || end.is_none_or(|end| end > buffer.info().size) {
+            return Err(Error::invalid(
+                "indexed draw",
+                buffer.label(),
+                format!(
+                    "{:?} indices {:?} at offset {offset} are misaligned or exceed its {} bytes",
+                    format,
+                    indices.range,
+                    buffer.info().size
+                ),
+            ));
+        }
+        if !draws {
+            return Ok(());
+        }
+        self.prepare(pipeline, push);
+        let bound = Some((buffer.raw.id(), offset, format));
+        if self.indices != bound {
+            self.encoder
+                .raw
+                .bind_index_buffer(self.encoder.device(), &buffer.raw, offset, format);
+            self.indices = bound;
+        }
+        self.encoder.raw.draw_indexed(
+            self.encoder.device(),
+            indices.range,
+            indices.base_vertex,
+            instances,
+        );
+        Ok(())
+    }
+
+    /// Maps primitives to `viewport` for the following draws.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the viewport is empty or not finite,
+    /// its depth range is outside `0.0..=1.0`, or it exceeds the device's
+    /// [viewport limits](crate::Limits::max_viewport_dimensions).
+    pub fn set_viewport(&mut self, viewport: Viewport) -> Result<()> {
+        let Viewport {
+            x,
+            y,
+            width,
+            height,
+            min_depth,
+            max_depth,
+        } = viewport;
+        let depths = 0.0..=1.0;
+        if !(x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite())
+            || width <= 0.0
+            || height <= 0.0
+            || !depths.contains(&min_depth)
+            || !depths.contains(&max_depth)
+        {
+            return Err(Error::invalid(
+                "viewport",
+                &format!("{viewport:?}"),
+                "must be finite and not empty, with depths in 0.0..=1.0",
+            ));
+        }
+        let limits = &self.encoder.frame.rhi().capabilities().limits;
+        let [max_width, max_height] = limits.max_viewport_dimensions.map(f64::from);
+        let [low, high] = limits.viewport_bounds.map(f64::from);
+        let [x, y, width, height] = [x, y, width, height].map(f64::from);
+        if width > max_width
+            || height > max_height
+            || x < low
+            || y < low
+            || x + width > high
+            || y + height > high
+        {
+            return Err(Error::invalid(
+                "viewport",
+                &format!("{viewport:?}"),
+                format!(
+                    "exceeds the device's viewport limits: {max_width}x{max_height} pixels, \
+                     edges in {low}..={high}"
+                ),
+            ));
+        }
+        self.encoder
+            .raw
+            .set_viewport(self.encoder.device(), viewport);
+        Ok(())
+    }
+
+    /// Discards fragments outside `scissor` in the following draws.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if the scissor extends past the render
+    /// area.
+    pub fn set_scissor(&mut self, scissor: Rect) -> Result<()> {
+        let fits = |start: u32, length: u32, size: u32| {
+            start.checked_add(length).is_some_and(|end| end <= size)
+        };
+        if !fits(scissor.x, scissor.width, self.extent.0)
+            || !fits(scissor.y, scissor.height, self.extent.1)
+        {
+            return Err(Error::invalid(
+                "scissor",
+                &format!("{scissor:?}"),
+                format!("extends past the {:?} render area", self.extent),
+            ));
+        }
+        self.encoder.raw.set_scissor(self.encoder.device(), scissor);
+        Ok(())
+    }
+
+    /// Ends the pass. Dropping it does the same.
+    pub fn end(self) {}
+
+    /// Checks that `pipeline` renders to this pass and the ranges of a
+    /// direct draw are not reversed, and returns whether it draws anything.
+    fn check<P: PushData>(
+        &self,
+        pipeline: &GraphicsPipeline<P>,
+        elements: &Range<u32>,
+        instances: &Range<u32>,
+    ) -> Result<bool> {
+        if pipeline.targets != self.targets || !pipeline.raw.is_from(self.encoder.device()) {
+            return Err(Error::invalid(
+                "draw",
+                pipeline.label(),
+                format!(
+                    "the pipeline renders to {:?} on its device, not this pass's {:?}",
+                    pipeline.targets, self.targets
+                ),
+            ));
+        }
+        if elements.start > elements.end || instances.start > instances.end {
+            return Err(Error::invalid(
+                "draw",
+                pipeline.label(),
+                format!("range {elements:?} or {instances:?} is reversed"),
+            ));
+        }
+        Ok(!elements.is_empty() && !instances.is_empty())
+    }
+
+    /// Binds `pipeline` unless bound, and pushes `push`.
+    fn prepare<P: PushData>(&mut self, pipeline: &GraphicsPipeline<P>, push: &P) {
+        let device = self.encoder.device();
+        let id = pipeline.raw.id();
+        if self.pipeline != Some(id) {
+            self.encoder.raw.bind_pipeline(device, &pipeline.raw);
+            self.pipeline = Some(id);
+        }
+        self.encoder.raw.push(device, bytemuck::bytes_of(push));
+    }
+}
+
+impl Drop for RenderPass<'_, '_> {
+    fn drop(&mut self) {
+        self.encoder.end_pass();
+    }
+}
