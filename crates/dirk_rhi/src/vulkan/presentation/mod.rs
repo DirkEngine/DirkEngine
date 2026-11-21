@@ -7,6 +7,7 @@ use ash::vk;
 use super::{Check, Device, Image, device::Garbage};
 use crate::{
     Error, FRAMES_IN_FLIGHT, Format, PresentMode, QueueType, Result, SurfaceTarget, SwapchainDesc,
+    presentation::Acquired,
 };
 
 /// Stages that may first access an acquired image: attachment writes and
@@ -320,9 +321,8 @@ impl Swapchain {
     }
 
     /// Acquires an image with frame slot `slot`'s semaphore, blocking until
-    /// one is available. Returns its index and whether the swapchain should
-    /// be recreated, or `None` if it is out of date.
-    pub(crate) fn acquire(&mut self, slot: usize) -> Result<Option<(u32, bool)>> {
+    /// one is available, or returns `None` if the swapchain is out of date.
+    pub(crate) fn acquire(&mut self, slot: usize) -> Result<Option<Acquired>> {
         let Some(generation) = &self.generation else {
             return Ok(None);
         };
@@ -337,7 +337,11 @@ impl Swapchain {
             )
         };
         match acquired {
-            Ok(acquired) => Ok(Some(acquired)),
+            Ok((index, suboptimal)) => Ok(Some(Acquired {
+                index,
+                suboptimal,
+                image: None,
+            })),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(None),
             Err(error) => Err(error).check("vkAcquireNextImageKHR"),
         }

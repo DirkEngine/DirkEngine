@@ -23,9 +23,11 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   renderables, model uploads).
 - `dirk_player`: players, their input and movement.
 - `dirk_rhi`: the render hardware interface: the device and what is
-  recorded on it, over one native graphics backend per target (Vulkan). Its
-  native tests' shaders are `crates/dirk_rhi/test-shaders` and its rust-gpu
-  crate `dirk_rhi_test_shaders_gpu`, built like the engine's.
+  recorded on it, over one native graphics backend per target: Metal on
+  Apple targets, the only crate that uses `objc2-metal`, and Vulkan
+  elsewhere. Its native tests' shaders are `crates/dirk_rhi/test-shaders`
+  and its rust-gpu crate `dirk_rhi_test_shaders_gpu`, built like the
+  engine's.
 - `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
   that use `ash`; `docs/dev/rust-conventions.md` says which use `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The

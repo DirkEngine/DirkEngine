@@ -275,6 +275,46 @@ fn the_depth_test_keeps_the_nearest_fill() -> Result<()> {
 }
 
 #[test]
+fn culling_follows_the_winding_on_screen() -> Result<()> {
+    with_rhi(|rhi| {
+        let vertex = rhi.create_shader::<FillVs>()?;
+        let fragment = rhi.create_shader::<FillFs>()?;
+        let targets = [ColorTarget::new(Format::Rgba8Unorm)];
+        let culling_back = |front_face| {
+            rhi.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: "culling",
+                vertex: &vertex,
+                fragment: Some(&fragment),
+                topology: Topology::TriangleList,
+                cull_mode: CullMode::Back,
+                front_face,
+                color_targets: &targets,
+                depth: None,
+                samples: SampleCount::X1,
+            })
+        };
+        let clockwise = culling_back(FrontFace::Clockwise)?;
+        let counter_clockwise = culling_back(FrontFace::CounterClockwise)?;
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "culling",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            // The fill triangle runs from the top left to the top right and
+            // the bottom left: clockwise on screen, so front-facing only for
+            // the first pipeline.
+            let fill = |color| Fill { color, depth: 0.5 };
+            pass.draw(&clockwise, &fill(GREEN), 0..3, 0..1)?;
+            pass.draw(&counter_clockwise, &fill(RED), 0..3, 0..1)?;
+            Ok(())
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(GREEN)));
+        Ok(())
+    })
+}
+
+#[test]
 fn multisampled_targets_resolve_when_the_pass_ends() -> Result<()> {
     with_rhi(|rhi| {
         let samples = SampleCount::X4;
@@ -627,6 +667,61 @@ fn desc_of(image: &Image) -> ImageDesc<'static> {
         samples: info.samples,
         rest: None,
     }
+}
+
+#[test]
+fn shaders_read_storage_buffers_of_different_types_through_the_heap() -> Result<()> {
+    use dirk_rhi_test_shaders::{ColorFs, Instanced, InstancedVs};
+
+    with_rhi(|rhi| {
+        let storage = |label, data: &[u8]| {
+            let mut buffer = rhi.create_buffer(&BufferDesc {
+                label,
+                size: data.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: Memory::Upload,
+            })?;
+            // SAFETY: the buffer was never submitted.
+            unsafe { buffer.write(0, data)? };
+            Ok::<_, Error>(buffer)
+        };
+        // One triangle covering the target, and colors of 4 bytes, not the
+        // 16 of a vertex, so each array is read with its own stride.
+        let triangle = [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)].map(|(x, y)| Vertex {
+            position: [x, y],
+            uv: [0.0; 2],
+        });
+        let colors = [RED, GREEN, BLUE].map(|color| u32::from_le_bytes(unorm(color)));
+        let vertices = storage("triangle", bytemuck::cast_slice(&triangle))?;
+        let colors = storage("colors", bytemuck::cast_slice(&colors))?;
+        let push = Instanced {
+            vertices: vertices.index().expect("storage buffers have an index"),
+            colors: colors.index().expect("storage buffers have an index"),
+        };
+        // The fragment shader reads no push data.
+        let shaders = (
+            rhi.create_shader::<InstancedVs>()?,
+            rhi.create_shader::<ColorFs>()?.with_push(),
+        );
+        let pipeline = pipeline(
+            rhi,
+            shaders,
+            &[ColorTarget::new(Format::Rgba8Unorm)],
+            None,
+            SampleCount::X1,
+        )?;
+
+        let pixels = render(rhi, |encoder, target| {
+            let mut pass = encoder.render_pass(&RenderPassDesc {
+                label: "instanced triangle",
+                colors: &[cleared(target)],
+                depth: None,
+            })?;
+            pass.draw(&pipeline, &push, 0..3, 2..3)
+        })?;
+        assert!(pixels.iter().all(|pixel| *pixel == unorm(BLUE)));
+        Ok(())
+    })
 }
 
 /// A 2x2 texture, red and green above blue and white, uploaded and drawn

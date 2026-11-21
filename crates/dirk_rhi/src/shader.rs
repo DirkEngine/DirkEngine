@@ -47,9 +47,11 @@ impl ShaderStage {
 ///
 /// # Safety
 ///
-/// [`CODE`](Self::CODE) is a valid SPIR-V module for Vulkan 1.3 declaring
-/// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE). The entry
-/// point only binds the bindless heap, reads its push data block as
+/// [`CODE`](Self::CODE) is a valid module for the target's backend holding
+/// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE): SPIR-V for
+/// Vulkan 1.3, or, on Apple targets, Metal Shading Language source holding
+/// only that entry point, translated by the shader build. The entry point
+/// only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
 /// bytes (zero if it reads none), writes storage buffers or images only if
 /// [`WRITES_STORAGE`](Self::WRITES_STORAGE), and uses only features the RHI
@@ -70,7 +72,8 @@ pub unsafe trait Shader {
     const PUSH_SIZE: usize;
     /// Whether the entry point may write storage buffers or images.
     const WRITES_STORAGE: bool;
-    /// The SPIR-V module, as bytes.
+    /// The module: SPIR-V, or Metal Shading Language source on Apple
+    /// targets.
     const CODE: &'static [u8];
 }
 

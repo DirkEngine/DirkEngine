@@ -112,8 +112,8 @@ pub mod heap {
         first
     }
 
-    /// How Metal shaders reach the heap, as the shader build's MSL
-    /// translation lays it out.
+    /// How Metal shaders reach the heap, which the shader build's MSL
+    /// translation and the RHI's Metal backend agree on.
     pub mod metal {
         /// Buffer index of the heap's argument buffer.
         pub const HEAP_BUFFER: u32 = 0;

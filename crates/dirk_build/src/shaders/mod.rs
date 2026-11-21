@@ -36,8 +36,8 @@ use rspirv::{
 /// differs in size from that type fails the build. Modules declaring
 /// resources other than the bindless heap's arrays as
 /// `dirk_shaders::bindless::heap` lays them out fail the shader build. For
-/// Apple targets, each module is also translated to the Metal Shading
-/// Language and written beside it; see the `msl` module.
+/// Apple targets, which `dirk_rhi` runs on Metal, each module is translated
+/// to the Metal Shading Language; see the `msl` module.
 ///
 /// # Errors
 ///
@@ -77,13 +77,16 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
         let spirv =
             fs::read(&module).with_context(|| format!("reading the SPIR-V of `{entry_point}`"))?;
         let reflected = Reflected::new(&entry_point, &spirv)?;
-        let file = entry_point.replace("::", "-");
-        if metal {
-            let msl = msl::translate(&entry_point, &spirv, reflected.stage)?;
-            fs::write(out_dir.join(format!("{file}.metal")), msl)?;
-        }
-        let path = out_dir.join(format!("{file}.spv"));
-        fs::write(&path, &spirv)?;
+        let (extension, code) = if metal {
+            (
+                "metal",
+                msl::translate(&entry_point, &spirv, reflected.stage)?.into_bytes(),
+            )
+        } else {
+            ("spv", spirv)
+        };
+        let path = out_dir.join(format!("{}.{extension}", entry_point.replace("::", "-")));
+        fs::write(&path, code)?;
         let path = path.to_str().context("OUT_DIR is not valid UTF-8")?;
         let push = source
             .push_type(&entry_point)
@@ -94,8 +97,9 @@ pub fn build_shaders(shader_crate: impl AsRef<Path>) -> anyhow::Result<()> {
              pub struct {name};\n\
              // SAFETY: rust-gpu compiled this entry point for Vulkan 1.3, the\n\
              // shader build reflected its stage, push data size and storage\n\
-             // writes, found its push data type in its source, and checked the\n\
-             // heap arrays it declares.\n\
+             // writes, found its push data type in its source, checked the\n\
+             // heap arrays it declares, and translated it for Metal on Apple\n\
+             // targets.\n\
              unsafe impl dirk_rhi::Shader for {name} {{\n    \
                  type Push = {push};\n    \
                  const ENTRY_POINT: &'static str = {entry_point:?};\n    \

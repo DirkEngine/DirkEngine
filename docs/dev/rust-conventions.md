@@ -23,9 +23,9 @@ that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
 `deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
-and `dirk_rhi`, `winit` in `dirk_platform` (and `dirk_rhi`'s presentation
-example), and `egui` in the editor and the crates that feed it. Add a new
-library of that kind to its ban list.
+and `dirk_rhi`, `objc2-metal` in `dirk_rhi`, `winit` in `dirk_platform` (and
+`dirk_rhi`'s presentation example), and `egui` in the editor and the crates
+that feed it. Add a new library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor
@@ -77,7 +77,7 @@ lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
 `just lint` denies it everywhere else:
 
 - `dirk_renderer` and `dirk_rhi`, to call the native graphics API (Vulkan
-  through ash).
+  through ash, and Metal through objc2 in `dirk_rhi`).
 - `dirk_rhi`'s native tests, for its unsafe raw barriers and host access to
   buffers.
 - `dirk_shaders`, for the shaders' unchecked heap accesses and the `unsafe`

@@ -193,6 +193,10 @@ impl CommandBuffer {
         }
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "The signature is shared with Metal, where this can fail."
+    )]
     pub(crate) fn blit_image(
         self,
         device: &Device,
@@ -201,7 +205,7 @@ impl CommandBuffer {
         format: Format,
         regions: &[ImageCopy],
         filter: Filter,
-    ) {
+    ) -> Result<()> {
         let aspects = format.vk_aspects();
         let regions: Vec<_> = regions
             .iter()
@@ -224,6 +228,7 @@ impl CommandBuffer {
                 filter.vk(),
             );
         }
+        Ok(())
     }
 
     /// Records `buffers` and `images` as one dependency, recorded on

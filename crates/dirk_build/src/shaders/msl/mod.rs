@@ -1,6 +1,6 @@
 //! Translation of SPIR-V entry points to the Metal Shading Language, for
-//! Apple targets. SPIRV-Cross translates them on macOS hosts only, so other
-//! hosts never compile it.
+//! Apple targets, which `dirk_rhi` runs on Metal. SPIRV-Cross translates them
+//! on macOS hosts only, so other hosts never compile it.
 //!
 //! - The bindless heap, descriptor set 0, becomes a tier-2 argument buffer at
 //!   [`HEAP_BUFFER`]. Metal lays argument buffers out like C structs, eight
