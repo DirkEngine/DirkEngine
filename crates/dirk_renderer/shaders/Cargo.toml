@@ -18,5 +18,5 @@ spirv-std.workspace = true
 
 dirk_shaders.workspace = true
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+[lints]
+workspace = true

@@ -1,3 +1,8 @@
+//! The engine's shaders, compiled to SPIR-V by `dirk_renderer`'s build script
+//! with rust-gpu. Each entry point becomes its own SPIR-V module, which the
+//! build script reflects into a type with its stage, descriptor set layouts
+//! and vertex inputs.
+
 #![no_std]
 #![expect(
     clippy::too_many_arguments,
@@ -12,6 +17,8 @@ use spirv_std::{
 
 use dirk_shaders::types::{ProxyUbo, SceneUbo};
 
+/// Transforms a model's vertices into clip space, passing the texture
+/// coordinate and normal on to [`main_fs`].
 #[spirv(vertex)]
 pub fn main_vs(
     #[spirv(uniform, descriptor_set = 0, binding = 0)] scene: &SceneUbo,
@@ -28,6 +35,8 @@ pub fn main_vs(
     *frag_normal = in_normal;
 }
 
+/// Samples the model's texture, shaded by its normal's z component over a
+/// 35% ambient floor.
 #[spirv(fragment)]
 pub fn main_fs(
     #[spirv(descriptor_set = 2, binding = 0)] tex_sampler: &SampledImage<Image2d>,
