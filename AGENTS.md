@@ -14,7 +14,8 @@ everything else is a crate in `crates/`:
 - `dirk_threads`: the worker pool and threading primitives, on tokio.
 - `dirk_assets`: asset handles, `.dirkasset` descriptors and the asset registry.
 - `dirk_platform`: windows and OS events, the only crate that uses `winit`.
-- `dirk_input`: input actions, axes and maps, and their egui mapping (`egui` feature).
+- `dirk_input`: input actions, axes and maps, and their egui mapping (`egui`
+  feature).
 - `dirk_world`: the components and systems that populate a world (transforms,
   renderables, model uploads).
 - `dirk_player`: players, their input and movement.
@@ -46,9 +47,10 @@ everything else is a crate in `crates/`:
 - **Scene / proxy:** the renderer's copy of ECS state. `SceneManager` mirrors
   the universe, a `Scene` one world and a `SceneProxy` one entity; the
   renderer's ECS systems keep them in sync.
-- **Frame graph / render commands:** the frame graph runs a frame's passes in
-  the order they were added and inserts the barriers between them. Render commands are closures other threads
-  queue to run on the renderer; they are internal to it.
+- **Frame graph / render commands:** the frame graph (`RenderGraph`, in
+  `frame_graph.rs`) runs a frame's passes in the order they were added and
+  inserts the barriers between them. Render commands are closures other
+  threads queue to run on the renderer; they are internal to it.
 - **`AssetHandle` / `Handle<T>`:** an `AssetHandle` names an asset (a path
   under `assets/` and a type); a `Handle<T>` is loaded, ref-counted data, and
   dropping the last one unloads it.
@@ -65,18 +67,17 @@ uses it too. Before anything destructive, ask what else it touches.
   has the worktree's path in its arguments, and other worktrees run the same
   binary.
 - Never delete `~/.cache/rust-gpu` (`~/Library/Caches/rust-gpu` on macOS) or
-  the nightly toolchains rustup lists.
-  The renderer's build script installs a pinned nightly and compiles
-  rust-gpu's codegen backend into that cache once per rust-gpu version, which
-  takes minutes; every worktree shares them.
+  the nightly toolchains rustup lists. The renderer's build script installs a
+  pinned nightly and compiles rust-gpu's codegen backend into that cache once
+  per rust-gpu version, which takes minutes; every worktree shares them.
 - Run the engine from the worktree's root. It finds `assets/` and writes logs
   to `saved/logs` relative to the current directory, so running it from
   another checkout reads and writes that checkout's files. `saved/` is
   ignored by git: never commit or delete another checkout's.
 - Running the engine opens a window and needs a Vulkan device; debug builds
   also need the Khronos validation layer (see the README). Tests never need a
-  GPU or a window, since CI can't count on either: test the logic around GPU code, as
-  the frame graph's tests do.
+  GPU or a window, since CI can't count on either: test the logic around GPU
+  code, as the frame graph's tests do.
 - Don't set `RUSTFLAGS`: it replaces the `.cargo/config.toml` rustflags that
   set the `platform_*` cfgs. macOS-only code then silently compiles out: the
   build passes and the engine fails at run time on MoltenVK.
@@ -105,6 +106,10 @@ just fmt
 cargo clippy --locked -p <crate> --all-targets --all-features -- -D warnings
 just test -p <crate>
 ```
+
+If you changed a doc comment, a README or a public API, also run `just doc`
+and `just doc-test`: nextest runs no doc tests, and CI denies rustdoc
+warnings.
 
 Before handing back a change that spans crates or touches the workspace,
 run `just validate` (or `just` alone): it formats the sources and runs every
