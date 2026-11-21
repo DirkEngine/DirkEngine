@@ -18,18 +18,16 @@ feature-depth = 1
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
+# Report unmaintained crates only when a workspace crate depends on them
+# directly; a transitive one is its dependent's to replace. cargo-deny 0.22
+# made this the default, and setting it keeps older releases in agreement.
+unmaintained = "workspace"
 ignore = [
-    # egui_dock 0.21.1 still depends on the unmaintained paste crate.
-    "RUSTSEC-2024-0436",
-
     # wayland-scanner 0.31.10 pins quick-xml to ^0.39, below the fixed 0.41
     # release. The vulnerable parser is used by Wayland code generation through
     # winit's Linux backend rather than on engine runtime input.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-
-    # winit's sctk-adwaita -> ab_glyph font stack still pulls ttf-parser.
-    "RUSTSEC-2026-0192",
 ]
 
 [licenses]
