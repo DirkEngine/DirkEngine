@@ -69,6 +69,7 @@ jobs:
               - '**'
               - '!docs/**'
               - '!AGENTS.md'
+              - '!CLAUDE.md'
               - '!LICENSE'
               - '!t3.json'
               - '!.gitignore'
