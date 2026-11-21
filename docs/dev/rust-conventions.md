@@ -102,5 +102,5 @@ from its signature. Each crate's README is its crate documentation
 - Asset loaders return `anyhow::Error`, which `dirk_assets` wraps in
   `Error::AssetLoadError`, so a loader's own errors aren't typed yet.
 - `dirk_engine`, `dirk_shaders`, the shaders (`dirk_shaders_gpu`),
-  `dirk_threads` and `dirk_editor` have no README yet, and many test modules are still inline: move them as you touch
-  them.
+  `dirk_threads` and `dirk_editor` have no README yet, and many test
+  modules are still inline: move them as you touch them.
