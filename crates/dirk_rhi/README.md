@@ -8,9 +8,9 @@ native module exposes the same crate-private types and methods, and the
 public types hold a native object plus the immutable information needed to
 validate its use. Requests are validated once, when objects are created.
 
-`Rhi::new` creates the instance and device. This crate is the only one besides
-the renderer that calls the native graphics API, so it is where the engine's
-`unsafe` code lives; every unsafe block says why it is sound.
+`Rhi::new` creates the instance and device. This crate is the only one that
+calls the native graphics API, so it is where most of the engine's `unsafe`
+code lives; every unsafe block says why it is sound.
 
 The binding design lives in `docs/rhi/architecture.md` at the repository
 root.

@@ -1,11 +1,12 @@
 # DirkEngine
 
-A pure Rust Vulkan game engine. Plugins (`EnginePlugin`) configure an
-`EngineBuilder`; the subsystems they register are started, ticked and shut
-down by the engine loop. The root `Cargo.toml` is a virtual workspace:
-libraries live in `crates/` and binaries in `apps/`. The `dirkengine` binary
-is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
-`src/cli.rs` the CLI); every other member is a crate in `crates/`:
+A pure Rust game engine, on Vulkan and Metal. Plugins (`EnginePlugin`)
+configure an `EngineBuilder`; the subsystems they register are started,
+ticked and shut down by the engine loop. The root `Cargo.toml` is a virtual
+workspace: libraries live in `crates/` and binaries in `apps/`. The
+`dirkengine` binary is `apps/dirkengine` (its `src/lib.rs` holds
+`DefaultPlugins` and its `src/cli.rs` the CLI); every other member is a crate
+in `crates/`:
 
 - `dirk_engine`: the engine, its builder, plugins, subsystems, resources and
   the editor's dock and commands.
@@ -28,11 +29,13 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   built like the engine's.
 - `dirk_render_utils`: rendering utilities built on `dirk_rhi`: the render
   graph and staged uploads.
-- `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
-  that use `ash`; `docs/dev/rust-conventions.md` says which use `unsafe`.
+- `dirk_renderer`: the renderer, which draws worlds and the editor UI
+  through `dirk_rhi` and `dirk_render_utils`, with no native graphics code of
+  its own.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
   shaders are `dirk_shaders_gpu` in `crates/dirk_renderer/shaders`, compiled
-  to SPIR-V by the renderer's build script with rust-gpu.
+  to SPIR-V by the renderer's build script with rust-gpu, and translated to
+  MSL on Apple targets.
 - `dirk_editor`: the editor's menus, settings and universe windows.
 - `dirk_proc`: the procedural macros (`#[derive(Event)]`,
   `#[derive(Component)]`, `#[derive(HeapIndices)]`).
@@ -53,14 +56,16 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   ticked. A resource is a cheap, cloneable handle a subsystem factory
   publishes so later factories can find it.
 - **Command buffer:** `dirk_universe::CommandBuffer` records edits to the
-  universe; a Vulkan command buffer records GPU work. They are unrelated.
+  universe; an RHI `CommandEncoder` records GPU work into a native command
+  buffer. They are unrelated.
 - **Scene / proxy:** the renderer's copy of ECS state. `SceneManager` mirrors
-  the universe, a `Scene` one world and a `SceneProxy` one entity; the
-  renderer's ECS systems keep them in sync.
-- **Frame graph / render commands:** the frame graph (`RenderGraph`, in
-  `frame_graph.rs`) runs a frame's passes in the order they were added and
-  inserts the barriers between them. Render commands are closures other
-  threads queue to run on the renderer; they are internal to it.
+  the universe: the entities of each world, and a `SceneProxy` per entity;
+  the renderer's ECS systems keep them in sync.
+- **Render graph / render commands:** the render graph
+  (`dirk_render_utils::RenderGraph`) runs a frame's passes in the order they
+  were added and derives the barriers between them from what each declares
+  it accesses. Render commands are closures other threads queue to run on
+  the renderer; they are internal to it.
 - **`AssetHandle` / `Handle<T>`:** an `AssetHandle` names an asset (a path
   under `assets/` and a type); a `Handle<T>` is loaded, ref-counted data, and
   dropping the last one unloads it.
@@ -85,13 +90,14 @@ uses it too. Before anything destructive, ask what else it touches.
   relative to the current directory, so running it from another checkout reads
   and writes that checkout's files. `saved/` is
   ignored by git: never commit or delete another checkout's.
-- Running the engine opens a window and needs a Vulkan device; debug builds
-  also need the Khronos validation layer (see the README). Tests never need a
-  GPU or a window, since CI can't count on either: test the logic around GPU
-  code, as the frame graph's tests do. The native tests of `dirk_rhi` and
-  `dirk_render_utils` are the exception: they use a device when there is one
-  and skip otherwise; `DIRK_REQUIRE_GPU=1` makes a missing device fail them
-  (see `dirk_rhi`'s README).
+- Running the engine opens a window and needs a Vulkan device (Metal on
+  Apple targets); debug builds also need the Khronos validation layer on
+  Vulkan, and `MTL_DEBUG_LAYER=1` on Metal (see the README). Tests never
+  need a GPU or a window, since CI can't count on either: test the logic
+  around GPU code, as the render graph's tests do. The native tests of
+  `dirk_rhi`, `dirk_render_utils` and `dirk_renderer` are the exception: they
+  use a device when there is one and skip otherwise; `DIRK_REQUIRE_GPU=1`
+  makes a missing device fail them (see `dirk_rhi`'s README).
 
 ## Conventions
 

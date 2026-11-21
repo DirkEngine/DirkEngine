@@ -20,10 +20,10 @@ no engine crate but `dirk_shaders` and the bottom ones, and `dirk_render_utils`
 builds on it alone. Never add a dependency that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
-`deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
-and `dirk_rhi`, `objc2-metal` in `dirk_rhi`, `winit` in `dirk_platform` (and
-`dirk_rhi`'s presentation example), and `egui` in the editor and the crates
-that feed it. Add a new library of that kind to its ban list.
+`deny.toml` bans them elsewhere: `ash`, `gpu-allocator` and `objc2-metal` in
+`dirk_rhi`, `winit` in `dirk_platform` (and `dirk_rhi`'s presentation
+example), and `egui` in the editor and the crates that feed it. Add a new
+library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor
@@ -70,19 +70,20 @@ doesn't trigger the lint.
 
 ## Unsafe code
 
-Only `dirk_renderer` and `dirk_rhi` may use `unsafe`, to call the native
-graphics API (Vulkan through ash, and Metal through objc2 in `dirk_rhi`);
-every other crate forbids it, except three that deny it and expect it where
-needed: `dirk_shaders`, for the shaders' unchecked heap accesses and the
-`unsafe` `HeapIndices` trait, `dirk_render_utils`, for the raw RHI barriers
-the render graph derives and uploads hand resources over with (and its
-native tests' raw barriers and host accesses), and `dirk_rhi`'s test shaders
-(`dirk_rhi_test_shaders`), for the `unsafe` `Shader` implementations the
-shader build generates. Keep it in the modules that wrap a native object, and
-give every `unsafe` block a `// SAFETY:` comment stating why it is sound:
-which handles are valid and owned, which lock provides the external
-synchronization Vulkan requires, and how long the memory a call reads lives.
-An `unsafe fn` documents its contract in a `# Safety` section.
+Only `dirk_rhi` may use `unsafe`, to call the native graphics API (Vulkan
+through ash, and Metal through objc2); every other crate forbids it, except
+four that deny it and expect it where needed: `dirk_shaders`, for the
+shaders' unchecked heap accesses and the `unsafe` `HeapIndices` trait,
+`dirk_render_utils`, for the raw RHI barriers the render graph derives and
+uploads hand resources over with (and its native tests' raw barriers and
+host accesses), and `dirk_renderer` and `dirk_rhi`'s test shaders
+(`dirk_rhi_test_shaders`), for the `unsafe` `Shader` implementations their
+shader builds generate (and the renderer's tests' host reads). Keep it in the
+modules that wrap a native object, and give every `unsafe` block a
+`// SAFETY:` comment stating why it is sound: which handles are valid and
+owned, which lock provides the external synchronization Vulkan requires, and
+how long the memory a call reads lives. An `unsafe fn` documents its contract
+in a `# Safety` section.
 
 ## Types
 
@@ -91,19 +92,18 @@ that holds it, such as `AssetHandle` or `Version::from_str`; code that takes
 the type never checks it again. Match engine enums exhaustively. Behaviour
 belongs on the type that owns it, as a method; free functions are for small
 helpers with no owner. Use macros (`dirk_proc`, or `macro_rules!` like the
-renderer's descriptor sets) for repeated boilerplate.
+RHI's `device_children!`) for repeated boilerplate.
 
 ## Modules, tests and docs
 
 A module with children is `foo/mod.rs`. Unit tests live in
 `#[cfg(test)] mod tests;` with a sibling `tests.rs`; a block of 30 lines or
 fewer may stay inline. Move a long inline test module out when you change it.
-Tests prove one behaviour each, named for it, and assert the outcome. The
-renderer's GPU code has no tests that need a device; test the logic around it,
-such as the frame graph's barriers, without one. The native tests of
-`dirk_rhi` and `dirk_render_utils` are the exception: they run on a device
-when the machine has one and skip otherwise, unless `DIRK_REQUIRE_GPU=1` (see
-`dirk_rhi`'s README).
+Tests prove one behaviour each, named for it, and assert the outcome. Test
+the logic around GPU code without a device where you can, such as the render
+graph's barriers. The native tests of `dirk_rhi`, `dirk_render_utils` and
+`dirk_renderer` need one: they run on a device when the machine has one and
+skip otherwise, unless `DIRK_REQUIRE_GPU=1` (see `dirk_rhi`'s README).
 
 Every item has a doc comment saying what it is for and anything not obvious
 from its signature. Each crate's README is its crate documentation
@@ -111,8 +111,8 @@ from its signature. Each crate's README is its crate documentation
 
 ## Deviations
 
-- `dirk_renderer` and `dirk_rhi` redeclare the workspace lints to allow
-  `unsafe_code`, and `dirk_shaders`, `dirk_render_utils` and
+- `dirk_rhi` redeclares the workspace lints to allow `unsafe_code`, and
+  `dirk_shaders`, `dirk_render_utils`, `dirk_renderer` and
   `dirk_rhi_test_shaders` to deny it rather than forbid it.
 - Asset loaders return `anyhow::Error`, which `dirk_assets` wraps in
   `Error::AssetLoadError`, so a loader's own errors aren't typed yet.
