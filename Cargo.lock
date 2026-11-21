@@ -710,6 +710,7 @@ dependencies = [
 name = "dirk_render_utils"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "dirk_rhi",
  "dirk_rhi_test_shaders",
 ]

@@ -28,8 +28,8 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   elsewhere. Its native tests' shaders are `crates/dirk_rhi/test-shaders`
   and its rust-gpu crate `dirk_rhi_test_shaders_gpu`, built like the
   engine's.
-- `dirk_render_utils`: rendering utilities built on `dirk_rhi`: staged
-  uploads.
+- `dirk_render_utils`: rendering utilities built on `dirk_rhi`: the render
+  graph and staged uploads.
 - `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
   that use `ash`; `docs/dev/rust-conventions.md` says which use `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
