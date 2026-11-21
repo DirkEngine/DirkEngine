@@ -1,22 +1,14 @@
 # How DirkEngine applies the engineering standard; the README of the
 # `sourceorigin-standard` crate lists its rules and every key here.
 
-# The modules that use unsafe code: the renderer's, which call Vulkan through
-# ash until #133 replaces them with the RHI, and the RHI's native backend,
-# unsafe API and the native tests calling it, each a test target's root. An
-# `#[expect(unsafe_code)]` counts for the first entry holding it, so a crate
-# root, for lib.rs's own calls, comes after its modules.
+# The modules that use unsafe code: the renderer's generated shaders and its
+# tests' host reads, the RHI's native backend and unsafe API, the render
+# utilities' raw barriers, the shader types' unchecked heap accesses, and the
+# native tests calling them, each a test target's root. An
+# `#[expect(unsafe_code)]` counts for the first entry holding it.
 unsafe-modules = [
-    "dirk_renderer::debug",
-    "dirk_renderer::init",
-    "dirk_renderer::physical_device",
-    "dirk_renderer::pipeline::graphics",
-    "dirk_renderer::proxy::scene",
-    "dirk_renderer::resources",
     "dirk_renderer::shaders",
-    "dirk_renderer::viewport_editor",
-    "dirk_renderer::window",
-    "dirk_renderer",
+    "dirk_renderer::tests",
     "dirk_render_utils::graph",
     "dirk_render_utils::upload",
     "dirk_rhi::buffer",
@@ -87,13 +79,9 @@ rust-comments = "DirkEngine is written by hand, mostly without AI; it keeps its 
 doc-length = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 config-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 
-[deviations.inline-tests]
-reason = "1 finding: the open pull request #133 deletes egui_integration.rs"
-paths = ["crates/dirk_renderer/src/egui_integration.rs"]
-
 [deviations.duplicate-items]
-reason = "1 finding: the open pull request #133 deletes frame_graph.rs, which viewport.rs repeats"
-paths = ["crates/dirk_renderer/src/viewport.rs"]
+reason = "2 findings: the open pull request #135 deletes the CPU mip code in models.rs, which repeats the sRGB curve of the shaders (shaders/src/lib.rs)"
+paths = ["crates/dirk_renderer/src/models.rs"]
 
 [deviations.anyhow-edges]
 reason = "7 findings: plugin and subsystem callbacks and asset loaders return anyhow errors, and the coming API overhaul types their errors"
@@ -108,5 +96,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 197 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 203 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]

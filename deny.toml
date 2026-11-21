@@ -97,18 +97,17 @@ allow-workspace = true
 # Platform and graphics crates stay behind the engine crate that wraps them, so
 # the rest of the engine never depends on them directly.
 deny = [
-    { crate = "ash", wrappers = ["dirk_renderer", "dirk_rhi", "ash-window", "gpu-allocator", "egui-ash-renderer"], reason = "Vulkan stays inside the renderer and the RHI." },
-    { crate = "gpu-allocator", wrappers = ["dirk_renderer", "dirk_rhi"], reason = "GPU memory stays inside the renderer and the RHI." },
+    { crate = "ash", wrappers = ["dirk_rhi", "ash-window", "gpu-allocator"], reason = "Vulkan stays inside the RHI." },
+    { crate = "gpu-allocator", wrappers = ["dirk_rhi"], reason = "GPU memory stays inside the RHI." },
     { crate = "objc2-metal", wrappers = ["dirk_rhi", "objc2-quartz-core"], reason = "Metal stays inside the RHI." },
     { crate = "winit", wrappers = ["dirk_platform", "dirk_rhi"], reason = "Windowing stays inside the platform layer; the RHI's presentation example opens a window." },
-    { crate = "egui", wrappers = ["dirk_editor", "dirk_engine", "dirk_input", "dirk_renderer", "egui-ash-renderer", "egui_dock"], reason = "egui stays behind the editor and its input and rendering." },
+    { crate = "egui", wrappers = ["dirk_editor", "dirk_engine", "dirk_input", "dirk_renderer", "egui_dock"], reason = "egui stays behind the editor and its input and rendering." },
 ]
 
 # Certain crates/versions that will be skipped when doing duplicate detection.
 skip = [
-    # `ash-window` needs it only on Apple targets, where the RHI uses the Metal
-    # backend (and its newer `raw-window-metal`) instead; only the renderer's
-    # own Vulkan path still builds it there.
+    # `ash-window` needs it only on Apple targets, which use the Metal backend
+    # (and its newer `raw-window-metal`) instead, so it is never built.
     { crate = "raw-window-metal@0.4.0", reason = "Apple-only dependency of the Vulkan backend's ash-window" },
 ]
 
