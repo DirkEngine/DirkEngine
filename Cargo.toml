@@ -142,6 +142,8 @@ proc-macro2 = "1"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# rust-gpu compiles the shaders (`dirk_shaders_gpu`) for the `spirv` target_arch.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
 
 # Every Clippy warning fails CI: `just lint` runs Clippy with `-D warnings`.
 # The groups sit at priority -1 so the single lints below can override them.
