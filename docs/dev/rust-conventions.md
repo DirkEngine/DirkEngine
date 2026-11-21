@@ -88,6 +88,8 @@ lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
 - `dirk_renderer` and `dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`),
   for the `unsafe` `Shader` implementations their shader builds generate, and
   the renderer's tests' host reads.
+- The test shaders' GPU crate (`dirk_rhi_test_shaders_gpu`), for the storage
+  image writes they test.
 
 Keep it in the modules that wrap a native object, and give every `unsafe`
 block a `// SAFETY:` comment stating why it is sound: which handles are valid

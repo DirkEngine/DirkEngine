@@ -54,8 +54,9 @@ impl ShaderStage {
 /// only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
 /// bytes (zero if it reads none), writes storage buffers or images only if
-/// [`WRITES_STORAGE`](Self::WRITES_STORAGE), and uses only features the RHI
-/// enables.
+/// [`WRITES_STORAGE`](Self::WRITES_STORAGE), runs workgroups of
+/// [`WORKGROUP_SIZE`](Self::WORKGROUP_SIZE) if it is a compute shader, and
+/// uses only features the RHI enables.
 #[expect(
     unsafe_code,
     reason = "`Shader` is an unsafe trait: an implementation vouches that its SPIR-V matches its push data."
@@ -72,6 +73,9 @@ pub unsafe trait Shader {
     const PUSH_SIZE: usize;
     /// Whether the entry point may write storage buffers or images.
     const WRITES_STORAGE: bool;
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    const WORKGROUP_SIZE: [u32; 3];
     /// The module: SPIR-V, or Metal Shading Language source on Apple
     /// targets.
     const CODE: &'static [u8];
@@ -93,6 +97,7 @@ pub unsafe trait Shader {
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
 ///     const WRITES_STORAGE: bool = false;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
 ///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -116,6 +121,7 @@ pub unsafe trait Shader {
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
 ///     const WRITES_STORAGE: bool = false;
+///     const WORKGROUP_SIZE: [u32; 3] = [0; 3];
 ///     const CODE: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -128,6 +134,7 @@ pub struct ShaderModule<P: PushData> {
     pub(crate) raw: native::ShaderModule,
     stage: ShaderStage,
     writes_storage: bool,
+    workgroup_size: [u32; 3],
     entry_point: &'static str,
     push: PhantomData<fn(&P)>,
 }
@@ -170,6 +177,7 @@ impl Rhi {
             raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::CODE)?,
             stage: S::STAGE,
             writes_storage: S::WRITES_STORAGE,
+            workgroup_size: S::WORKGROUP_SIZE,
             entry_point: S::ENTRY_POINT,
             push: PhantomData,
         })
@@ -185,6 +193,7 @@ impl ShaderModule<()> {
             raw: self.raw,
             stage: self.stage,
             writes_storage: self.writes_storage,
+            workgroup_size: self.workgroup_size,
             entry_point: self.entry_point,
             push: PhantomData,
         }
@@ -208,5 +217,12 @@ impl<P: PushData> ShaderModule<P> {
     #[must_use]
     pub fn entry_point(&self) -> &'static str {
         self.entry_point
+    }
+
+    /// Invocations per workgroup along each axis, for compute shaders; zeros
+    /// for other stages.
+    #[must_use]
+    pub fn workgroup_size(&self) -> [u32; 3] {
+        self.workgroup_size
     }
 }

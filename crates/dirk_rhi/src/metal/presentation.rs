@@ -8,7 +8,7 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use raw_window_handle::RawWindowHandle;
 use raw_window_metal::Layer;
 
-use super::{Device, Image, Object, device::Garbage};
+use super::{Device, Image, Object};
 use crate::{
     Error, Format, ImageUsage, PresentMode, Result, SurfaceTarget, SwapchainDesc,
     presentation::Acquired,
@@ -88,7 +88,7 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         self.device
-            .bury(Garbage::object((self.layer.clone(), self.target.clone())));
+            .bury_object((self.layer.clone(), self.target.clone()));
     }
 }
 

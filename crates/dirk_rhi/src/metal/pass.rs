@@ -124,22 +124,18 @@ impl CommandBuffer {
         self.usage = pipeline.usage;
     }
 
-    /// Pushes `data` to every stage; nothing when it is empty. Metal checks
-    /// that the bytes cover the shader's push struct, whose size MSL rounds
-    /// up to its alignment, so the bytes are padded to sixteen.
+    /// Pushes `data` to every stage; nothing when it is empty.
     pub(crate) fn push(&mut self, _device: &Device, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-        let mut padded = [0; MAX_PUSH_DATA_SIZE as usize];
-        padded[..data.len()].copy_from_slice(data);
-        let length = data.len().next_multiple_of(16);
+        let Some(push) = Push::new(data) else { return };
         let encoder = self.render();
-        let bytes = NonNull::from(&padded).cast();
-        // SAFETY: `length` bytes of `padded` are read during the calls.
+        // SAFETY: `push` holds the bytes read during the calls.
         unsafe {
-            encoder.setVertexBytes_length_atIndex(bytes, length, PUSH_BUFFER as usize);
-            encoder.setFragmentBytes_length_atIndex(bytes, length, PUSH_BUFFER as usize);
+            encoder.setVertexBytes_length_atIndex(push.bytes(), push.length, PUSH_BUFFER as usize);
+            encoder.setFragmentBytes_length_atIndex(
+                push.bytes(),
+                push.length,
+                PUSH_BUFFER as usize,
+            );
         }
     }
 
@@ -290,6 +286,35 @@ impl CommandBuffer {
                     );
             }
         }
+    }
+}
+
+/// Push data as Metal sets it: Metal checks that the bytes cover the
+/// shader's push struct, whose size MSL rounds up to its alignment, so they
+/// are padded to sixteen.
+pub(super) struct Push {
+    padded: [u8; MAX_PUSH_DATA_SIZE as usize],
+    /// Bytes set, a multiple of sixteen.
+    pub(super) length: usize,
+}
+
+impl Push {
+    /// `data` padded, or `None` when empty.
+    pub(super) fn new(data: &[u8]) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        let mut padded = [0; MAX_PUSH_DATA_SIZE as usize];
+        padded[..data.len()].copy_from_slice(data);
+        Some(Self {
+            padded,
+            length: data.len().next_multiple_of(16),
+        })
+    }
+
+    /// The padded bytes, for `setBytes` calls.
+    pub(super) fn bytes(&self) -> NonNull<std::ffi::c_void> {
+        NonNull::from(&self.padded).cast()
     }
 }
 

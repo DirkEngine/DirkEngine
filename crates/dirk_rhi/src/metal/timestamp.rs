@@ -9,7 +9,7 @@ use objc2_metal::{
     MTLCounterSamplingPoint, MTLCounterSet, MTLDevice, MTLStorageMode,
 };
 
-use super::{Check, CommandBuffer, Device, Object, command::Encoder, device::Garbage};
+use super::{Check, CommandBuffer, Device, Object, command::Encoder};
 use crate::Result;
 
 /// How the device samples timestamps, and the clocks they are calibrated
@@ -167,7 +167,7 @@ impl Timestamps {
 
 impl Drop for Timestamps {
     fn drop(&mut self) {
-        self.device.bury(Garbage::object(self.raw.clone()));
+        self.device.bury_object(self.raw.clone());
     }
 }
 

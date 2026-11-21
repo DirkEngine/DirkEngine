@@ -5,11 +5,12 @@
 
 use bytemuck::NoUninit;
 use dirk_shaders::bindless::{
-    BufferIndex, BufferSlice, DepthTextureIndex, HeapIndices, SamplerIndex, TextureIndex,
+    BufferIndex, BufferSlice, DepthTextureIndex, HeapIndices, SamplerIndex, StorageImageIndex,
+    TextureIndex,
 };
 use spirv_std::{
     Image, RuntimeArray, Sampler, TypedBuffer,
-    glam::{Vec2, Vec4, vec4},
+    glam::{UVec2, UVec3, Vec2, Vec4, vec4},
     spirv,
 };
 
@@ -222,4 +223,95 @@ pub fn depth_compare_fs(
         push.reference,
     );
     *color = Vec4::splat(passed);
+}
+
+/// Push data of the counting shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
+pub struct Count {
+    /// The buffer written.
+    pub output: BufferIndex<u32>,
+    /// Added to each element's index.
+    pub base: u32,
+}
+
+/// Writes `push.base + i` to element `i` of `push.output`, in workgroups of
+/// 64 elements.
+#[spirv(compute(threads(64)))]
+pub fn count_cs(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(push_constant)] push: &Count,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] buffers: &mut RuntimeArray<
+        TypedBuffer<[u32]>,
+    >,
+) {
+    let output = push.output.get_mut(buffers);
+    let index = id.x as usize;
+    if index < output.len() {
+        output[index] = push.base + id.x;
+    }
+}
+
+/// Push data of the painting shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
+pub struct Paint {
+    /// A 2D storage image.
+    pub image: StorageImageIndex,
+    /// Linear RGBA color written.
+    pub color: [f32; 4],
+}
+
+/// Writes `push.color` to the texels of `push.image`, in 8x8 workgroups;
+/// dispatches cover exactly the image.
+#[spirv(compute(threads(8, 8)))]
+pub fn paint_cs(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(push_constant)] push: &Paint,
+    #[spirv(descriptor_set = 0, binding = 5)] images: &RuntimeArray<
+        Image!(2D, type = f32, sampled = false),
+    >,
+) {
+    #[expect(
+        unsafe_code,
+        reason = "Storage image writes are unchecked, and dispatches cover only the image."
+    )]
+    // SAFETY: dispatches cover only the image's texels.
+    unsafe {
+        push.image
+            .get(images)
+            .write(id.truncate(), Vec4::from_array(push.color));
+    }
+}
+
+/// Push data of the storage reading shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
+pub struct Stored {
+    /// A 2D storage image.
+    pub image: StorageImageIndex,
+    /// A buffer of at least two elements.
+    pub numbers: BufferIndex<u32>,
+}
+
+/// Writes texel (0, 0) of `push.image` with element 1 of `push.numbers` as
+/// its blue channel; reads storage, but writes none.
+#[spirv(fragment)]
+pub fn stored_fs(
+    #[spirv(push_constant)] push: &Stored,
+    #[spirv(descriptor_set = 0, binding = 5)] images: &RuntimeArray<
+        Image!(2D, type = f32, sampled = false),
+    >,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] buffers: &RuntimeArray<
+        TypedBuffer<[u32]>,
+    >,
+    color: &mut Vec4,
+) {
+    let texel: Vec4 = push.image.get(images).read(UVec2::ZERO);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "The tests store small numbers, exact in an f32."
+    )]
+    let blue = push.numbers.get(buffers)[1] as f32;
+    *color = texel.with_z(blue);
 }
