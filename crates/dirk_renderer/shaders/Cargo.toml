@@ -18,5 +18,28 @@ spirv-std.workspace = true
 
 dirk_shaders.workspace = true
 
+# The workspace lints (../../../Cargo.toml), plus the `spirv` target_arch that
+# rust-gpu compiles the shaders for. A crate can't both inherit the workspace
+# lints and add its own, so the block is repeated here.
 [lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Production code propagates errors; tests may panic (see clippy.toml).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+# Every exception names its lint with `#[expect]` and says why.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Every unsafe block says why it is sound.
+undocumented_unsafe_blocks = "warn"
+# Modules with children live in `foo/mod.rs`, not `foo.rs` next to `foo/`.
+self_named_module_files = "warn"

@@ -99,6 +99,9 @@ from its signature. Each crate's README is its crate documentation
 ## Deviations
 
 - `dirk_renderer` redeclares the workspace lints to allow `unsafe_code`.
+- The shaders (`dirk_shaders_gpu`) redeclare the workspace lints to declare
+  the `spirv` target_arch, since a crate can't both inherit the workspace
+  lints and add its own.
 - Asset loaders return `anyhow::Error`, which `dirk_assets` wraps in
   `Error::AssetLoadError`, so a loader's own errors aren't typed yet.
 - `dirk_engine`, `dirk_shaders`, `dirk_threads` and `dirk_editor` have no
