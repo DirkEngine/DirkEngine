@@ -25,6 +25,7 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   ```
   Apple targets (macOS and iOS) use Metal 3 (see [Metal](#metal)); every other target uses
   Vulkan 1.3.
+  MoltenVK is not supported.
 - There is **no** `Api`/`Backend`/`Native*` trait, **no** `B: Backend` type parameter,
   **no** `Object<B, T, M>` wrapper, **no** `pub type X = api::GpuX<Selected>` aliases.
 - Each native module exposes the same `pub(crate)` concrete types and inherent methods.
