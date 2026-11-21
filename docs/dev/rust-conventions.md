@@ -21,9 +21,9 @@ that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
 `deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
-and `dirk_rhi`, `winit` in `dirk_platform` (and `dirk_rhi`'s presentation
-example), and `egui` in the editor and the crates that feed it. Add a new
-library of that kind to its ban list.
+and `dirk_rhi`, `objc2-metal` in `dirk_rhi`, `winit` in `dirk_platform` (and
+`dirk_rhi`'s presentation example), and `egui` in the editor and the crates
+that feed it. Add a new library of that kind to its ban list.
 
 A feature enters the engine as an `EnginePlugin`, which configures the
 `EngineBuilder`: it registers subsystems, ECS systems, events and editor
@@ -71,13 +71,13 @@ doesn't trigger the lint.
 ## Unsafe code
 
 Only `dirk_renderer` and `dirk_rhi` may use `unsafe`, to call the native
-graphics API (Vulkan through ash); every other crate forbids it, except two
-that deny it and expect it where needed: `dirk_shaders`, for the shaders'
-unchecked heap accesses and the `unsafe` `HeapIndices` trait, and `dirk_rhi`'s
-test shaders (`dirk_rhi_test_shaders`), for the `unsafe` `Shader`
-implementations the shader build generates. Keep it in the modules that wrap
-a native object, and give
-every `unsafe` block a `// SAFETY:` comment stating why it is sound: which
+graphics API (Vulkan through ash, and Metal through objc2 in `dirk_rhi`);
+every other crate forbids it, except two that deny it and expect it where
+needed: `dirk_shaders`, for the shaders' unchecked heap accesses and the
+`unsafe` `HeapIndices` trait, and `dirk_rhi`'s test shaders
+(`dirk_rhi_test_shaders`), for the `unsafe` `Shader` implementations the
+shader build generates. Keep it in the modules that wrap a native object, and
+give every `unsafe` block a `// SAFETY:` comment stating why it is sound: which
 handles are valid and owned, which lock provides the external synchronization
 Vulkan requires, and how long the memory a call reads lives. An `unsafe fn`
 documents its contract in a `# Safety` section.

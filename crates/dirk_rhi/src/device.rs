@@ -6,7 +6,9 @@ use std::sync::{
 use bitflags::bitflags;
 use raw_window_handle::DisplayHandle;
 
-use crate::{FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native};
+use crate::{
+    Error, FRAMES_IN_FLIGHT, Format, FormatCapabilities, Result, frame::FrameSlot, native,
+};
 
 /// Application information and policy used to create an [`Rhi`].
 #[derive(Clone, Copy, Debug)]
@@ -15,6 +17,10 @@ pub struct RhiCreateInfo<'a> {
     pub application_name: &'a str,
     /// Enables the native validation layer when it is installed. Errors it
     /// reports are logged and counted by [`Rhi::validation_error_count`].
+    ///
+    /// Metal's validation is enabled by running with `MTL_DEBUG_LAYER=1` (and
+    /// `MTL_SHADER_VALIDATION=1` for shaders) instead, and stops the process
+    /// on misuse; this makes failed command buffers name the failing pass.
     pub validation: bool,
     /// The display windows will be presented to, such as the platform's
     /// event loop. Enables presentation; `None` for headless use.
@@ -60,11 +66,18 @@ impl Rhi {
     /// # Errors
     ///
     /// Returns [`Error::NoSuitableDevice`](crate::Error::NoSuitableDevice)
-    /// listing why each device was rejected, [`Error::Invalid`](crate::Error::Invalid) if the frame
-    /// memory exceeds the device's buffer size limit, or a native error if
-    /// the graphics API cannot be loaded or initialized or memory cannot be
-    /// allocated.
+    /// listing why each device was rejected, [`Error::Invalid`] if the
+    /// application name contains a NUL byte or the frame memory exceeds the
+    /// device's buffer size limits, or a native error if the graphics API
+    /// cannot be loaded or initialized or memory cannot be allocated.
     pub fn new(info: &RhiCreateInfo<'_>) -> Result<Self> {
+        if info.application_name.contains('\0') {
+            return Err(Error::invalid(
+                "application name",
+                info.application_name,
+                "contains a NUL byte",
+            ));
+        }
         let mut rhi = Self {
             device: Arc::new(native::Device::new(info)?),
             id: NEXT_RHI_ID.fetch_add(1, Ordering::Relaxed),
@@ -86,8 +99,9 @@ impl Rhi {
     }
 
     /// Number of errors the validation layer has reported since creation,
-    /// or `None` if validation does not run: it is disabled, or its layer is
-    /// not installed.
+    /// or, on Metal, submitted command buffers that failed. `None` if Vulkan
+    /// validation does not run: it is disabled, or its layer is not
+    /// installed.
     #[must_use]
     pub fn validation_error_count(&self) -> Option<usize> {
         self.device.validation_error_count()

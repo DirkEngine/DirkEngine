@@ -79,6 +79,38 @@ pub fn textured_vs(
     *uv = Vec2::from_array(vertex.uv);
 }
 
+/// Push data of the instanced shader: buffers of two element types.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
+pub struct Instanced {
+    /// The vertices, drawn in order.
+    pub vertices: BufferIndex<Vertex>,
+    /// An RGBA8 color per instance, red in the lowest byte.
+    pub colors: BufferIndex<u32>,
+}
+
+/// Places the vertex `push.vertices[index]` and passes on the color
+/// `push.colors[instance]`. Reads one heap array as two types, like meshes
+/// reading their vertices and per-object data.
+#[spirv(vertex)]
+pub fn instanced_vs(
+    #[spirv(vertex_index)] index: i32,
+    #[spirv(instance_index)] instance: i32,
+    #[spirv(push_constant)] push: &Instanced,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] vertices: &RuntimeArray<
+        TypedBuffer<[Vertex]>,
+    >,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 9)] colors: &RuntimeArray<
+        TypedBuffer<[u32]>,
+    >,
+    #[spirv(position)] position: &mut Vec4,
+    color: &mut Vec4,
+) {
+    let vertex = push.vertices.get(vertices)[index.cast_unsigned() as usize];
+    *position = vec4(vertex.position[0], vertex.position[1], 0.0, 1.0);
+    *color = unpack(push.colors.get(colors)[instance.cast_unsigned() as usize]);
+}
+
 /// Push data of the sliced shader: two slices of frame memory.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, NoUninit, HeapIndices)]
@@ -107,13 +139,17 @@ pub fn sliced_vs(
 ) {
     let vertex = push.vertices.get(vertices, index.cast_unsigned());
     *position = vec4(vertex.position[0], vertex.position[1], 0.0, 1.0);
-    let rgba = *push.colors.get(colors, instance.cast_unsigned());
+    *color = unpack(*push.colors.get(colors, instance.cast_unsigned()));
+}
+
+/// The channels of an RGBA8 color, red in the lowest byte.
+fn unpack(rgba: u32) -> Vec4 {
     #[expect(
         clippy::cast_precision_loss,
         reason = "Channels are 8-bit, exact in an f32."
     )]
     let channel = |byte: u32| ((rgba >> (8 * byte)) & 0xff) as f32 / 255.0;
-    *color = vec4(channel(0), channel(1), channel(2), channel(3));
+    vec4(channel(0), channel(1), channel(2), channel(3))
 }
 
 /// Writes the color it is given.
