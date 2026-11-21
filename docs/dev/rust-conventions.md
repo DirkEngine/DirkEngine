@@ -75,14 +75,14 @@ graphics API (Vulkan through ash, and Metal through objc2 in `dirk_rhi`);
 every other crate forbids it, except three that deny it and expect it where
 needed: `dirk_shaders`, for the shaders' unchecked heap accesses and the
 `unsafe` `HeapIndices` trait, `dirk_render_utils`, for the raw RHI barriers
-uploads hand resources over with (and its native tests' raw barriers and
-host accesses), and `dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`), for
-the `unsafe` `Shader` implementations the shader build generates. Keep it in
-the modules that wrap a native object, and give every `unsafe` block a
-`// SAFETY:` comment stating why it is sound: which handles are valid and
-owned, which lock provides the external synchronization Vulkan requires, and
-how long the memory a call reads lives. An `unsafe fn` documents its contract
-in a `# Safety` section.
+the render graph derives and uploads hand resources over with (and its
+native tests' raw barriers and host accesses), and `dirk_rhi`'s test shaders
+(`dirk_rhi_test_shaders`), for the `unsafe` `Shader` implementations the
+shader build generates. Keep it in the modules that wrap a native object, and
+give every `unsafe` block a `// SAFETY:` comment stating why it is sound:
+which handles are valid and owned, which lock provides the external
+synchronization Vulkan requires, and how long the memory a call reads lives.
+An `unsafe fn` documents its contract in a `# Safety` section.
 
 ## Types
 

@@ -14,12 +14,14 @@ documentation.workspace = true
 dirk_rhi.workspace = true
 
 [dev-dependencies]
+bytemuck.workspace = true
 dirk_rhi_test_shaders = { version = "0.1.0", path = "../dirk_rhi/test-shaders" }
 
 # The workspace lints (../../Cargo.toml), except that `unsafe_code` is denied
-# rather than forbidden: uploads record raw RHI barriers to hand resources
-# over, and the native tests raw barriers and host accesses. Each expects it
-# where it does, and every unsafe block states why it is sound.
+# rather than forbidden: the render graph records the raw RHI barriers it
+# derives, uploads those that hand resources over, and the native tests raw
+# barriers and host accesses. Each expects it where it does, and every unsafe
+# block states why it is sound.
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "deny"
