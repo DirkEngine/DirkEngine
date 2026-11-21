@@ -9,10 +9,10 @@ use objc2_metal::{
     MTLRenderPipelineState, MTLWinding,
 };
 
-use super::{Check, Device, Object, device::Garbage};
+use super::{Check, Device, Object, device::Garbage, heap::Usage};
 use crate::{
     BlendFactor, BlendOp, ColorWrites, CompareOp, CullMode, DepthBias, Error, FrontFace,
-    GraphicsPipelineDesc, PushData, Result, Topology,
+    GraphicsPipelineDesc, PushData, Result, ShaderModule as Module, Topology,
 };
 
 /// Identifies a pipeline while it is alive, to skip rebinding it.
@@ -71,6 +71,8 @@ pub(crate) struct GraphicsPipeline {
     pub(super) cull_mode: MTLCullMode,
     pub(super) winding: MTLWinding,
     pub(super) bias: DepthBias,
+    /// The usage its draws need resources declared up to.
+    pub(super) usage: Usage,
 }
 
 impl GraphicsPipeline {
@@ -130,6 +132,9 @@ impl GraphicsPipeline {
             cull_mode: desc.cull_mode.mtl(),
             winding: desc.front_face.mtl(),
             bias: desc.depth.map_or_default(|depth| depth.bias),
+            usage: Usage::of_pipeline(
+                desc.vertex.writes_storage() || desc.fragment.is_some_and(Module::writes_storage),
+            ),
         })
     }
 
