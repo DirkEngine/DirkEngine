@@ -79,10 +79,6 @@ rust-comments = "DirkEngine is written by hand, mostly without AI; it keeps its 
 doc-length = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 config-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 
-[deviations.duplicate-items]
-reason = "2 findings: the open pull request #135 deletes the CPU mip code in models.rs, which repeats the sRGB curve of the shaders (shaders/src/lib.rs)"
-paths = ["crates/dirk_renderer/src/models.rs"]
-
 [deviations.anyhow-edges]
 reason = "7 findings: plugin and subsystem callbacks and asset loaders return anyhow errors, and the coming API overhaul types their errors"
 crates = [

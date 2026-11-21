@@ -264,6 +264,36 @@ fn layered_and_mipped_images_round_trip() -> Result<()> {
 }
 
 #[test]
+fn mipmapped_images_generate_every_mip_from_the_first() -> Result<()> {
+    with_rhi(|rhi| {
+        // A uniform color keeps its value in every mip of any size.
+        let color = [200, 100, 50, 255];
+        let desc = ImageDesc {
+            label: "mipmapped",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(5, 3),
+            format: Format::Rgba8Srgb,
+            usage: ImageUsage::SAMPLED,
+            mip_levels: 3,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        };
+
+        let mut frame = rhi.begin_frame()?;
+        let mut uploads = Uploads::new(&mut frame);
+        let image = uploads.mipmapped_image(&desc, &color.repeat(15))?;
+        uploads.submit()?;
+        let readback = Readback::image(&frame, &image)?;
+        frame.finish();
+
+        let expected = [15, 2, 1].map(|texels| color.repeat(texels));
+        assert_eq!(readback.wait(rhi)?, expected);
+        Ok(())
+    })
+}
+
+#[test]
 fn uploads_stage_in_frame_memory_without_overwriting_frames_in_flight() -> Result<()> {
     with_rhi(|rhi| {
         let frame_memory = usize::try_from(RhiCreateInfo::default().frame_memory).expect("fits");
