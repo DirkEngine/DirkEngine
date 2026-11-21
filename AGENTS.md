@@ -9,11 +9,12 @@ everything else is a crate in `crates/`:
   the editor's dock and commands.
 - `dirk_universe`: the ECS: the universe, its worlds, entities, components,
   systems and command buffers.
-- `dirk_events`: the frame-buffered pub/sub event bus (`docs/events.md`).
+- `dirk_events`: the channel-backed pub/sub event bus, routed on worker
+  threads (see its README).
 - `dirk_threads`: the worker pool and threading primitives, on tokio.
 - `dirk_assets`: asset handles, `.dirkasset` descriptors and the asset registry.
 - `dirk_platform`: windows and OS events, the only crate that uses `winit`.
-- `dirk_input`: input actions, axes and maps, and their egui mapping (`egui`).
+- `dirk_input`: input actions, axes and maps, and their egui mapping (`egui` feature).
 - `dirk_world`: the components and systems that populate a world (transforms,
   renderables, model uploads).
 - `dirk_player`: players, their input and movement.
@@ -43,10 +44,10 @@ everything else is a crate in `crates/`:
 - **Command buffer:** `dirk_universe::CommandBuffer` records edits to the
   universe; a Vulkan command buffer records GPU work. They are unrelated.
 - **Scene / proxy:** the renderer's copy of ECS state. `SceneManager` mirrors
-  the universe and a `SceneProxy` mirrors one world; the renderer's ECS
-  systems keep them in sync.
-- **Frame graph / render commands:** the frame graph orders a frame's passes
-  and inserts their barriers. Render commands are closures other threads
+  the universe, a `Scene` one world and a `SceneProxy` one entity; the
+  renderer's ECS systems keep them in sync.
+- **Frame graph / render commands:** the frame graph runs a frame's passes in
+  the order they were added and inserts the barriers between them. Render commands are closures other threads
   queue to run on the renderer; they are internal to it.
 - **`AssetHandle` / `Handle<T>`:** an `AssetHandle` names an asset (a path
   under `assets/` and a type); a `Handle<T>` is loaded, ref-counted data, and
@@ -63,7 +64,8 @@ uses it too. Before anything destructive, ask what else it touches.
   name or pattern (`pkill -f`, `killall dirkengine`): your own agent process
   has the worktree's path in its arguments, and other worktrees run the same
   binary.
-- Never delete `~/.cache/rust-gpu` or the nightly toolchains rustup lists.
+- Never delete `~/.cache/rust-gpu` (`~/Library/Caches/rust-gpu` on macOS) or
+  the nightly toolchains rustup lists.
   The renderer's build script installs a pinned nightly and compiles
   rust-gpu's codegen backend into that cache once per rust-gpu version, which
   takes minutes; every worktree shares them.
@@ -73,10 +75,11 @@ uses it too. Before anything destructive, ask what else it touches.
   ignored by git: never commit or delete another checkout's.
 - Running the engine opens a window and needs a Vulkan device; debug builds
   also need the Khronos validation layer (see the README). Tests never need a
-  GPU or a window, since CI has neither: test the logic around GPU code, as
+  GPU or a window, since CI can't count on either: test the logic around GPU code, as
   the frame graph's tests do.
 - Don't set `RUSTFLAGS`: it replaces the `.cargo/config.toml` rustflags that
-  set the `platform_*` cfgs, so platform code stops compiling.
+  set the `platform_*` cfgs. macOS-only code then silently compiles out: the
+  build passes and the engine fails at run time on MoltenVK.
 
 ## Conventions
 
@@ -98,6 +101,7 @@ sign-off before breaking it.
 While iterating, check only the crates you changed:
 
 ```sh
+just fmt
 cargo clippy --locked -p <crate> --all-targets --all-features -- -D warnings
 just test -p <crate>
 ```
@@ -120,8 +124,8 @@ the exact command that failed and why.
 
 Before handing back a feature, walk this list and say which entries applied:
 
-- Its plugin is registered in both `DefaultPlugins` (`src/lib.rs`) and the
-  CLI (`src/cli.rs`), which repeats the list.
+- Its plugin is registered in `DefaultPlugins` (`src/lib.rs`), and in the CLI
+  (`src/cli.rs`) and the root README's example, which repeat the list.
 - It works with the `editor` feature and without it; an editor window or
   command sits behind the feature.
 - Its input goes through `dirk_input` bindings, and its events are
