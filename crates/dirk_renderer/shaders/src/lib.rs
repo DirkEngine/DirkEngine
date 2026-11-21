@@ -1,7 +1,7 @@
 //! The engine's shaders, compiled to SPIR-V by `dirk_renderer`'s build script
-//! with rust-gpu. Each entry point becomes its own module, which the build
-//! script reflects into a type with its stage, descriptor set layouts and
-//! vertex inputs.
+//! with rust-gpu. Each entry point becomes its own SPIR-V module, which the
+//! build script reflects into a type with its stage, descriptor set layouts
+//! and vertex inputs.
 
 #![no_std]
 #![expect(
