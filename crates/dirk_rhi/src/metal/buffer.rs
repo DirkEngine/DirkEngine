@@ -3,14 +3,14 @@ use std::sync::Arc;
 use dirk_shaders::bindless::heap;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
-use objc2_metal::{MTLBuffer, MTLDevice, MTLResource, MTLResourceOptions};
+use objc2_metal::{MTLBuffer, MTLResource};
 
 use super::{
-    Check, Device, Object,
+    Device, Object,
     device::Garbage,
     heap::{Descriptor, Slot},
 };
-use crate::{BufferDesc, BufferUsage, Memory, Result};
+use crate::{BufferDesc, BufferUsage, Result};
 
 /// Identifies a buffer while it is alive, to skip rebinding it.
 pub(crate) type BufferId = *const ProtocolObject<dyn MTLBuffer>;
@@ -24,24 +24,16 @@ pub(crate) struct Buffer {
 }
 
 impl Buffer {
-    /// Creates a buffer for a validated description. Host-visible memory is
-    /// shared with the host and coherent.
+    /// Creates a buffer for a validated description, in one of the
+    /// device's heaps. Host-visible memory is shared with the host and
+    /// coherent.
     pub(crate) fn new(device: &Arc<Device>, desc: &BufferDesc<'_>) -> Result<Self> {
-        let options = match desc.memory {
-            Memory::Device => MTLResourceOptions::StorageModePrivate,
-            Memory::Upload => {
-                MTLResourceOptions::StorageModeShared
-                    | MTLResourceOptions::CPUCacheModeWriteCombined
-            }
-            Memory::Readback => MTLResourceOptions::StorageModeShared,
-        };
         // Sizes are within `maxBufferLength`, which is a `usize`.
         #[expect(clippy::cast_possible_truncation, reason = "the size fits")]
         let size = desc.size as usize;
         let raw: Object<_> = device
-            .raw
-            .newBufferWithLength_options(size, options)
-            .check("newBufferWithLength")?
+            .allocator
+            .buffer(&device.raw, size, desc.memory)?
             .into();
         raw.setLabel(Some(&NSString::from_str(desc.label)));
         let slot = desc
