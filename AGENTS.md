@@ -19,13 +19,14 @@ everything else is a crate in `crates/`:
 - `dirk_world`: the components and systems that populate a world (transforms,
   renderables, model uploads).
 - `dirk_player`: players, their input and movement.
-- `dirk_renderer`: the Vulkan renderer, the only crate that uses `ash` and `unsafe`.
+- `dirk_renderer`: the Vulkan renderer, the only crate that uses `ash` and
+  `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
   shaders are `dirk_shaders_gpu` in `crates/dirk_renderer/shaders`, compiled
   to SPIR-V by the renderer's build script with rust-gpu.
 - `dirk_editor`: the editor's menus, settings and universe windows.
-- `dirk_proc`: the procedural macros (`#[derive(Event)]`, `#[derive(Component)]`,
-  `#[derive(System)]`, `#[system_trait]`).
+- `dirk_proc`: the procedural macros (`#[derive(Event)]`,
+  `#[derive(Component)]`, `#[derive(System)]`, `#[system_trait]`).
 - `dirk_utils`, `dirk_build`: small shared utilities, and build script helpers.
 
 `docs/dev/rust-conventions.md` describes how the crates depend on each other.
