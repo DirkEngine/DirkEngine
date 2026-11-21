@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::WorkerPool;
+use super::{SHUTDOWN_TIMEOUT, WorkerPool};
 
 #[test]
 fn spawned_tasks_run_on_background_threads() {
@@ -35,7 +35,6 @@ fn blocking_tasks_complete() {
         let counter = Arc::clone(&counter);
         let (tx, rx) = mpsc::channel();
         pool.spawn_blocking(move || {
-            std::thread::sleep(Duration::from_millis(5));
             counter.fetch_add(1, Ordering::SeqCst);
             tx.send(()).expect("receiver should still be alive");
         });
@@ -89,6 +88,8 @@ fn drop_outside_runtime_waits_for_blocking_tasks() {
         started_tx
             .send(())
             .expect("test receiver should remain open");
+        // wall-clock: the task outlasts a drop that doesn't wait for it, and
+        // nothing signals that the drop is waiting.
         std::thread::sleep(Duration::from_millis(50));
         task_finished.fetch_add(1, Ordering::SeqCst);
     });
@@ -113,17 +114,20 @@ fn drop_inside_other_runtime_does_not_block_its_worker() {
 
     let (done_tx, done_rx) = mpsc::channel();
     host.spawn(async move {
+        // wall-clock: a drop that waited would give up on the busy task only
+        // after SHUTDOWN_TIMEOUT, so the time it took tells the two apart.
         let start = Instant::now();
         drop(busy);
         done_tx
             .send(start.elapsed())
             .expect("test receiver should remain open");
     });
-    let elapsed = done_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("drop on another runtime should not wait for blocking tasks");
+    let elapsed = done_rx.recv().expect("the host task should finish");
     release_tx.send(()).expect("detached task should still run");
-    assert!(elapsed < Duration::from_secs(1));
+    assert!(
+        elapsed < SHUTDOWN_TIMEOUT,
+        "drop on another runtime should not wait for blocking tasks"
+    );
 }
 
 #[test]

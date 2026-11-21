@@ -17,19 +17,24 @@ use crate::{Consumer, Dispatcher, Event, EventManager, Topic};
 // =========================================================================
 
 fn collect<T: Event>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut events = Vec::with_capacity(count);
-    while events.len() < count {
-        if let Some(event) = consumer.try_consume() {
-            events.push(event);
-        } else {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for event"
+    let received = async {
+        let mut events = Vec::with_capacity(count);
+        while events.len() < count {
+            events.push(
+                consumer
+                    .consume()
+                    .await
+                    .expect("the event bus should stay open"),
             );
-            std::thread::yield_now();
         }
-    }
+        events
+    };
+    let events = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a Tokio runtime should start")
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), received).await })
+        .expect("timed out waiting for event");
     assert!(
         consumer.try_consume().is_none(),
         "received more than {count} events"

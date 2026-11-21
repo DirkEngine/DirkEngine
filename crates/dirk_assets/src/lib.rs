@@ -483,6 +483,11 @@ struct AssetRegistryInner {
     /// a registry-wide lock across blocking disk IO.
     load_locks: Mutex<HashMap<AssetHandle, Arc<Mutex<()>>>>,
 
+    /// Notified when a load waits for another load of the same asset, so a
+    /// test can tell the loads overlap.
+    #[cfg(test)]
+    load_waits: tokio::sync::Notify,
+
     /// Weak references to currently live assets.
     loaded_assets: RwLock<HashMap<AssetHandle, CachedAsset>>,
 }
@@ -536,6 +541,8 @@ impl AssetRegistry {
 
             load_dispatchers: RwLock::new(HashMap::new()),
             load_locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            load_waits: tokio::sync::Notify::new(),
             loaded_assets: RwLock::new(HashMap::new()),
         };
 
@@ -612,7 +619,11 @@ impl AssetRegistry {
             .entry(canonical_handle.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        let _load_guard = load_lock.lock();
+        let _load_guard = load_lock.try_lock().unwrap_or_else(|| {
+            #[cfg(test)]
+            self.inner.load_waits.notify_one();
+            load_lock.lock()
+        });
 
         if let Some(typed_handle) = self.cached_handle::<T>(&canonical_handle) {
             return Ok(typed_handle);

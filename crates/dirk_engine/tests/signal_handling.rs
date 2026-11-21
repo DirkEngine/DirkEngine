@@ -40,9 +40,7 @@ fn signal_test_child_drops_default_engine() -> anyhow::Result<()> {
 
     drop(Engine::new()?);
     println!("{CHILD_READY}");
-    loop {
-        thread::sleep(Duration::from_secs(1));
-    }
+    park_until_killed()
 }
 
 struct BlockingShutdownPlugin;
@@ -72,9 +70,7 @@ impl Subsystem for BlockingShutdownSubsystem {
 
     fn shutdown(&mut self, _handle: &EngineHandle) -> anyhow::Result<()> {
         println!("{CHILD_SHUTTING_DOWN}");
-        loop {
-            thread::sleep(Duration::from_secs(1));
-        }
+        park_until_killed()
     }
 }
 
@@ -166,19 +162,20 @@ impl SignalTestChild {
         }
     }
 
+    /// Waits for the child to exit, which closes its stdout.
     fn wait_for_exit(&mut self) -> anyhow::Result<ExitStatus> {
-        let timeout = Duration::from_secs(5);
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(status) = self.process.try_wait()? {
-                return Ok(status);
+            match self
+                .output
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("child did not exit"),
             }
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "child did not exit within {timeout:?}"
-            );
-            thread::sleep(Duration::from_millis(50));
         }
+        Ok(self.process.wait()?)
     }
 }
 
@@ -189,6 +186,13 @@ impl Drop for SignalTestChild {
             let _ = self.process.kill();
             let _ = self.process.wait();
         }
+    }
+}
+
+/// Blocks a child forever, until the signal the test sends ends it.
+fn park_until_killed() -> ! {
+    loop {
+        thread::park();
     }
 }
 

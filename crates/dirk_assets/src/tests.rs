@@ -91,30 +91,23 @@ fn write_model_fixture(dir: &Path, name: &str) -> PathBuf {
     dirkasset
 }
 
-fn wait_for_load<T: Asset>(mut load: AssetLoad<T>) -> Result<Handle<T>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if let Some(result) = load.try_poll() {
-            return result;
-        }
-
-        assert!(
-            std::time::Instant::now() < deadline,
-            "asset load did not complete"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-}
-
-/// Waits up to five seconds for the next event on `consumer`.
-fn next_event<E: Event>(consumer: &mut Consumer<E>) -> E {
+/// Blocks on `future` for at most five seconds, a guard against hanging.
+fn wait<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("a Tokio runtime should start")
-        .block_on(async { tokio::time::timeout(Duration::from_secs(5), consumer.consume()).await })
-        .expect("event was not delivered in time")
-        .expect("event bus should remain open")
+        .block_on(async { tokio::time::timeout(Duration::from_secs(5), future).await })
+        .expect("the awaited load or event should finish within five seconds")
+}
+
+fn wait_for_load<T: Asset>(load: AssetLoad<T>) -> Result<Handle<T>> {
+    wait(load)
+}
+
+/// Waits for the next event on `consumer`.
+fn next_event<E: Event>(consumer: &mut Consumer<E>) -> E {
+    wait(consumer.consume()).expect("event bus should remain open")
 }
 
 /// Returns the unload events dispatched before this call.
@@ -878,13 +871,8 @@ mod dirk_asset_validation {
 #[cfg(test)]
 mod registry {
     use super::*;
-    use std::{
-        sync::{
-            Arc, Barrier,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Instant,
-    };
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn registry_with_models(
         names: &[&str],
@@ -909,22 +897,31 @@ mod registry {
         (root, events, registry, ids.remove(0))
     }
 
-    /// Ticks `registry` until it re-emits an unload, for at most five seconds.
-    fn wait_for_unload(
-        registry: &AssetRegistry,
-        consumer: &mut Consumer<AssetUnloaded>,
-    ) -> AssetUnloaded {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            registry.tick();
-            if let Some(event) = consumer.try_consume() {
-                return event;
+    /// Follows unloads through a registry: the internal event its tick
+    /// drains, then the public event the tick emits for it.
+    struct Unloads {
+        internal: Consumer<InternalAssetUnloaded>,
+        public: Consumer<AssetUnloaded>,
+    }
+
+    impl Unloads {
+        /// Subscribes to the unloads dispatched from now on.
+        fn subscribe(events: &EventManager) -> Self {
+            Self {
+                internal: events.subscribe(),
+                public: events.subscribe(),
             }
-            assert!(
-                Instant::now() < deadline,
-                "unload was not delivered in time"
-            );
-            std::thread::yield_now();
+        }
+
+        /// Waits for the next unload, ticks `registry` to process it, and
+        /// returns the event the tick emits.
+        fn next(&mut self, registry: &AssetRegistry) -> AssetUnloaded {
+            // Routing hands an event to subscribers in the order they
+            // subscribed, and the registry subscribed first, so its tick
+            // finds the event this one received.
+            drop(next_event(&mut self.internal));
+            registry.tick();
+            next_event(&mut self.public)
         }
     }
 
@@ -1037,17 +1034,19 @@ mod registry {
         assert!(matches!(second.take(), Err(Error::AlreadyTaken)));
     }
 
+    /// Counts its decodes, each of which waits for `DECODE_GATE`.
     #[derive(Clone)]
     struct CountingAsset;
 
     static DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static DECODE_GATE: Mutex<()> = Mutex::new(());
 
     impl Asset for CountingAsset {
         type Config = ModelConfig;
 
         fn load(_: &ModelConfig, _: &AssetHandle) -> Result<Self> {
             DECODE_COUNT.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(30));
+            drop(DECODE_GATE.lock());
             Ok(Self)
         }
 
@@ -1060,21 +1059,22 @@ mod registry {
     fn concurrent_same_key_loads_share_one_decode_and_generation() {
         DECODE_COUNT.store(0, Ordering::SeqCst);
         let (_root, _events, registry, id) = registry_with_model("concurrent");
-        let gate = Arc::new(Barrier::new(3));
+        let gate = DECODE_GATE.lock();
         let threads = (0..2)
             .map(|_| {
                 let registry = registry.clone();
                 let id = id.clone();
-                let gate = gate.clone();
                 std::thread::spawn(move || {
-                    gate.wait();
                     registry
                         .load_asset_immediate::<CountingAsset>(&id)
                         .expect("the asset should load")
                 })
             })
             .collect::<Vec<_>>();
-        gate.wait();
+        // One load holds the asset's lock, held up by the gate before it can
+        // cache anything, and the other waits for it.
+        wait(registry.inner.load_waits.notified());
+        drop(gate);
         let handles = threads
             .into_iter()
             .map(|thread| thread.join().expect("the loading thread should not panic"))
@@ -1087,7 +1087,7 @@ mod registry {
     fn old_unload_preserves_new_generation_and_identifies_old_instance() {
         let (_root, events, registry, id) = registry_with_model("reloaded");
         let mut loaded = events.subscribe::<AssetLoaded<Model>>();
-        let mut unloaded = events.subscribe::<AssetUnloaded>();
+        let mut unloads = Unloads::subscribe(&events);
         let first =
             wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
         let first_generation = first.generation();
@@ -1097,7 +1097,7 @@ mod registry {
             wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");
         assert_ne!(first_generation, second.generation());
         drop(next_event(&mut loaded));
-        let old_unload = wait_for_unload(&registry, &mut unloaded);
+        let old_unload = unloads.next(&registry);
         assert_eq!(old_unload.handle, id);
         assert_eq!(old_unload.generation, first_generation);
         assert_eq!(
@@ -1109,16 +1109,13 @@ mod registry {
         );
         let second_generation = second.generation();
         drop(second);
-        assert_eq!(
-            wait_for_unload(&registry, &mut unloaded).generation,
-            second_generation
-        );
+        assert_eq!(unloads.next(&registry).generation, second_generation);
     }
 
     #[test]
     fn unloads_continue_after_all_assets_are_released() {
         let (_root, events, registry, id) = registry_with_model("reloaded");
-        let mut unloaded = events.subscribe::<AssetUnloaded>();
+        let mut unloads = Unloads::subscribe(&events);
 
         // Every cycle drops the last asset and with it every unload dispatcher.
         for _ in 0..2 {
@@ -1127,7 +1124,7 @@ mod registry {
             let generation = handle.generation();
             drop(handle);
 
-            let event = wait_for_unload(&registry, &mut unloaded);
+            let event = unloads.next(&registry);
             assert_eq!(event.handle, id);
             assert_eq!(event.generation, generation);
             assert!(!registry.inner.loaded_assets.read().contains_key(&id));
