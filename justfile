@@ -20,7 +20,7 @@ build:
 # CARGO_BUILD_JOBS is already set.
 # Builds a new worktree's workspace at low priority.
 setup-worktree:
-    @CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 ))}" nice -n 10 just build
+    @CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(( ($(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1) + 1) / 2 ))}" nice -n 10 just build
 
 fmt:
     @cargo fmt --all
