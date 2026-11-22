@@ -122,7 +122,9 @@ fn drop_inside_other_runtime_does_not_block_its_worker() {
             .send(start.elapsed())
             .expect("test receiver should remain open");
     });
-    let elapsed = done_rx.recv().expect("the host task should finish");
+    let elapsed = done_rx
+        .recv_timeout(SHUTDOWN_TIMEOUT * 2)
+        .expect("the host task should finish");
     release_tx.send(()).expect("detached task should still run");
     assert!(
         elapsed < SHUTDOWN_TIMEOUT,

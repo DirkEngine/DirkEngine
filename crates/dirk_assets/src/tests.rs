@@ -916,9 +916,9 @@ mod registry {
         /// Waits for the next unload, ticks `registry` to process it, and
         /// returns the event the tick emits.
         fn next(&mut self, registry: &AssetRegistry) -> AssetUnloaded {
-            // Routing hands an event to subscribers in the order they
-            // subscribed, and the registry subscribed first, so its tick
-            // finds the event this one received.
+            // The registry is the topic's first subscriber and never
+            // unsubscribes, so routing reaches it before this one, and its
+            // tick finds the event this one received.
             drop(next_event(&mut self.internal));
             registry.tick();
             next_event(&mut self.public)

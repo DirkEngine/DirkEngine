@@ -106,7 +106,8 @@ stays removed.
 Tests wait for events, not time. Never sleep to let something happen, assert
 on elapsed time, or poll until something is ready: await the channel,
 notification or state change that marks it, such as `Consumer::consume` or an
-`AssetLoad`, and move Tokio time with `#[tokio::test(start_paused = true)]`.
+`AssetLoad`. To move Tokio time, enable Tokio's `test-util` feature for the
+crate's tests and use `#[tokio::test(start_paused = true)]`.
 A timeout on that wait only guards against a hang. A wait with nothing to
 await, such as on a subprocess or on Tokio's runtime shutdown, says why on the
 line above: `// wall-clock: <why>`.
