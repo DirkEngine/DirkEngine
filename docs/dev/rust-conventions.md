@@ -8,12 +8,14 @@ logic instead of copying it.
 
 ## Crates and boundaries
 
-Each crate owns one part of the engine (see `AGENTS.md` for the map), and
-dependencies point down: `dirk_utils`, `dirk_threads`, `dirk_proc` and
-`dirk_build` at the bottom, then `dirk_events` and `dirk_universe`,
-`dirk_engine`, the feature crates (`dirk_assets`, `dirk_platform`,
-`dirk_input`, `dirk_world`, `dirk_player`), and `dirk_renderer` and
-`dirk_editor` on top. Never add a dependency that points up.
+Libraries live in `crates/` and binaries in `apps/`; the root `Cargo.toml` is
+a virtual workspace. Each crate owns one part of the engine (see `AGENTS.md`
+for the map), and dependencies point down: `dirk_utils`, `dirk_threads`,
+`dirk_proc` and `dirk_build` at the bottom, then `dirk_events` and
+`dirk_universe`, `dirk_engine`, the feature crates (`dirk_assets`,
+`dirk_platform`, `dirk_input`, `dirk_world`, `dirk_player`), and
+`dirk_renderer` and `dirk_editor` on top, and the `dirkengine` binary in
+`apps/` above them all. Never add a dependency that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
 `deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in

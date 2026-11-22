@@ -6,10 +6,11 @@ default: validate
 # Formats the sources, then runs every check CI runs.
 validate: fmt lint test test-minimal doc doc-test audit unused
 
-# Runs the engine; arguments go on to its CLI.
+# Runs the engine from the workspace root, where it finds `assets/` and writes
+# `saved/`; arguments go on to its CLI.
 [positional-arguments]
 run *ARGS:
-    @cargo run --locked -- "$@"
+    @cargo run --locked -p dirkengine -- "$@"
 
 build:
     @cargo build --locked --workspace
@@ -31,7 +32,7 @@ lint:
     set -euo pipefail
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     cargo clippy --locked --workspace --exclude dirk_editor --all-targets --no-default-features -- -D warnings
-    for manifest in crates/*/Cargo.toml; do
+    for manifest in apps/*/Cargo.toml crates/*/Cargo.toml; do
         cargo clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings
     done
 

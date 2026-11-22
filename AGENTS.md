@@ -2,8 +2,10 @@
 
 A pure Rust Vulkan game engine. Plugins (`EnginePlugin`) configure an
 `EngineBuilder`; the subsystems they register are started, ticked and shut
-down by the engine loop. The root package is the `dirkengine` binary;
-everything else is a crate in `crates/`:
+down by the engine loop. The root `Cargo.toml` is a virtual workspace:
+libraries live in `crates/` and binaries in `apps/`. The `dirkengine` binary
+is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
+`src/cli.rs` the CLI); every other member is a crate in `crates/`:
 
 - `dirk_engine`: the engine, its builder, plugins, subsystems, resources and
   the editor's dock and commands.
@@ -71,9 +73,10 @@ uses it too. Before anything destructive, ask what else it touches.
   the nightly toolchains rustup lists. The renderer's build script installs a
   pinned nightly and compiles rust-gpu's codegen backend into that cache once
   per rust-gpu version, which takes minutes; every worktree shares them.
-- Run the engine from the worktree's root. It finds `assets/` and writes logs
-  to `saved/logs` relative to the current directory, so running it from
-  another checkout reads and writes that checkout's files. `saved/` is
+- Run the engine from the worktree's root (`just run` or `cargo run`, not from
+  `apps/dirkengine`). It finds `assets/` and writes logs to `saved/logs`
+  relative to the current directory, so running it from another checkout reads
+  and writes that checkout's files. `saved/` is
   ignored by git: never commit or delete another checkout's.
 - Running the engine opens a window and needs a Vulkan device; debug builds
   also need the Khronos validation layer (see the README). Tests never need a
@@ -130,8 +133,9 @@ the exact command that failed and why.
 
 Before handing back a feature, walk this list and say which entries applied:
 
-- Its plugin is registered in `DefaultPlugins` (`src/lib.rs`), and in the CLI
-  (`src/cli.rs`) and the root README's example, which repeat the list.
+- Its plugin is registered in `DefaultPlugins` (`apps/dirkengine/src/lib.rs`),
+  and in the CLI (`apps/dirkengine/src/cli.rs`) and the root README's example,
+  which repeat the list.
 - It works with the `editor` feature and without it; an editor window or
   command sits behind the feature.
 - Its input goes through `dirk_input` bindings, and its events are
