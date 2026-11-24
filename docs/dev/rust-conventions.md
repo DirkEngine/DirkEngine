@@ -94,6 +94,24 @@ Tests prove one behaviour each, named for it, and assert the outcome. The
 renderer's GPU code has no tests that need a device; test the logic around it,
 such as the frame graph's barriers, without one.
 
+Write a test at the lowest layer that fails without the change, once, not
+again in each caller. When a test or table already covers the behaviour, add
+a row or an assertion to it rather than a new test. A fix to logic, data or
+state comes with a test written first, which fails without the fix; a purely
+visual fix, such as spacing or colour, is shown with before and after
+screenshots in the pull request instead. An `#[ignore]` says why. Don't write
+smoke tests that only check something loads, or tests that a removed feature
+stays removed.
+
+Tests wait for events, not time. Never sleep to let something happen, assert
+on elapsed time, or poll until something is ready: await the channel,
+notification or state change that marks it, such as `Consumer::consume` or an
+`AssetLoad`. To move Tokio time, enable Tokio's `test-util` feature for the
+crate's tests and use `#[tokio::test(start_paused = true)]`.
+A timeout on that wait only guards against a hang. A wait with nothing to
+await, such as on a subprocess or on Tokio's runtime shutdown, says why on the
+line above: `// wall-clock: <why>`.
+
 Every item has a doc comment saying what it is for and anything not obvious
 from its signature. Each crate's README is its crate documentation
 (`#![doc = include_str!("../README.md")]`), and rustdoc warnings fail CI.
