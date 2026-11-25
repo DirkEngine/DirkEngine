@@ -1,7 +1,8 @@
 # Continuous integration for DirkEngine. Each step runs a `just` recipe, so
 # `just validate` checks locally what CI checks, and `just check-changed` what
-# a change needs. `ci` is the single status to require: it fails if any job
-# failed and passes when the rest succeeded or were skipped.
+# a change needs. `ci` fails if any job failed and passes when the rest
+# succeeded or were skipped. It is one of the two checks to require, with
+# pr.yml's `standard / pr-checks`, and the merge queue waits for both.
 
 # Pull requests run only the jobs their changes can affect (see `changes`),
 # and drafts skip macOS, the slowest runner, until marked ready. Pushes to
