@@ -67,7 +67,6 @@ enforce-lint-exceptions = false
 # adopted the standard; `cargo xtask standard --fix` drops each file once it
 # complies.
 [deviations]
-skills-synced = "7 findings: the shared skills are synced in the adoption stack's third pull request"
 rust-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 doc-length = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 config-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
@@ -102,5 +101,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 170 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 189 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]

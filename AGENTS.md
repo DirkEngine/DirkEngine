@@ -73,25 +73,37 @@ uses it too. Before anything destructive, ask what else it touches.
 - Never delete `~/.cache/rust-gpu` (`~/Library/Caches/rust-gpu` on macOS) or
   the nightly toolchains rustup lists. The renderer's build script installs a
   pinned nightly and compiles rust-gpu's codegen backend into that cache once
-  per rust-gpu version, which takes minutes; every worktree shares them.
+  per rust-gpu version, which takes minutes; every worktree shares them. Two
+  shader builds at once can race on the target spec under
+  `target/spirv-builder`, failing with "error loading target specification:
+  EOF while parsing": rerun before calling it a failure.
 - Run the engine from the worktree's root (`just run` or `cargo run`, not from
   `apps/dirkengine`). It finds `assets/` and writes logs to `saved/logs`
   relative to the current directory, so running it from another checkout reads
   and writes that checkout's files. `saved/` is
   ignored by git: never commit or delete another checkout's.
 - Running the engine opens a window and needs a Vulkan device; debug builds
-  also need the Khronos validation layer (see the README). Tests never need a
-  GPU or a window, since CI can't count on either: test the logic around GPU
-  code, as the frame graph's tests do.
+  also need the Khronos validation layer (see the README). Where the loader or
+  the layer isn't installed system-wide, point `LD_LIBRARY_PATH` at the loader
+  and `VK_ADD_LAYER_PATH` at the layer. Tests never need a GPU or a window,
+  since CI can't count on either: test the logic around GPU code, as the frame
+  graph's tests do.
 - Don't set `RUSTFLAGS`: it replaces the `.cargo/config.toml` rustflags that
   set the `platform_*` cfgs. macOS-only code then silently compiles out: the
   build passes and the engine fails at run time on MoltenVK.
 
 ## Conventions
 
-Follow `docs/dev/rust-conventions.md`, which applies the shared
-[engineering standard](https://gist.github.com/PiquelChips/04330e52c03efbe9ce4c889c88673a27)
-to DirkEngine, and the style of neighbouring code. Clippy enforces most rules
+The engineering standard is the `sourceorigin-standard` crate, whose README
+lists its rules: `just standard` checks them, and the `standard` skill says
+how to fix a violation or challenge a rule. DirkEngine keeps its comments:
+`rust-comments`, `doc-length` and `config-comments` are switched off in
+`standard.toml`. The synced `docs` skill's doc-comment rules and the
+`cleanup` skill's check for doc comments that narrate or justify (item 12 of
+its `references/checks.md`) don't apply to DirkEngine's existing comments,
+which agents must not trim or rewrite. Follow `docs/dev/rust-conventions.md`
+for what is particular to DirkEngine, and the style of neighbouring code.
+Clippy enforces most rules
 (`[workspace.lints]` in `Cargo.toml`, `clippy.toml`), and `deny.toml` keeps
 `ash`, `winit` and `egui` behind the crates that wrap them.
 
@@ -128,6 +140,11 @@ Code behind a feature (`editor`, `cli`, `egui`) must build and pass its tests
 both with every feature and with none (`just lint`, `just test`,
 `just test-minimal`). Mixed sets, such as `editor` without `cli`, aren't
 checked: build them yourself when you change that code.
+
+macOS-only code (`platform_macos`) compiles only for Apple targets, and draft
+CI skips macOS. When you change it, run `cargo clippy --locked --target
+aarch64-apple-darwin -p <crate> --all-features -- -D warnings`, and say in the
+pull request what to run on a Mac before merging, such as `just run`.
 
 If a step can't run, such as for a missing tool or system dependency, report
 the exact command that failed and why.
@@ -167,4 +184,6 @@ slowest runner. Mark them ready for review to run the full matrix.
 ## Documentation
 
 Each crate's README is its crate documentation. Update it, the doc comments
-and `docs/` in the same pull request as the change they describe.
+and `docs/` in the same pull request as the change they describe; the `docs`
+skill says how. `docs/` holds loose Markdown pages, with no book to build, and
+`just doc` checks the rustdoc with warnings denied.

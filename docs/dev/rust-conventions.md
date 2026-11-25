@@ -1,8 +1,10 @@
 # Rust conventions
 
-DirkEngine follows the shared
-[engineering standard](https://gist.github.com/PiquelChips/04330e52c03efbe9ce4c889c88673a27),
-also used by piqueld and sourceorigin. This page applies it to the engine.
+DirkEngine follows the shared engineering standard,
+[sourceorigin-standard](https://crates.io/crates/sourceorigin-standard), also
+used by piqueld and sourceorigin. `just standard` checks its rules, and
+`standard.toml` lists where DirkEngine departs from one, with its reason. This
+page holds what DirkEngine adds that no rule checks.
 Keep implementations simple, follow neighbouring modules, and share repeated
 logic instead of copying it.
 
@@ -87,11 +89,8 @@ belongs on the type that owns it, as a method; free functions are for small
 helpers with no owner. Use macros (`dirk_proc`, or `macro_rules!` like the
 renderer's descriptor sets) for repeated boilerplate.
 
-## Modules, tests and docs
+## Tests and docs
 
-A module with children is `foo/mod.rs`. Unit tests live in
-`#[cfg(test)] mod tests;` with a sibling `tests.rs`; a block of 30 lines or
-fewer may stay inline. Move a long inline test module out when you change it.
 Tests prove one behaviour each, named for it, and assert the outcome. The
 renderer's GPU code has no tests that need a device; test the logic around it,
 such as the frame graph's barriers, without one.
