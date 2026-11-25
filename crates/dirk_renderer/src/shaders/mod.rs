@@ -1,5 +1,7 @@
 //! Compiled shader blobs used by the renderer.
 
+#![expect(unsafe_code, reason = "Shader modules are created through ash.")]
+
 macro_rules! shader_code {
     ($name:literal) => {
         ShaderCode {

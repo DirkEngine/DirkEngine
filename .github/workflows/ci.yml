@@ -1,26 +1,12 @@
-# Continuous integration for DirkEngine.
-#
-#   checks -> formatting, unused dependencies and the dependency audit,
-#             which compile nothing
-#   rust   -> clippy on every target (tests included), tests, and the debug
-#             build, with every feature and with no default features, on
-#             Linux and macOS (the platform layer differs); Linux also runs
-#             the doc tests and builds the docs with warnings denied
-#
-# Each step runs a `just` recipe, so `just validate` checks locally what CI
-# checks.
-#
-# Each job compiles once and reuses it for every step. Pull requests run only
-# when their changes can affect the result (see `changes`), and draft pull
-# requests skip macOS, the slowest runner, until they are marked ready. Pushes
-# to main and manual runs run everything. `ci` is the single status to
-# require: it fails if any job failed and passes when the rest succeeded or
-# were skipped. deny.yml audits new advisories weekly.
-#
-# `merge_group` runs the full CI on the merge queue's temporary branch, so
-# `main` can require a merge queue and `ci` together. The queue's runs are
-# neither pull requests nor drafts, so they run every job on both platforms.
-#
+# Continuous integration for DirkEngine. Each step runs a `just` recipe, so
+# `just validate` checks locally what CI checks, and `just check-changed` what
+# a change needs. `ci` is the single status to require: it fails if any job
+# failed and passes when the rest succeeded or were skipped.
+
+# Pull requests run only the jobs their changes can affect (see `changes`),
+# and drafts skip macOS, the slowest runner, until marked ready. Pushes to
+# main, the merge queue (`merge_group`) and manual runs run every job.
+
 # Caches are saved from main only. Pull requests restore main's caches, so a
 # branch never evicts them with copies no other branch can read.
 
@@ -49,15 +35,14 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
-  # Decides which jobs a pull request needs from the paths it changes, and
-  # holds macOS back while it is a draft. A file matches a filter only when it
-  # matches every pattern, so anything outside the listed docs runs `rust`;
-  # `deny` therefore uses one pattern.
+  # Decides which jobs a pull request needs from the paths it changes, by the
+  # filters of .github/filters.yml, and holds macOS back while it is a draft.
   changes:
     name: changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
@@ -65,21 +50,16 @@ jobs:
       platforms: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]' }}
     steps:
       - if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - if: github.event_name == 'pull_request'
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           predicate-quantifier: every
-          filters: |
-            rust:
-              - '**'
-              - '!docs/**'
-              - '!AGENTS.md'
-              - '!LICENSE'
-              - '!t3.json'
-              - '!.gitignore'
-            deny:
-              - '{Cargo.toml,**/Cargo.toml,Cargo.lock,deny.toml,.github/workflows/**}'
+          filters: .github/filters.yml
 
+  # Formatting, unused dependencies and, when the dependencies change, the
+  # audit, which compile nothing. deny.yml also audits weekly.
   checks:
     name: checks
     needs: changes
@@ -96,8 +76,9 @@ jobs:
       - if: needs.changes.outputs.deny == 'true'
         run: just audit
 
-  # Clippy runs first so lint failures report early; the tests then reuse the
-  # dependencies it compiled for build scripts and proc macros.
+  # Clippy, the tests and the debug build, with every feature and with none,
+  # on Linux and macOS (the platform layer differs). Clippy runs first so lint
+  # failures report early; the tests reuse what it compiled.
   rust:
     name: rust (${{ matrix.os }})
     needs: changes
@@ -129,7 +110,7 @@ jobs:
         run: just doc
       - name: Bundle debug build and runtime assets
         run: |
-          cargo build --workspace --locked
+          just build
           mkdir -p dist/dirkengine
           cp target/debug/dirkengine dist/dirkengine/
           cp -R assets dist/dirkengine/assets
@@ -139,6 +120,22 @@ jobs:
           name: dirkengine-debug-${{ matrix.os }}
           path: dist/dirkengine-debug.tar.gz
 
+  # The engineering standard's rules, on every change: they read more than the
+  # Rust sources, such as standard.toml, the workflows and the Markdown.
+  standard:
+    name: standard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: just
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: just standard
+
   ci:
     name: ci
     if: always()
@@ -146,6 +143,7 @@ jobs:
       - changes
       - checks
       - rust
+      - standard
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

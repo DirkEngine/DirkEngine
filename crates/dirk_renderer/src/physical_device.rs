@@ -1,3 +1,8 @@
+#![expect(
+    unsafe_code,
+    reason = "Choosing a physical device queries Vulkan through ash."
+)]
+
 use ash::{khr::surface, vk};
 
 pub struct PhysicalDeviceInfo {

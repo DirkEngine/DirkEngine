@@ -1,3 +1,8 @@
+#![expect(
+    unsafe_code,
+    reason = "Pipelines and their layouts are created through ash."
+)]
+
 use std::marker::PhantomData;
 
 use ash::vk;

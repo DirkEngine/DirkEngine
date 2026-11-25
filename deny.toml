@@ -22,12 +22,11 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # directly; a transitive one is its dependent's to replace. cargo-deny 0.22
 # made this the default, and setting it keeps older releases in agreement.
 unmaintained = "workspace"
+# wayland-scanner 0.31.10 pins quick-xml to ^0.39, below the fixed 0.41
+# release.
 ignore = [
-    # wayland-scanner 0.31.10 pins quick-xml to ^0.39, below the fixed 0.41
-    # release. The vulnerable parser is used by Wayland code generation through
-    # winit's Linux backend rather than on engine runtime input.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml parses only the Wayland protocol files winit's Linux backend generates code from, never engine input" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml parses only the Wayland protocol files winit's Linux backend generates code from, never engine input" },
 ]
 
 [licenses]
@@ -109,6 +108,7 @@ skip = []
 # Like skip but with entire direct & transitive dependency tree of crate
 skip-tree = [
     { crate = "winit", reason = "depends on platform specific libraries that update very frequently" },
+    { crate = "xtask", reason = "development tooling only: sourceorigin-standard needs newer toml and serde_spanned than the ones rust-gpu's cargo-gpu-install pins" },
 ]
 
 [sources]

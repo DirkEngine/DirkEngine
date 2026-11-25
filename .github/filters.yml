@@ -1,0 +1,14 @@
+# Path filters for CI's `changes` job (.github/workflows/ci.yml), which
+# dorny/paths-filter matches with picomatch globs, dotfiles included. A file
+# matches a filter only when it matches every pattern (`predicate-quantifier:
+# every`), so anything outside the listed docs runs `rust`, and `deny` uses
+# one pattern. `just check-changed` reads them too.
+rust:
+  - '**'
+  - '!docs/**'
+  - '!AGENTS.md'
+  - '!LICENSE'
+  - '!t3.json'
+  - '!.gitignore'
+deny:
+  - '{Cargo.toml,**/Cargo.toml,Cargo.lock,deny.toml,.github/workflows/**}'

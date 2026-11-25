@@ -5,7 +5,8 @@ A pure Rust Vulkan game engine. Plugins (`EnginePlugin`) configure an
 down by the engine loop. The root `Cargo.toml` is a virtual workspace:
 libraries live in `crates/` and binaries in `apps/`. The `dirkengine` binary
 is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
-`src/cli.rs` the CLI); every other member is a crate in `crates/`:
+`src/cli.rs` the CLI), and `xtask` is `tools/xtask`, the development tasks
+`cargo xtask` runs; every other member is a crate in `crates/`:
 
 - `dirk_engine`: the engine, its builder, plugins, subsystems, resources and
   the editor's dock and commands.
@@ -119,7 +120,9 @@ Before handing back a change that spans crates or touches the workspace,
 run `just validate` (or `just` alone): it formats the sources and runs every
 check CI runs, through the same recipes. `just lint` runs Clippy with
 `--all-targets -- -D warnings` with every feature, with no default features
-and on each crate alone.
+and on each crate alone. `just check-changed` runs only the checks a branch's
+changes since `origin/main` need, and `just standard` the engineering
+standard's rules, which CI checks on every change.
 
 Code behind a feature (`editor`, `cli`, `egui`) must build and pass its tests
 both with every feature and with none (`just lint`, `just test`,

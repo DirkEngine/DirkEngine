@@ -14,7 +14,7 @@
     },
     {
       "name": "Check Workspace",
-      "command": "cargo check --locked --workspace --all-targets --all-features",
+      "command": "just check",
       "icon": "build"
     },
     {
