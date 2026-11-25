@@ -136,7 +136,6 @@ impl UniverseWindows {
         };
         entities.sort_by_key(|(entity, _)| entity.raw());
 
-        // Virtualized rows must stay one line tall, including with custom fonts.
         let row_height = ui.spacing().interact_size.y.max(
             ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
         );

@@ -502,8 +502,6 @@ impl EditorServices {
             style.apply(ctx);
         }
 
-        // Editor callbacks dispatch engine commands and input, so run them
-        // only once per frame even if a widget requests another layout pass.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::MIN);
         let mut result = Ok(());
         let output = ctx.run_ui(input, |ui| {
@@ -542,13 +540,10 @@ impl EditorServices {
 
         let (windows, mut dock_state) = {
             let mut state = self.state.lock();
-            // Apply commands queued by menus even if a menu failed.
             state.apply_commands(command_receiver.try_iter());
             menu_result?;
             state.bootstrap_default_dock_layout();
             state.sync_dock_tabs_with_open_windows();
-            // Render from the stored layout without holding the lock. Changes
-            // made to the placeholder by callbacks are reconciled below.
             let dock_state = std::mem::replace(&mut state.dock_state, DockState::new(Vec::new()));
             (state.windows.clone(), dock_state)
         };
@@ -571,8 +566,6 @@ impl EditorServices {
             }
         }
         state.dock_state = dock_state;
-        // Callbacks may have added or removed windows while the snapshot was
-        // rendered. Reconcile those changes before applying open commands.
         let new_viewport = state.windows.iter().any(|window| {
             window.descriptor.category == VIEWPORT_CATEGORY
                 && !windows.iter().any(|rendered| rendered.id == window.id)

@@ -61,15 +61,8 @@ enforce-lint-exceptions = false
 # Each deviation lists the files its findings were in when DirkEngine adopted
 # the standard; `cargo xtask standard --fix` drops each file once it complies.
 [deviations.rust-comments]
-reason = "190 findings: those in the files the open pull requests #72, #104, #106 and #133 rewrite or delete end with those pull requests; the rest are fixed in a follow-up"
+reason = "139 findings: those in the files the open pull requests #72, #104, #106 and #133 rewrite or delete end with those pull requests; the rest are fixed in a follow-up"
 paths = [
-    # Fixed in a follow-up.
-    "crates/dirk_assets/src/tests.rs",
-    "crates/dirk_editor/src/universe.rs",
-    "crates/dirk_engine/src/editor/mod.rs",
-    "crates/dirk_engine/src/editor/tests.rs",
-    "crates/dirk_engine/src/lib.rs",
-    "crates/dirk_engine/tests/signal_handling.rs",
     "crates/dirk_input/src/egui.rs",
     "crates/dirk_platform/src/handler.rs",
     "crates/dirk_platform/src/window.rs",

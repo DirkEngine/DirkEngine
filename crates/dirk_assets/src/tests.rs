@@ -2,27 +2,10 @@
 //! `asset_type`, `model_config`, `errors`, `handle`, `dirk_asset_validation`
 //! and `registry`, whose tests use their own temporary asset roots.
 
-// ── bring the entire crate into scope ────────────────────────────────────────
 use super::{
-    // public
-    Asset,
-    AssetConfig,
-    AssetHandle,
-    AssetLoad,
-    AssetLoaded,
-    AssetRegistry,
-    AssetType,
-    AssetUnloaded,
-    DirkAsset,
-    Error,
-    Handle,
-    Metadata,
-    Model,
-    ModelConfig,
-    Result,
-    // pub(crate)
-    events::InternalAssetUnloaded,
-    handle::AssetRef,
+    Asset, AssetConfig, AssetHandle, AssetLoad, AssetLoaded, AssetRegistry, AssetType,
+    AssetUnloaded, DirkAsset, Error, Handle, Metadata, Model, ModelConfig, Result,
+    events::InternalAssetUnloaded, handle::AssetRef,
 };
 
 use dirk_events::{Consumer, Event, EventManager};
@@ -33,10 +16,6 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared test helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A minimal valid glTF 2.0 document accepted by the `gltf` crate.
 fn minimal_gltf_json() -> &'static str {
@@ -122,7 +101,6 @@ impl Asset for FakeAsset {
     }
 
     fn asset_type() -> AssetType {
-        // Use Unknown so this fake type never conflicts with real registry entries.
         AssetType::Unknown
     }
 }
@@ -139,10 +117,6 @@ fn fake_handle(value: u32, raw_path: &str) -> Handle<FakeAsset> {
     );
     Handle::new(asset_ref)
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AssetHandle
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod asset_handle {
@@ -181,7 +155,6 @@ mod asset_handle {
     #[test]
     fn dir_ends_with_parent_directory() {
         let h = AssetHandle::from_raw("models/hero.dirkasset", AssetType::Model);
-        // dir() = ASSETS_PATH / models
         assert!(h.dir().ends_with("models"));
     }
 
@@ -194,7 +167,6 @@ mod asset_handle {
     #[test]
     fn path_dir_relationship_is_consistent() {
         let h = AssetHandle::from_raw("a/b.dirkasset", AssetType::Model);
-        // dir() must be the parent of path()
         assert_eq!(
             h.dir(),
             h.path()
@@ -273,10 +245,6 @@ mod asset_handle {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AssetType
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod asset_type {
     use super::*;
@@ -289,7 +257,7 @@ mod asset_type {
     #[test]
     fn copy_semantics() {
         let a = AssetType::Model;
-        let b = a; // Copy, not move
+        let b = a;
         assert_eq!(a, b);
     }
 
@@ -354,10 +322,6 @@ mod asset_type {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ModelConfig
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod model_config {
     use super::*;
@@ -390,28 +354,22 @@ mod model_config {
 
     #[test]
     fn validate_returns_true_when_gltf_file_exists() {
-        // When the gltf path is absolute, handle.dir().join(abs) == abs path,
-        // so we can test the success branch by writing a real temp file.
         let dir = TempDir::new().expect("a temporary directory should be created");
         let gltf_path = dir.path().join("cube.gltf");
         fs::write(&gltf_path, minimal_gltf_json())
             .expect("the temporary asset file should be writable");
 
         let config = ModelConfig {
-            // Absolute path: join() returns the absolute path unchanged.
             gltf: gltf_path.to_string_lossy().into_owned(),
         };
-        // handle.dir() will be ASSETS_PATH; joining an absolute path ignores it.
         assert!(config.validate(&make_meta("")));
     }
 
     #[test]
     fn validate_emits_warning_for_missing_file() {
-        // Regression: validate must not panic even with an empty handle path.
         let config = ModelConfig {
             gltf: "no_such_file.gltf".to_string(),
         };
-        // Should return false gracefully (warning is emitted via tracing, not panics).
         let _ = config.validate(&make_meta(""));
     }
 
@@ -425,10 +383,6 @@ mod model_config {
         assert_eq!(a.gltf, "file.gltf");
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Error types
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod errors {
@@ -513,15 +467,9 @@ mod errors {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Handle<T>
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod handle {
     use super::*;
-
-    // ── get ──────────────────────────────────────────────────────────────────
 
     #[test]
     fn get_returns_correct_value() {
@@ -536,7 +484,6 @@ mod handle {
     fn get_is_non_destructive_on_first_call() {
         let h = fake_handle(7, "test.dirkasset");
         h.get().expect("the asset should not be taken yet");
-        // Second call must still succeed.
         assert_eq!(h.get().expect("the asset should not be taken yet").value, 7);
     }
 
@@ -557,8 +504,6 @@ mod handle {
             Error::AlreadyTaken
         ));
     }
-
-    // ── take ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn take_returns_correct_value() {
@@ -581,8 +526,6 @@ mod handle {
 
     #[test]
     fn take_is_destructive_across_clones() {
-        // Both handle and its clone share the same inner Arc<Mutex<AssetRef>>.
-        // Taking via one should make the data unavailable via the other.
         let h = fake_handle(5, "test.dirkasset");
         let clone = h.clone();
         clone.take().expect("the asset should not be taken yet");
@@ -600,7 +543,6 @@ mod handle {
         let h = fake_handle(3, "test.dirkasset");
         let clone = h.clone();
         h.get().expect("the asset should not be taken yet");
-        // Clone can still get the data.
         assert_eq!(
             clone
                 .get()
@@ -609,8 +551,6 @@ mod handle {
             3
         );
     }
-
-    // ── clone ────────────────────────────────────────────────────────────────
 
     #[test]
     fn clone_shares_inner_data() {
@@ -638,8 +578,6 @@ mod handle {
             );
         }
     }
-
-    // ── drop event ───────────────────────────────────────────────────────────
 
     #[test]
     fn drop_of_sole_handle_fires_internal_unloaded_event() {
@@ -692,7 +630,7 @@ mod handle {
             "one clone still alive"
         );
 
-        drop(h3); // last reference
+        drop(h3);
         assert_eq!(
             unloads_before_sentinel(&events, &mut consumer).len(),
             1,
@@ -716,8 +654,6 @@ mod handle {
         assert_eq!(ev.handle, expected);
     }
 
-    // ── Debug ─────────────────────────────────────────────────────────────────
-
     #[test]
     fn debug_output_includes_asset_path() {
         let h = fake_handle(0, "models/debug_test.dirkasset");
@@ -731,14 +667,9 @@ mod handle {
     #[test]
     fn debug_does_not_require_mutable_access() {
         let h = fake_handle(0, "test.dirkasset");
-        // Should compile and run without locking the inner mutex for a write.
         let _ = format!("{h:?}");
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DirkAsset validation
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod dirk_asset_validation {
@@ -758,8 +689,6 @@ mod dirk_asset_validation {
         }
     }
 
-    // ── Unknown type ──────────────────────────────────────────────────────────
-
     #[test]
     fn unknown_type_is_rejected() {
         let asset = DirkAsset {
@@ -771,7 +700,6 @@ mod dirk_asset_validation {
 
     #[test]
     fn unknown_type_with_model_section_is_still_rejected() {
-        // The model section is irrelevant when the type is Unknown.
         let asset = DirkAsset {
             meta: unknown_meta(),
             model: Some(ModelConfig {
@@ -780,8 +708,6 @@ mod dirk_asset_validation {
         };
         assert!(!asset.validate());
     }
-
-    // ── Model type ────────────────────────────────────────────────────────────
 
     #[test]
     fn model_without_model_section_is_rejected() {
@@ -810,8 +736,6 @@ mod dirk_asset_validation {
         fs::write(&gltf_path, minimal_gltf_json())
             .expect("the temporary asset file should be writable");
 
-        // Use the absolute path as the gltf value so that
-        // handle.dir().join(abs_path) == abs_path regardless of ASSETS_PATH.
         let asset = DirkAsset {
             meta: model_meta(""),
             model: Some(ModelConfig {
@@ -829,13 +753,9 @@ mod dirk_asset_validation {
                 gltf: "missing.gltf".to_string(),
             }),
         };
-        // Should return false, not panic.
         assert!(!asset.validate());
     }
 }
-
-// AssetRegistry — isolated integration tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod registry {
@@ -885,9 +805,6 @@ mod registry {
         /// Waits for the next unload, ticks `registry` to process it, and
         /// returns the event the tick emits.
         fn next(&mut self, registry: &AssetRegistry) -> AssetUnloaded {
-            // The registry is the topic's first subscriber and never
-            // unsubscribes, so routing reaches it before this one, and its
-            // tick finds the event this one received.
             drop(next_event(&mut self.internal));
             registry.tick();
             next_event(&mut self.public)
@@ -994,8 +911,6 @@ mod registry {
         let second =
             wait_for_load(registry.load_asset::<Model>(id)).expect("the asset should load");
         assert_eq!(first.generation(), second.generation());
-        // Loaded events share one ordered producer queue, so a duplicate
-        // event for `second` would arrive before the sentinel's event.
         let _sentinel =
             wait_for_load(registry.load_asset::<Model>(sentinel)).expect("the asset should load");
         assert_eq!(&next_event(&mut loaded).handle.handle(), sentinel);
@@ -1040,8 +955,6 @@ mod registry {
                 })
             })
             .collect::<Vec<_>>();
-        // One load holds the asset's lock, held up by the gate before it can
-        // cache anything, and the other waits for it.
         wait(registry.inner.load_waits.notified());
         drop(gate);
         let handles = threads
@@ -1086,7 +999,6 @@ mod registry {
         let (_root, events, registry, id) = registry_with_model("reloaded");
         let mut unloads = Unloads::subscribe(&events);
 
-        // Every cycle drops the last asset and with it every unload dispatcher.
         for _ in 0..2 {
             let handle =
                 wait_for_load(registry.load_asset::<Model>(&id)).expect("the asset should load");

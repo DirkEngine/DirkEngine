@@ -23,8 +23,6 @@ fn default_engine_does_not_change_host_signal_disposition() -> anyhow::Result<()
 
     let mut child = SignalTestChild::spawn("signal_test_child_drops_default_engine")?;
 
-    // Only signal once the engine has been created and dropped; otherwise the
-    // test would pass without exercising the engine at all.
     child.wait_for_message(CHILD_READY)?;
     child.send_signal("TERM")?;
     let status = child.wait_for_exit()?;
@@ -81,7 +79,6 @@ fn second_sigint_terminates_process_with_default_signal_handler() -> anyhow::Res
     child.wait_for_message(CHILD_READY)?;
     child.send_signal("INT")?;
 
-    // Only interrupt again once the first signal has reached graceful shutdown.
     child.wait_for_message(CHILD_SHUTTING_DOWN)?;
 
     child.send_signal("INT")?;
@@ -181,7 +178,6 @@ impl SignalTestChild {
 
 impl Drop for SignalTestChild {
     fn drop(&mut self) {
-        // Reap the subprocess even when an assertion or readiness check fails.
         if !matches!(self.process.try_wait(), Ok(Some(_))) {
             let _ = self.process.kill();
             let _ = self.process.wait();

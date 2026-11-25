@@ -809,7 +809,6 @@ fn editor_frame_cancels_text_selection_and_drag_payload_on_escape() -> anyhow::R
     };
     render_services_with_input(&services, &ctx, &universe, input(Vec::new(), 0.0))?;
     let pos = label_rect.lock().center();
-    // Double-click a real editor label to create a text selection.
     for (time, pressed) in [(0.05, true), (0.1, false), (0.15, true), (0.2, false)] {
         render_services_with_input(
             &services,
@@ -832,8 +831,6 @@ fn editor_frame_cancels_text_selection_and_drag_payload_on_escape() -> anyhow::R
     let selection = ctx.plugin::<egui::text_selection::LabelSelectionState>();
     assert!(selection.lock().has_selection());
 
-    // Drag cancellation consumes Escape at the beginning of the pass, so
-    // exercise it independently from text selection's end-of-pass cleanup.
     for dragging in [false, true] {
         if dragging {
             egui::DragAndDrop::set_payload(&ctx, "editor payload");
@@ -1020,7 +1017,6 @@ fn failing_menu_still_applies_queued_commands() {
         egui::Pos2::ZERO,
         egui::vec2(800.0, 600.0),
     ));
-    // Click the menu button so the menu contents render on a later pass.
     let menu_button = egui::pos2(12.0, 10.0);
     let passes = [
         Vec::new(),

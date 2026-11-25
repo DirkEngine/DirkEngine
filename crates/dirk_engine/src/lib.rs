@@ -261,8 +261,6 @@ impl Engine {
 
         if let Err(err) = &result {
             self.lifecycle = EngineLifecycle::Failed;
-            // The typed error goes to the caller; keep a report of it so
-            // `take_error` observes the failure like any other terminal error.
             self.request_exit(Some(error_report(err)));
             return result;
         }
