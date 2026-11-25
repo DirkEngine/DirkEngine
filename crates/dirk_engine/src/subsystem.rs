@@ -1,20 +1,11 @@
-//! Runtime subsystem lifecycle API.
+//! Runtime subsystem lifecycle API. The engine owns subsystems once
+//! [`EngineBuilder`] has built the core runtime, and its loop starts, ticks and
+//! shuts them down; plugins only configure the builder.
 //!
-//! Subsystems are objects owned by the engine after [`EngineBuilder`] has
-//! finished building the core runtime. They are distinct from plugins: plugins
-//! configure the builder, while subsystems are started, ticked, and shut down by
-//! the engine loop.
-//!
-//! Plugins may depend on other plugins by calling
-//! [`EngineBuilder::with_plugin`] from [`EnginePlugin::build`]. That call is
-//! idempotent by concrete plugin type, so shared dependencies can be requested
-//! by every plugin that needs them.
-//!
-//! Subsystem factories receive an [`EngineBuildContext`]. A factory should
-//! publish an [`EngineResource`] when later subsystem factories need a stable,
-//! cloneable handle to something the subsystem creates. The subsystem remains
-//! the owner of mutable runtime state; resources are build-time discovery
-//! handles and may use interior synchronization when shared access is needed.
+//! Subsystem factories receive an [`EngineBuildContext`]. A factory publishes
+//! an [`EngineResource`], a cloneable build-time handle, when later factories
+//! need to find something its subsystem creates; the subsystem still owns its
+//! mutable state.
 //!
 //! [`EngineBuildContext`]: crate::EngineBuildContext
 

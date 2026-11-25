@@ -108,39 +108,28 @@ impl EngineBuilder {
         self
     }
 
-    /// Opts into process-wide SIGINT and termination handling.
+    /// Opts into process-wide SIGINT and termination handling, off by default.
     ///
-    /// Disabled by default: [`Engine::new`] and a plain builder leave the
-    /// process's signal disposition untouched, so Ctrl-C keeps its default
-    /// behavior and terminates the process without running engine shutdown.
-    /// Applications that want Ctrl-C to request a graceful shutdown must call
-    /// `with_os_signals(true)`; a second signal then terminates the process
-    /// immediately.
-    ///
-    /// The host application should enable this only when the engine owns its
-    /// signal policy for the process lifetime. `signal-hook` cannot restore the
-    /// previous disposition after the engine is dropped. Window close events
-    /// are handled separately and do not require this option.
+    /// Without it, Ctrl-C terminates the process without engine shutdown. With
+    /// it, Ctrl-C requests a graceful shutdown and a second signal terminates
+    /// the process. Enable it only when the engine owns the signal policy for
+    /// the process lifetime: `signal-hook` cannot restore the previous
+    /// disposition once the engine is dropped. Window close events are handled
+    /// separately.
     pub fn with_os_signals(&mut self, enabled: bool) -> &mut Self {
         self.handle_os_signals = enabled;
         self
     }
 
     /// Registers a plugin with the builder, unless this concrete plugin type
-    /// has already been registered.
-    ///
-    /// Plugins may call this method from their own [`EnginePlugin::build`]
-    /// implementation to declare dependencies. The builder uses
-    /// [`TypeId::of::<P>`] for idempotency, so a second registration of the
-    /// same concrete plugin type is skipped even if it was requested by a
-    /// different plugin.
+    /// was already registered, whoever requested it. Plugins call it from
+    /// [`EnginePlugin::build`] to declare dependencies.
     ///
     /// # Errors
     ///
     /// Returns [`Error::PluginBuildFailed`] if the plugin fails to register its
-    /// build-time pieces. A failed registration makes the builder unusable:
-    /// plugin callbacks may have already changed it, and retrying would retain
-    /// those partial changes.
+    /// build-time pieces, which leaves the builder unusable: plugin callbacks
+    /// may already have changed it.
     pub fn with_plugin<P>(&mut self, plugin: P) -> Result<&mut Self>
     where
         P: EnginePlugin + 'static,

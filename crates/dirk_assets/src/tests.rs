@@ -1,37 +1,6 @@
-//! Comprehensive tests for the `assets` crate.
-//!
-//! # Test organisation
-//!
-//! | Module | What is covered |
-//! |--------|-----------------|
-//! | `asset_handle` | Construction, accessors, Display, Hash, serde |
-//! | `asset_type` | Default, Copy, serde, unknown rejection |
-//! | `model_config` | Serde round-trip, validation (file present / absent) |
-//! | `errors` | Display messages, `From` impls |
-//! | `handle` | `get`/`take` semantics, clone sharing, drop event |
-//! | `dirk_asset_validation` | All failure branches + success branch |
-//! | `registry` | Isolated root, cache, concurrency and generation lifecycles |
-//!
-//! # Placement
-//!
-//! Drop this file into `Engine/Source/assets/src/tests.rs` and add the
-//! following line to `src/lib.rs`:
-//!
-//! ```rust
-//! #[cfg(test)]
-//! mod tests;
-//! ```
-//!
-//! # Dev-dependencies required (add to `Cargo.toml`)
-//!
-//! ```toml
-//! [dev-dependencies]
-//! tempfile = "3"
-//! ```
-//!
-//! # Registry integration tests
-//!
-//! Registry tests use their own temporary asset roots and always run in CI.
+//! Tests for the `assets` crate, in a module each for `asset_handle`,
+//! `asset_type`, `model_config`, `errors`, `handle`, `dirk_asset_validation`
+//! and `registry`, whose tests use their own temporary asset roots.
 
 // ── bring the entire crate into scope ────────────────────────────────────────
 use super::{

@@ -21,18 +21,11 @@ pub(crate) struct InternalAssetUnloaded {
     pub generation: AssetGeneration,
 }
 
-/// Fired by [`AssetRegistry`] when an asset of type `T` has been fully loaded
-/// and is ready to be consumed.
+/// Fired by [`AssetRegistry`] when an asset of type `T` has been fully loaded;
+/// the enclosed [`Handle`] gives access to the data via [`Handle::take`].
 ///
-/// Subscribe to this event to know when a specific asset type is ready for
-/// GPU upload or other subsystem initialisation. The enclosed [`Handle`]
-/// grants access to the asset data via [`Handle::take`].
-///
-/// # Type parameter
-///
-/// `T` is the concrete [`Asset`] implementation (e.g. [`Model`]).
-/// Subscriptions are type-specific — a consumer of
-/// `AssetLoaded<Model>` will not receive audio or texture load events.
+/// Subscriptions are type-specific: a consumer of `AssetLoaded<Model>` does
+/// not receive other asset types.
 ///
 /// # Example
 ///
@@ -68,22 +61,12 @@ pub struct AssetLoaded<T: Asset> {
     pub handle: Handle<T>,
 }
 
-/// Fired by [`AssetRegistry`] when an asset's CPU-side data has been fully
-/// freed (i.e. the last [`Handle`] was dropped and the internal cleanup has
-/// run).
+/// Fired by [`AssetRegistry`] when an asset's CPU-side data has been freed
+/// (the last [`Handle`] was dropped), so consumers can release what they
+/// created on its [`AssetLoaded`]. It carries only the [`AssetHandle`].
 ///
-/// Subscribe to this event to know when to release GPU-side resources that
-/// were created in response to the corresponding [`AssetLoaded`] event.
-///
-/// Unlike [`AssetLoaded`], this event is not generic — it carries only the
-/// [`AssetHandle`] identifier, because by this point the typed data is gone.
-///
-/// # Delivery guarantee
-///
-/// This event is dispatched from [`AssetRegistry::tick`], which must be
-/// called once per frame. There is therefore a maximum one-frame delay
-/// between the last [`Handle`] being dropped and this event being visible to
-/// consumers.
+/// It is dispatched from [`AssetRegistry::tick`], so it arrives at most one
+/// frame after the last [`Handle`] drops.
 ///
 /// # Example
 ///

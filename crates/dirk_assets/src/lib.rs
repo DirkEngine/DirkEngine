@@ -85,35 +85,16 @@ pub(crate) const DIRK_ASSET_EXT: &str = "dirkasset";
 /// `build.rs`.
 pub(crate) const ASSETS_PATH: &str = std::env!("ASSETS_PATH");
 
-/// A lightweight, cheaply-cloneable identifier for a single asset.
+/// A cheaply-cloneable, serialisable identifier for an asset: a path relative
+/// to `ASSETS_PATH` (e.g. `"models/hero.dirkasset"`) and the [`AssetType`] from
+/// its `meta.asset_type`, which catches type mismatches before a load.
 ///
-/// An `AssetHandle` consists of two parts:
-/// - A **path string** relative to `ASSETS_PATH` (e.g.
-///   `"models/hero.dirkasset"`).
-/// - An [`AssetType`] discriminant embedded at load time from the asset's
-///   `meta.asset_type` field, used to catch type mismatches before attempting
-///   a load.
-///
-/// Handles are created internally by [`AssetRegistry`] during directory
-/// scanning and are not normally constructed by hand. They are serialisable
-/// so they can be stored in scene files or editor state.
-///
-/// # Identity and asset roots
-///
-/// Equality and hashing use only the relative path and type tag, so a handle
-/// read from a scene file matches the handle of the loaded asset. Handles are
-/// therefore only unique within **one** asset root: do not key a shared map
-/// with handles from registries created with different roots via
-/// [`AssetRegistry::init_at`].
-///
-/// Handles issued by a registry remember its root for [`path`] and [`dir`].
-/// Handles built with [`from_raw`] or deserialised are unresolved and fall
-/// back to `ASSETS_PATH`; use [`AssetRegistry::resolve`] to bind them to a
-/// registry root.
-///
-/// [`path`]: AssetHandle::path
-/// [`dir`]: AssetHandle::dir
-/// [`from_raw`]: AssetHandle::from_raw
+/// Equality and hashing use only that path and type, so handles are unique
+/// within one asset root: don't key a map with handles from registries made
+/// with different roots. Handles from a registry remember its root for
+/// [`AssetHandle::path`] and [`AssetHandle::dir`]; those from
+/// [`AssetHandle::from_raw`] or deserialisation fall back to `ASSETS_PATH`
+/// until [`AssetRegistry::resolve`] binds them.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct AssetHandle {
     /// Path relative to the asset root, including the `.dirkasset` extension.
@@ -282,30 +263,15 @@ struct DirkAsset {
 }
 
 impl DirkAsset {
-    /// Validates the deserialised asset descriptor.
+    /// Validates the deserialised descriptor, warning for each failure.
     ///
-    /// After the registry scans and deserialises all `.dirkasset` files, it calls
-    /// [`DirkAsset::validate`] on each entry. Assets that fail validation are
-    /// silently pruned from the registry and a [`tracing::warn`] message is
-    /// emitted. They will not appear in any subsequent [`AssetRegistry::load_asset`]
-    /// call.
+    /// The registry prunes assets that fail it. It checks structure only
+    /// (right config section present, referenced files exist); content errors
+    /// surface at [`Asset::load`]. Returns `true` to keep the asset.
     ///
-    /// Validation is intentionally kept cheap — it checks structural consistency
-    /// (right config section present, referenced files exist on disk) rather than
-    /// parsing full asset content. Full content errors surface later at
-    /// [`Asset::load`] time.
-    ///
-    /// Returns `true` if the asset is structurally sound and should be kept
-    /// in the registry; `false` if it should be pruned. A warning is logged
-    /// for every failure condition.
-    ///
-    /// # Failure conditions
-    ///
-    /// - `asset_type` is [`AssetType::Unknown`] — the `.dirkasset` file is
-    ///   missing or has an unrecognised `asset_type` field.
-    /// - `asset_type` is [`AssetType::Model`] but the `"model"` JSON section
-    ///   is absent.
-    /// - The [`AssetConfig::validate`] failes on all configurations.
+    /// It fails when `asset_type` is [`AssetType::Unknown`], when it is
+    /// [`AssetType::Model`] but the `"model"` section is absent, or when
+    /// [`AssetConfig::validate`] fails.
     fn validate(&self) -> bool {
         match self.meta.asset_type {
             AssetType::Unknown => {
@@ -330,26 +296,12 @@ impl DirkAsset {
     }
 }
 
-/// Central asset management system.
-///
-/// [`AssetRegistry`] is responsible for the full lifecycle of assets.
-/// At initialisation, it scans `ASSETS_PATH` for all `.dirkasset` files.
-/// It validates all the `.dirkasset` configurations & stores them in
-/// memory (pruning invalid ones with a [`tracing::warn`].
-///
-/// Systems can then call [`load_asset`] to schedule asset IO on the engine's
-/// worker pool. Awaiting it returns a [`Handle<T>`] and fires an
-/// [`AssetLoaded<T>`] event.
-///
-/// Finally, [`AssetRegistry`] handles unloading assets when [`Handle<T>`] is
-/// no longer referenced.
-///
-/// # Thread safety
-///
-/// [`AssetRegistry`] is cheaply cloneable. Every clone shares the same
-/// descriptor cache, event consumers, and worker-pool-backed load path.
-///
-/// # Initialisation
+/// Central asset management system. At initialisation it scans `ASSETS_PATH`
+/// for `.dirkasset` files and keeps the valid ones in memory.
+/// [`load_asset`] schedules IO on the worker pool and returns a [`Handle<T>`],
+/// firing an [`AssetLoaded<T>`]; the registry unloads an asset when its last
+/// handle drops. It is cheaply cloneable: clones share one descriptor cache
+/// and load path.
 ///
 /// ```rust
 /// use dirk_assets::AssetRegistry;
@@ -498,22 +450,14 @@ struct CachedAsset {
 }
 
 impl AssetRegistry {
-    /// Creates and fully initialises the registry.
-    ///
-    /// This is the only constructor. It:
-    ///
-    /// 1. Registers internal event channels with `event_manager`.
-    /// 2. Canonicalises `ASSETS_PATH` and walks it recursively.
-    /// 3. Deserialises every `.dirkasset` file found.
-    /// 4. Validates all descriptors; invalid ones are pruned and warned about.
+    /// Creates the registry: registers its event channels with `event_manager`,
+    /// walks and deserialises every `.dirkasset` under `ASSETS_PATH`, and
+    /// prunes the invalid ones.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IoError`] if `ASSETS_PATH` does not exist or cannot
-    /// be read, or if any `.dirkasset` file cannot be opened.
-    ///
-    /// Returns [`Error::SerialisationError`] if a `.dirkasset` file contains
-    /// malformed JSON.
+    /// [`Error::IoError`] if `ASSETS_PATH` or a `.dirkasset` file cannot be
+    /// read, [`Error::SerialisationError`] if one holds malformed JSON.
     ///
     /// [`Error::IoError`]: crate::Error::IoError
     /// [`Error::SerialisationError`]: crate::Error::SerialisationError
@@ -576,11 +520,8 @@ impl AssetRegistry {
         }
     }
 
-    /// Loads an asset of type `T` on the engine worker pool.
-    ///
-    /// Await this method from a Tokio runtime, or keep the returned
-    /// [`AssetLoad`] and call [`AssetLoad::try_poll`] periodically from
-    /// synchronous code.
+    /// Loads an asset of type `T` on the engine worker pool. Await it, or call
+    /// [`AssetLoad::try_poll`] periodically from synchronous code.
     ///
     /// # Errors
     ///
@@ -704,27 +645,13 @@ impl AssetRegistry {
         dispatcher.dispatch(AssetLoaded { handle });
     }
 
-    /// Resolves and deserialises the typed config for a given handle.
+    /// Resolves and deserialises the typed config for a handle, or `None` if
+    /// the handle is not in the registry or its config section is absent.
     ///
-    /// Returns `None` if the handle is not in the registry or if the required
-    /// config section is absent on the [`DirkAsset`].
-    ///
-    /// # Implementation note — the serde round-trip
-    ///
-    /// Because `DirkAsset` stores each config type as a concrete `Option<T>`
-    /// (e.g. `Option<ModelConfig>`), but this method must return a generic
-    /// `T::Config`, it uses a two-step serde conversion:
-    ///
-    /// 1. Serialise the concrete `Option<ModelConfig>` → `serde_json::Value`.
-    /// 2. Deserialise the `Value` → `T::Config`.
-    ///
-    /// Both steps are guaranteed to succeed for any well-formed config because
-    /// [`AssetConfig`] bounds `Serialize + DeserializeOwned`. The conversion
-    /// happens once per [`load_asset`] call (not per frame), so the overhead
-    /// is negligible.
-    ///
-    /// **TODO**: A future refactor could replace this with a type-erased config
-    /// map to avoid the round-trip entirely.
+    /// Each config is a concrete `Option<T>` on [`DirkAsset`], so it round-trips
+    /// through `serde_json::Value` to become `T::Config`. That always succeeds
+    /// for well-formed configs, since [`AssetConfig`] bounds
+    /// `Serialize + DeserializeOwned`.
     ///
     /// [`load_asset`]: AssetRegistry::load_asset
     /// [`AssetConfig`]: assets::AssetConfig

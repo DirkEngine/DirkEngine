@@ -12,25 +12,14 @@ use tracing::info;
 /// running blocking tasks before detaching them.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A cheap clonable handle to a pool of background worker threads.
+/// A cheap clonable handle to a pool of background worker threads, which owns
+/// a multi-threaded Tokio runtime that runs spawned tasks off the engine thread.
 ///
-/// The pool owns a dedicated multi-threaded Tokio runtime. Tasks spawned
-/// through this handle run on the pool's worker threads, away from the
-/// primary engine thread.
-///
-/// # Shutdown
-///
-/// The runtime shuts down when the last handle is dropped. Pending async
-/// tasks are cancelled at their next `.await`. What happens to running
-/// [`spawn_blocking`] tasks depends on where the last handle is dropped:
-///
-/// - **Outside any Tokio runtime** (e.g. the engine main thread): the drop
-///   blocks for at most five seconds waiting for blocking tasks to finish,
-///   then detaches any that are still running.
-/// - **Inside a Tokio runtime** (a task of this pool, a task of another pool,
-///   or code under `block_on`): the drop never blocks. Blocking tasks are
-///   detached and run to completion in the background. Blocking there could
-///   wait on the dropping task itself or stall another runtime's worker.
+/// The runtime shuts down when the last handle drops, cancelling pending async
+/// tasks at their next `.await`. Running [`spawn_blocking`] tasks are waited
+/// for at most five seconds, then detached, when that drop is outside any
+/// Tokio runtime. Inside one the drop never blocks, as that could stall the
+/// dropping task or another runtime's worker; they run to completion detached.
 ///
 /// [`spawn_blocking`]: WorkerPool::spawn_blocking
 #[derive(Clone)]

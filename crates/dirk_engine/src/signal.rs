@@ -1,18 +1,11 @@
-//! Operating system signal integration.
+//! Operating system signal integration for Unix, covering `SIGINT`,
+//! `SIGTERM`, `SIGHUP` and `SIGQUIT`. `signal-hook` writes notifications into
+//! a pipe and a background thread forwards them to the engine.
 //!
-//! The signal handler installed by this module does not touch engine state from
-//! inside the OS signal context. `signal-hook` writes notifications into a pipe
-//! and a background thread forwards them to the engine.
-//!
-//! The first handled signal requests a graceful engine shutdown. A second
-//! handled signal re-raises it with the default disposition, so a stuck shutdown
-//! can still be interrupted.
-//!
-//! This is scoped to Unix terminal and service-manager workflows, covering
-//! `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`. Game-window close events are
-//! handled separately by platform/window integration. Signal handling is opt-in
-//! because `signal-hook` cannot restore the host process's previous disposition
-//! after an engine is dropped.
+//! The first signal requests a graceful shutdown; a second re-raises it with
+//! the default disposition, so a stuck shutdown can be interrupted. Handling is
+//! opt-in because `signal-hook` cannot restore the previous disposition.
+//! Window close events are handled by the platform integration.
 
 use std::{
     sync::{

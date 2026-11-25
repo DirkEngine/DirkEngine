@@ -1,18 +1,7 @@
-//! Model asset: glTF mesh data loaded from disk.
-//!
-//! A *model* asset binds a `.dirkasset` metadata file to one or more glTF
-//! files on disk. On load, the raw glTF document, all referenced buffers
-//! (geometry, animation data, …), and all embedded or external images
-//! (textures) are read into memory as [`Model`].
-//!
-//! The renderer is responsible for uploading this data to the GPU. It should
-//! subscribe to the [`AssetLoaded<Model>`] event, call
-//! [`Handle::take`] to take ownership of the [`Model`], create GPU
-//! resources, and then let the handle drop. When the last handle drops, the
-//! [`AssetUnloaded`] event fires and the renderer can clean up GPU-side
-//! resources.
-//!
-//! # `.dirkasset` file format
+//! Model asset: a `.dirkasset` file bound to a glTF file, read into memory as
+//! a [`Model`] with its buffers and images. The renderer takes it with
+//! [`Handle::take`] on [`AssetLoaded<Model>`] and frees its GPU side on
+//! [`AssetUnloaded`].
 //!
 //! ```json
 //! {
@@ -23,9 +12,7 @@
 //! }
 //! ```
 //!
-//! The `gltf` path is **relative to the directory** containing the
-//! `.dirkasset` file, so assets can be moved freely within the asset tree
-//! without updating absolute paths.
+//! The `gltf` path is relative to the directory of the `.dirkasset` file.
 //!
 //! [`AssetLoaded<Model>`]: crate::events::AssetLoaded
 //! [`AssetUnloaded`]: crate::AssetUnloaded

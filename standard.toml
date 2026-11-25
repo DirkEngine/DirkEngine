@@ -112,22 +112,8 @@ paths = [
 ]
 
 [deviations.doc-length]
-reason = "26 findings: those in the files the open pull request #72 rewrites end with it; the rest are fixed in a follow-up"
+reason = "3 findings in the files the open pull request #72 rewrites, which end with it"
 paths = [
-    # Fixed in a follow-up.
-    "crates/dirk_assets/src/assets/mod.rs",
-    "crates/dirk_assets/src/assets/model.rs",
-    "crates/dirk_assets/src/errors.rs",
-    "crates/dirk_assets/src/events.rs",
-    "crates/dirk_assets/src/handle.rs",
-    "crates/dirk_assets/src/lib.rs",
-    "crates/dirk_assets/src/tests.rs",
-    "crates/dirk_engine/src/builder.rs",
-    "crates/dirk_engine/src/signal.rs",
-    "crates/dirk_engine/src/subsystem.rs",
-    "crates/dirk_events/src/lib.rs",
-    "crates/dirk_threads/src/lib.rs",
-    # #72 rewrites them.
     "crates/dirk_proc/src/lib.rs",
     "crates/dirk_universe/src/query.rs",
 ]

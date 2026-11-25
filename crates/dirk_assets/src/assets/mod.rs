@@ -1,19 +1,10 @@
-//! Core asset abstractions: the [`Asset`] trait, [`AssetType`] discriminant,
-//! and the [`AssetConfig`] marker trait.
+//! The [`Asset`] trait, the [`AssetType`] discriminant and the [`AssetConfig`]
+//! marker trait.
 //!
-//! Every concrete asset type (models, textures, audio clips, …) must implement
-//! [`Asset`]. The trait is intentionally minimal — it describes only how to
-//! load data from disk and how to identify the asset type at runtime.
-//!
-//! # Implementing a new asset type
-//!
-//! 1. Define a **config struct** that derives [`AssetConfig`] and holds
-//!    whatever fields the `.dirkasset` file needs for this type.
-//! 2. Define a **data struct** that holds the fully-loaded, in-memory
-//!    representation.
-//! 3. Implement [`Asset`] for the data struct.
-//! 4. Add a variant to [`AssetType`].
-//! 5. Follow compile errors untile everything is ready.
+//! To add an asset type:
+//! 1. Define a config struct that derives [`AssetConfig`].
+//! 2. Define a data struct holding the loaded data, and implement [`Asset`].
+//! 3. Add a variant to [`AssetType`].
 //!
 //! ```rust
 //! use dirk_assets::{Asset, AssetConfig, AssetHandle, AssetType, Result};
@@ -65,20 +56,12 @@ pub use model::*;
 
 use crate::{AssetHandle, Metadata, Result};
 
-/// Implemented by every concrete asset data type.
+/// Implemented by every concrete asset data type: it loads from disk given its
+/// configuration and an [`AssetHandle`], and names its [`AssetType`] so the
+/// registry can check handles against it.
 ///
-/// An [`Asset`] is a value that:
-/// - can be **loaded from disk** given its configuration and an
-///   [`AssetHandle`] (which carries the directory context),
-/// - carries a static [`AssetType`] discriminant so the registry can validate
-///   handle/type compatibility at runtime,
-/// - is [`Clone`] + [`Send`] + `'static` so it can be easily duplicated and
-///   freely moved across threads.
-///
-/// Implementations should be pure data containers. GPU uploads, sound
-/// submissions, and other subsystem-side work happen *after* the asset is
-/// consumed via [`Handle::take`], typically in response to an
-/// [`AssetLoaded`] event.
+/// Implementations are pure data: GPU uploads and the like happen after
+/// [`Handle::take`], typically on an [`AssetLoaded`] event.
 ///
 /// [`AssetLoaded`]: crate::events::AssetLoaded
 /// [`Handle::take`]: crate::Handle::take

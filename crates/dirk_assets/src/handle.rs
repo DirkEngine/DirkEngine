@@ -97,33 +97,14 @@ impl<T: Asset> Drop for AssetRef<T> {
     }
 }
 
-/// A reference-counted, cheaply-cloneable public handle to a loaded asset.
+/// A reference-counted handle to a loaded asset, from
+/// [`AssetRegistry::load_asset`]. Clones share the data inside an [`Arc`], and
+/// it is freed when all of them drop. A handle is [`Send`].
 ///
-/// Obtain one via [`AssetRegistry::load_asset`]. Cloning a handle does not
-/// copy the underlying data — all clones share the same data inside an [`Arc`].
-/// The asset's CPU memory is freed only when **all** clones are dropped.
-///
-/// # Using the data
-///
-/// Call [`take`] to take ownership of the handle's data. This
-/// should be used when an asset's data is only needed by one system (for
-/// example, the renderer would take the data & upload it to the GPU, no
-/// other system needs it).
-/// Subsequent calls to [`take`] or [`get`] will return a [`Error::AlreadyTaken`].
-///
-/// Call [`get`] to just clone the data.
-///
-/// Prefer [`take`] as it saves memory & has less performance cost.
-///
-/// # Sending across threads
-///
-/// [`Handle<T>`] is [`Send`]. You can send a handle to a worker thread
-/// for background GPU upload and drop it there safely.
-///
-/// # Debug formatting
-///
-/// The `Debug` impl prints the raw asset path without locking the inner
-/// `Mutex` for data access:
+/// [`take`] moves the data out, for an asset only one system needs; later
+/// [`take`] or [`get`] calls return [`Error::AlreadyTaken`]. [`get`] clones the
+/// data instead, which costs more. `Debug` prints the asset path without
+/// locking the data.
 ///
 /// [`AssetRegistry::load_asset`]: crate::AssetRegistry::load_asset
 /// [`take`]: Handle::take

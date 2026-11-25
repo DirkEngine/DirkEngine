@@ -61,15 +61,9 @@ pub enum Error {
     /// The requested [`AssetHandle`] was not found in the registry.
     ///
     /// The inner `String` is the raw handle path (e.g.
-    /// `"models/hero.dirkasset"`) and is included in the error message for
-    /// easy diagnosis.
-    ///
-    /// # Common causes
-    /// - The handle string was constructed manually and contains a typo.
-    /// - The corresponding `.dirkasset` file failed validation and was pruned
-    ///   from the registry at startup.
-    /// - The asset file was added after the registry was initialised (hot
-    ///   reload is not yet supported).
+    /// `"models/hero.dirkasset"`). Common causes are a mistyped handle, a
+    /// `.dirkasset` file that failed validation and was pruned at startup, or
+    /// a file added after the registry was initialised.
     ///
     /// [`AssetHandle`]: crate::AssetHandle
     #[error("asset not found in registry: {0}")]

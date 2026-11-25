@@ -13,21 +13,12 @@ use dirk_threads::WorkerPool;
 
 mod tests;
 
-/// The marker trait that every event type must implement.
+/// The marker trait every event type implements, usually with
+/// `#[derive(Event)]`, whose `#[event("…")]` attribute sets the format string.
 ///
-/// In practice you will almost never implement this by hand — use the
-/// `#[derive(Event)]` proc-macro instead, which also gives you the
-/// `#[event("…")]` format-string attribute.
-///
-/// # Requirements
-///
-/// | Bound | Reason |
-/// |-------|--------|
-/// | [`Send`] | Events may be queued from background threads |
-/// | [`Clone`] | Each subscriber receives its own independent copy |
-/// | `'static` | Events are stored inside type-erased trait objects |
-///
-/// # Manual Implementation
+/// Events are [`Send`] to be queued from background threads, [`Clone`] so each
+/// subscriber gets its own copy, and `'static` to sit in type-erased trait
+/// objects. To implement it by hand:
 ///
 /// ```rust
 /// use dirk_events::Event;
@@ -53,17 +44,10 @@ pub trait Event: Send + Clone + 'static {
 #[doc(hidden)]
 pub use dirk_proc::Event;
 
-/// The central event bus.
+/// The central event bus: it owns the channel infrastructure and routes
+/// dispatched events to subscribers on background worker threads.
 ///
-/// `EventManager` owns the internal channel infrastructure and is responsible
-/// for routing dispatched events to the right subscribers on background worker
-/// threads.
-///
-/// # Cloning
-///
-/// `EventManager` is **cheaply cloneable** — all clones share the same
-/// underlying state through an [`Arc`]. Clone it freely and pass it into every
-/// system that needs to produce or consume events.
+/// It is cheaply cloneable; all clones share one state through an [`Arc`].
 ///
 /// ```rust
 /// use dirk_events::EventManager;
@@ -73,15 +57,11 @@ pub use dirk_proc::Event;
 /// let mgr_b = mgr_a.clone(); // same bus, different handle
 /// ```
 ///
-/// # Shutdown
-///
-/// Subscriptions stay open for as long as any `EventManager` clone is alive,
-/// independent of how many [`Dispatcher`]s exist. Dropping the last clone
-/// shuts the bus down: every [`Consumer`] receives the events already
-/// dispatched (while the [`WorkerPool`] is still running), after which
-/// [`Consumer::consume`] and [`Consumer::consume_blocking`] return `None`.
-/// Later dispatches are discarded. [`Dispatcher`]s and [`Consumer`]s do not
-/// keep the bus alive, so threads blocked in a receive can observe shutdown.
+/// Subscriptions stay open while any clone lives, whatever the number of
+/// [`Dispatcher`]s. Dropping the last clone shuts the bus down: each
+/// [`Consumer`] receives the events already dispatched, then [`Consumer::consume`]
+/// and [`Consumer::consume_blocking`] return `None`, and later dispatches are
+/// discarded. Dispatchers and consumers don't keep the bus alive.
 #[derive(Clone)]
 pub struct EventManager {
     bus: Arc<Bus>,
@@ -295,23 +275,13 @@ impl EventManager {
     }
 }
 
-/// Queues events to be forwarded to subscribers by a background worker task.
+/// Queues events for a background worker task to forward to subscribers;
+/// created by [`EventManager::register`] and cheap to clone.
 ///
-/// Created by [`EventManager::register`]. Cheap to clone — pass it into any
-/// number of systems.
-///
-/// # Ordering
-///
-/// All dispatchers of one event type share a single routing queue, so each
-/// consumer receives events in the order they were dispatched, across every
-/// dispatcher of that type.
-///
-/// # Lifetime
-///
-/// A dispatcher does not keep subscriptions open. Dropping every dispatcher
-/// leaves existing consumers subscribed, and events from dispatchers created
-/// later still reach them. Dispatching after the [`EventManager`] shut down
-/// discards the event.
+/// All dispatchers of one event type share a routing queue, so each consumer
+/// sees events in dispatch order across them. Dispatchers don't keep
+/// subscriptions open: consumers stay subscribed after the last one drops, and
+/// dispatching after the [`EventManager`] shut down discards the event.
 pub struct Dispatcher<T: Event> {
     topic: Arc<Topic<T>>,
 }
@@ -344,25 +314,15 @@ impl<T: Event> std::fmt::Debug for Dispatcher<T> {
     }
 }
 
-/// Receives events routed by background worker tasks.
+/// Receives events routed by background worker tasks; created by
+/// [`EventManager::subscribe`], each with its own independent subscription.
 ///
-/// Created by [`EventManager::subscribe`]. Each `Consumer` holds an independent
-/// subscription — it is **not** shared with other consumers of the same type.
-///
-/// # Cloning
-///
-/// Cloning a `Consumer` creates a **fresh subscription** to the same event
-/// type. The clone starts empty and receives events dispatched *after* it was
-/// created; it does **not** inherit any events already queued in the original.
-///
-/// # Lifetime
-///
-/// The subscription stays open while the [`EventManager`] is alive, even when
-/// no dispatcher exists. Once the last `EventManager` clone is dropped, the
-/// consumer yields the remaining queued events and then reports closure. The
-/// consumer also closes if routing for its event type fails, e.g. because the
-/// event's [`Clone`] implementation panicked. When a `Consumer` is dropped its
-/// subscription is removed immediately.
+/// Cloning creates a fresh subscription that starts empty and receives events
+/// dispatched after it. A subscription stays open while the [`EventManager`]
+/// lives, even with no dispatcher; once the last clone drops, the consumer
+/// yields the queued events, then reports closure. It also closes if routing
+/// for its type fails, such as when the event's [`Clone`] panics. Dropping a
+/// consumer removes its subscription.
 pub struct Consumer<T: Event> {
     receiver: UnboundedReceiver<T>,
     topic: Arc<Topic<T>>,
