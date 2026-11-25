@@ -8,10 +8,6 @@ use dirk_events::{Consumer, Dispatcher, Event, EventManager};
 use dirk_threads::WorkerPool;
 use std::thread;
 
-// =============================================================================
-// Helper
-// =============================================================================
-
 #[expect(
     clippy::expect_used,
     reason = "Test helpers fail the test by panicking."
@@ -52,15 +48,6 @@ fn wait_for<T: Event>(consumer: &mut Consumer<T>) -> T {
         .expect("one event was collected")
 }
 
-// =============================================================================
-// Section A – Derive macro: Event types defined outside the crate
-//
-// Ensures the macro works when the user crate defines its own event types
-// (the most common real-world scenario).
-// =============================================================================
-
-// ── A.1  A realistic application event hierarchy ──────────────────────────────
-
 #[derive(Debug, Clone, Event)]
 #[event("window resized to {width}×{height} px")]
 struct WindowResized {
@@ -97,8 +84,6 @@ enum NetworkEvent {
     PacketReceived(usize),
 }
 
-// ── A.2  Types whose `debug()` relies on `{self:?}` (no attribute) ────────────
-
 #[derive(Debug, Clone, Event)]
 struct RawEvent {
     id: u32,
@@ -111,10 +96,6 @@ enum RawEnumEvent {
     B(i32),
     C { label: String },
 }
-
-// =============================================================================
-// Section B – `debug()` correctness for integration-level types
-// =============================================================================
 
 #[test]
 fn window_resized_debug_contains_dimensions() {
@@ -169,7 +150,6 @@ fn network_event_packet_received_shows_byte_count() {
 fn raw_event_falls_back_to_debug_repr() {
     let e = RawEvent { id: 1, tag: "test" };
     let dbg = e.debug();
-    // The default uses `{self:?}` so the Debug impl must round-trip.
     assert!(dbg.contains("RawEvent"));
     assert!(dbg.contains('1'));
     assert!(dbg.contains("test"));
@@ -186,10 +166,6 @@ fn raw_enum_event_each_variant_falls_back_to_debug() {
     assert_eq!(v.debug(), format!("{v:?}"));
 }
 
-// =============================================================================
-// Section C – EventManager: realistic "engine loop" simulations
-// =============================================================================
-
 /// Simulates a two-system engine: an input system produces `KeyPressed` events,
 /// a UI system produces `WindowResized` events, and two unrelated consumers
 /// listen to each.
@@ -204,7 +180,6 @@ fn realistic_multi_system_engine_loop() {
     let mut key_consumer: Consumer<KeyPressed> = mgr.subscribe();
     let mut win_consumer: Consumer<WindowResized> = mgr.subscribe();
 
-    // Simulate three frames.
     for frame in 0u32..3 {
         key_dispatcher.dispatch(KeyPressed(65 + frame));
 
@@ -216,7 +191,6 @@ fn realistic_multi_system_engine_loop() {
         }
     }
 
-    // Drain and verify.
     let keys: Vec<u32> = collect_all(&mut key_consumer, 3)
         .into_iter()
         .map(|e| e.0)
@@ -292,10 +266,6 @@ fn unit_event_reaches_all_consumers() {
     assert_eq!(collect_all(&mut c2, 1).len(), 1);
 }
 
-// =============================================================================
-// Section D – Edge cases on the public API
-// =============================================================================
-
 /// Registering but never subscribing must not panic on dispatch.
 #[test]
 fn register_without_subscribe_is_safe() {
@@ -303,7 +273,6 @@ fn register_without_subscribe_is_safe() {
     let mgr = EventManager::new(workers);
     let dispatcher = mgr.register::<KeyPressed>();
     dispatcher.dispatch(KeyPressed(1));
-    // No assertion needed – we just must not panic.
 }
 
 /// Subscribing but never registering any dispatcher: consumer stays empty.
@@ -327,17 +296,14 @@ fn mid_simulation_consumer_drop_is_handled() {
     {
         let _dying = mgr.subscribe::<KeyPressed>();
         dispatcher.dispatch(KeyPressed(1));
-        // `_dying` dropped here.
     }
 
-    // After the dropped consumer is pruned, further dispatches must work fine.
     dispatcher.dispatch(KeyPressed(2));
 
     let events: Vec<u32> = collect_all(&mut alive, 2)
         .into_iter()
         .map(|e| e.0)
         .collect();
-    // Both events delivered to `alive` (which was never dropped).
     assert_eq!(events, vec![1, 2]);
 }
 

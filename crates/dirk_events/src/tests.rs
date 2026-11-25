@@ -12,10 +12,7 @@
 
 use crate::{Consumer, Dispatcher, Event, EventManager, Topic};
 
-// =========================================================================
-// Helper: drain every pending event from a Consumer into a Vec.
-// =========================================================================
-
+/// Drains every pending event from a `Consumer` into a `Vec`.
 fn collect<T: Event>(consumer: &mut Consumer<T>, count: usize) -> Vec<T> {
     let received = async {
         let mut events = Vec::with_capacity(count);
@@ -46,15 +43,6 @@ fn wait_for<T: Event>(consumer: &mut Consumer<T>) -> T {
     collect(consumer, 1).pop().expect("one event was collected")
 }
 
-// =========================================================================
-// Section 1 – Derive-macro test types
-//
-// Rule: the macro must compile and `debug()` must return the expected string.
-// Every combination of struct / enum shape and attribute presence is exercised.
-// =========================================================================
-
-// ── 1.1  Unit struct ─────────────────────────────────────────────────────
-
 /// No `#[event]` attribute → falls back to `format!("{self:?}")`.
 #[derive(Debug, Clone, Event)]
 struct UnitStructDefault;
@@ -63,8 +51,6 @@ struct UnitStructDefault;
 #[derive(Debug, Clone, Event)]
 #[event("unit-struct-event")]
 struct UnitStructWithAttr;
-
-// ── 1.2  Named-field struct ───────────────────────────────────────────────
 
 /// No attribute → `{self:?}`.
 #[derive(Debug, Clone, Event)]
@@ -97,8 +83,6 @@ struct NamedStructStaticMessage {
     _payload: String,
 }
 
-// ── 1.3  Unnamed-field struct ─────────────────────────────────────────────
-
 /// No attribute → `{self:?}`.
 #[derive(Debug, Clone, Event)]
 struct UnnamedStructDefault(i32, String);
@@ -127,8 +111,6 @@ struct UnnamedStructStatic(u8, u8);
 #[event("literal {{0}}, debug={0:?}, rounded={1:.2}")]
 struct UnnamedStructFormatting(u32, f32);
 
-// ── 1.4  Unit enum ────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Event)]
 enum UnitEnum {
     #[event("alpha occurred")]
@@ -144,8 +126,6 @@ enum UnitEnumDefault {
     Bar,
 }
 
-// ── 1.5  Named-field enum ─────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Event)]
 enum NamedEnum {
     #[event("resized to {width}×{height}")]
@@ -160,8 +140,6 @@ enum NamedEnum {
     Reset { _dummy: bool },
 }
 
-// ── 1.6  Unnamed-field enum ───────────────────────────────────────────────
-
 #[derive(Debug, Clone, Event)]
 enum UnnamedEnum {
     #[event("single={0}")]
@@ -175,8 +153,6 @@ enum UnnamedEnum {
     Head(u8, u8),
 }
 
-// ── 1.7  Mixed enum (unit + named + unnamed variants) ────────────────────
-
 #[derive(Debug, Clone, Event)]
 enum MixedEnum {
     #[event("just a unit")]
@@ -189,16 +165,12 @@ enum MixedEnum {
     Unnamed(String),
 }
 
-// ── 1.8  Enum – no attributes at all (every variant defaults to {self:?}) ─
-
 #[derive(Debug, Clone, Event)]
 enum NoAttrEnum {
     Alpha,
     Beta(i32),
 }
 
-// can't really be tested as it doesn't have any fields.
-// just an easy feature to have when in development
 #[expect(
     dead_code,
     reason = "Only checks that `#[derive(Event)]` compiles for an enum with no variants, which can't be constructed."
@@ -207,19 +179,12 @@ enum NoAttrEnum {
 #[event("empty enum")]
 enum EmptyEnum {}
 
-// =========================================================================
-// Section 2 – Derive-macro: `debug()` output assertions
-// =========================================================================
-
 mod macro_debug_output {
     use super::*;
-
-    // ── Unit structs ─────────────────────────────────────────────────────
 
     #[test]
     fn unit_struct_default_uses_debug_repr() {
         let e = UnitStructDefault;
-        // The default branch produces `format!("{self:?}")`.
         assert_eq!(e.debug(), format!("{UnitStructDefault:?}"));
     }
 
@@ -227,8 +192,6 @@ mod macro_debug_output {
     fn unit_struct_with_attr_returns_literal() {
         assert_eq!(UnitStructWithAttr.debug(), "unit-struct-event");
     }
-
-    // ── Named-field structs ───────────────────────────────────────────────
 
     #[test]
     fn named_struct_default_uses_debug_repr() {
@@ -256,8 +219,6 @@ mod macro_debug_output {
         assert_eq!(e.debug(), "something happened");
     }
 
-    // ── Unnamed-field structs ─────────────────────────────────────────────
-
     #[test]
     fn unnamed_struct_default_uses_debug_repr() {
         let e = UnnamedStructDefault(7, "hello".into());
@@ -278,7 +239,6 @@ mod macro_debug_output {
 
     #[test]
     fn unnamed_struct_last_field_only() {
-        // Only {2} is referenced; _0 and _1 are not bound.
         let e = UnnamedStructLastOnly(0, "skip".into(), 2.72);
         assert!(e.debug().contains("2.72"));
     }
@@ -333,8 +293,6 @@ mod macro_debug_output {
         );
     }
 
-    // ── Unit enum ─────────────────────────────────────────────────────────
-
     #[test]
     fn unit_enum_each_variant_returns_its_message() {
         assert_eq!(UnitEnum::Alpha.debug(), "alpha occurred");
@@ -352,8 +310,6 @@ mod macro_debug_output {
             format!("{:?}", UnitEnumDefault::Bar)
         );
     }
-
-    // ── Named-field enum ──────────────────────────────────────────────────
 
     #[test]
     fn named_enum_resized_interpolates_both_fields() {
@@ -380,8 +336,6 @@ mod macro_debug_output {
         assert_eq!(e.debug(), "reset");
     }
 
-    // ── Unnamed-field enum ────────────────────────────────────────────────
-
     #[test]
     fn unnamed_enum_single_field() {
         assert_eq!(UnnamedEnum::Single(99).debug(), "single=99");
@@ -398,8 +352,6 @@ mod macro_debug_output {
         let e = UnnamedEnum::Head(7, 255);
         assert_eq!(e.debug(), "head=7");
     }
-
-    // ── Mixed enum ────────────────────────────────────────────────────────
 
     #[test]
     fn mixed_enum_unit_variant() {
@@ -418,8 +370,6 @@ mod macro_debug_output {
         assert_eq!(e.debug(), "unnamed: payload");
     }
 
-    // ── Enum without any attributes ───────────────────────────────────────
-
     #[test]
     fn no_attr_enum_falls_back_to_debug() {
         assert_eq!(
@@ -433,10 +383,6 @@ mod macro_debug_output {
     }
 }
 
-// =========================================================================
-// Section 3 – EventManager: core behaviour
-// =========================================================================
-
 mod event_manager {
     use dirk_threads::WorkerPool;
     use std::sync::{
@@ -448,17 +394,15 @@ mod event_manager {
 
     use super::*;
 
-    // A minimal event used by most tests below.
+    /// A minimal event used by most tests below.
     #[derive(Debug, Clone, Event)]
     #[event("counter={0}")]
     struct CounterEvent(u32);
 
-    // A second, distinct event type to test type isolation.
+    /// A second, distinct event type to test type isolation.
     #[derive(Debug, Clone, Event)]
     #[event("label={0}")]
     struct LabelEvent(String);
-
-    // ── 3.1  Basic round-trip ─────────────────────────────────────────────
 
     #[test]
     fn single_event_reaches_single_subscriber() {
@@ -489,8 +433,6 @@ mod event_manager {
         assert_eq!(values, vec![0, 1, 2, 3, 4]);
     }
 
-    // ── 3.2  Async routing ────────────────────────────────────────────────
-
     #[test]
     fn events_are_delivered_without_explicit_flush() {
         let workers = WorkerPool::new("test");
@@ -509,7 +451,6 @@ mod event_manager {
         let dispatcher = mgr.register::<CounterEvent>();
         let mut consumer = mgr.subscribe::<CounterEvent>();
 
-        // Each receive waits for the event dispatched so far.
         dispatcher.dispatch(CounterEvent(1));
 
         let first = collect(&mut consumer, 1);
@@ -532,8 +473,6 @@ mod event_manager {
 
         assert!(collect(&mut consumer, 0).is_empty());
     }
-
-    // ── 3.3  Fan-out: multiple subscribers ────────────────────────────────
 
     #[test]
     fn single_event_reaches_all_subscribers() {
@@ -571,8 +510,6 @@ mod event_manager {
         }
     }
 
-    // ── 3.4  Type isolation ───────────────────────────────────────────────
-
     #[test]
     fn subscribers_only_receive_their_event_type() {
         let workers = WorkerPool::new("test");
@@ -605,14 +542,11 @@ mod event_manager {
         let mut counter_consumer = mgr.subscribe::<CounterEvent>();
         let mut label_consumer = mgr.subscribe::<LabelEvent>();
 
-        // Only fire a CounterEvent.
         counter_dispatcher.dispatch(CounterEvent(1));
 
         assert_eq!(collect(&mut counter_consumer, 1).len(), 1);
-        assert!(collect(&mut label_consumer, 0).is_empty()); // Must not receive anything.
+        assert!(collect(&mut label_consumer, 0).is_empty());
     }
-
-    // ── 3.5  No subscribers registered ───────────────────────────────────
 
     #[test]
     fn dispatching_with_no_subscribers_does_not_panic() {
@@ -621,10 +555,7 @@ mod event_manager {
         let dispatcher = mgr.register::<CounterEvent>();
 
         dispatcher.dispatch(CounterEvent(0));
-        // Must not panic even though nobody is listening.
     }
-
-    // ── 3.6  Dropped-consumer pruning ────────────────────────────────────
 
     #[test]
     fn dropped_consumer_is_pruned_silently() {
@@ -635,10 +566,8 @@ mod event_manager {
         let mut alive = mgr.subscribe::<CounterEvent>();
         {
             let _dead = mgr.subscribe::<CounterEvent>();
-            // `_dead` is dropped here; its receiver is gone.
         }
 
-        // Subsequent dispatches must not panic.
         dispatcher.dispatch(CounterEvent(5));
 
         let events = collect(&mut alive, 1);
@@ -655,27 +584,21 @@ mod event_manager {
         {
             let _c1 = mgr.subscribe::<CounterEvent>();
             let _c2 = mgr.subscribe::<CounterEvent>();
-        } // Both dropped here.
+        }
 
         dispatcher.dispatch(CounterEvent(1));
     }
-
-    // ── 3.7  Dropped Dispatcher ────────────────────────────────────────────
 
     #[test]
     fn subscribing_without_dispatcher_gives_empty_consumer() {
         let workers = WorkerPool::new("test");
         let mgr = EventManager::new(workers);
-        // Subscribe before any dispatcher is registered for this type.
         let mut consumer = mgr.subscribe::<CounterEvent>();
 
         let _dispatcher = mgr.register::<CounterEvent>();
-        // No events dispatched.
 
         assert!(collect(&mut consumer, 0).is_empty());
     }
-
-    // ── 3.8  High-volume stress ───────────────────────────────────────────
 
     #[test]
     fn high_volume_events_all_delivered() {
@@ -703,8 +626,6 @@ mod event_manager {
         }
     }
 
-    // ── 3.9  Multiple ticks accumulate correctly ──────────────────────────
-
     #[test]
     fn events_accumulate_correctly_across_many_ticks() {
         let workers = WorkerPool::new("test");
@@ -721,7 +642,6 @@ mod event_manager {
             }
         }
 
-        // Drain everything accumulated.
         let all: Vec<u32> = collect(&mut consumer, (ticks * per_tick) as usize)
             .into_iter()
             .map(|e| e.0)
@@ -729,8 +649,6 @@ mod event_manager {
         let expected: Vec<u32> = (0..ticks * per_tick).collect();
         assert_eq!(all, expected);
     }
-
-    // ── 3.10  try_consume ─────────────────────────────────────────────────
 
     #[test]
     fn try_consume_returns_none_when_empty() {
@@ -753,7 +671,6 @@ mod event_manager {
         dispatcher.dispatch(CounterEvent(1));
         dispatcher.dispatch(CounterEvent(2));
 
-        // Both events use one producer queue; the second receipt is a routing barrier.
         collect(&mut barrier, 2);
 
         assert_eq!(
@@ -773,8 +690,6 @@ mod event_manager {
         assert!(consumer.try_consume().is_none());
     }
 
-    // ── 3.11  Multiple dispatchers for the same type ──────────────────────
-
     #[test]
     fn dispatchers_for_same_type_share_one_ordered_queue() {
         let workers = WorkerPool::new("test");
@@ -792,8 +707,6 @@ mod event_manager {
         assert_eq!(values, vec![1, 2, 3]);
     }
 
-    // ── 3.12  Lifetime ────────────────────────────────────────────────────
-
     #[test]
     fn consumer_survives_all_dispatchers_being_dropped() {
         let mgr = EventManager::new(WorkerPool::new("test"));
@@ -804,7 +717,6 @@ mod event_manager {
         drop(first);
         assert_eq!(wait_for(&mut consumer).0, 1);
 
-        // A transient producer must not end long-lived subscriptions.
         let second = mgr.register::<CounterEvent>();
         second.dispatch(CounterEvent(2));
         drop(second);
@@ -838,7 +750,6 @@ mod event_manager {
         dispatcher.dispatch(CounterEvent(2));
         drop(mgr);
 
-        // Live dispatchers do not keep the bus open.
         assert_eq!(drain_until_closed(consumer), vec![1, 2]);
         dispatcher.dispatch(CounterEvent(3));
     }
@@ -906,11 +817,8 @@ mod event_manager {
         });
     }
 
-    // ── 3.13  Routing internals ───────────────────────────────────────────
-
     #[test]
     fn new_subscriber_is_excluded_from_already_dispatched_event() {
-        // Intercept the routing queue so routing cannot race with subscription.
         let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let topic = Arc::new(Topic::new(queue));
         let dispatcher = Dispatcher {
@@ -964,7 +872,6 @@ mod event_manager {
         dispatcher.dispatch(TrackedEvent(Arc::clone(&clones)));
         first.consume_blocking().expect("event should arrive");
         second.consume_blocking().expect("event should arrive");
-        // The last subscriber receives the original; consuming never clones.
         assert_eq!(clones.load(Ordering::Relaxed), 1);
     }
 
@@ -987,7 +894,6 @@ mod event_manager {
 
         let mgr = EventManager::new(WorkerPool::new("test"));
         let dispatcher = mgr.register::<PanicOnClone>();
-        // Two subscribers force the router to clone, which panics.
         let consumers: [Consumer<PanicOnClone>; 2] = [mgr.subscribe(), mgr.subscribe()];
         dispatcher.dispatch(PanicOnClone);
 
@@ -1000,7 +906,6 @@ mod event_manager {
                 .send(closed)
                 .expect("test receiver should remain open");
         });
-        // `mgr` is still alive, so closure can only come from the failed router.
         assert!(
             done_rx
                 .recv_timeout(Duration::from_secs(5))

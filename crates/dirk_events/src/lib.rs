@@ -169,7 +169,6 @@ impl<T: Event> AnyTopic for Topic<T> {
     fn close(&self) {
         let mut state = self.state.write();
         state.closed = true;
-        // Routed events keep their own snapshots, so queued events still arrive.
         state.subscribers = Arc::default();
     }
 
