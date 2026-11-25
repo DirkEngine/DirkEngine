@@ -77,9 +77,10 @@ paths = [
     "crates/dirk_platform/src/handler.rs",
     "crates/dirk_platform/src/window.rs",
     "crates/dirk_player/src/lib.rs",
-    "crates/dirk_proc/src/event.rs",
+    "crates/dirk_proc/src/event/mod.rs",
+    "crates/dirk_proc/src/event/tests.rs",
     "crates/dirk_renderer/src/render_commands.rs",
-    "crates/dirk_utils/src/version.rs",
+    "crates/dirk_utils/src/version/tests.rs",
     # #72 rewrites them.
     "crates/dirk_proc/src/universe.rs",
     "crates/dirk_renderer/src/proxy/systems.rs",
@@ -132,17 +133,11 @@ paths = [
 ]
 
 [deviations.inline-tests]
-reason = "4 findings: the adoption stack's fourth pull request moves dirk_proc's and dirk_utils's; the open pull request #106 rewrites dirk_player's input.rs, where a move now would conflict, and #133 deletes egui_integration.rs"
+reason = "2 findings: the open pull request #106 rewrites dirk_player's input.rs, where a move now would conflict, and #133 deletes egui_integration.rs"
 paths = [
     "crates/dirk_player/src/input.rs",
-    "crates/dirk_proc/src/event.rs",
     "crates/dirk_renderer/src/egui_integration.rs",
-    "crates/dirk_utils/src/version.rs",
 ]
-
-[deviations.inline-limits]
-reason = "1 finding: the adoption stack's fourth pull request names the limit"
-paths = ["crates/dirk_engine/src/lib.rs"]
 
 [deviations.duplicate-items]
 reason = "1 finding: the open pull request #133 deletes frame_graph.rs, which viewport.rs repeats"
