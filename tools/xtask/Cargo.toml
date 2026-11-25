@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+description = "DirkEngine's development tasks, run with `cargo xtask`"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+sourceorigin-standard.workspace = true
+
+[lints]
+workspace = true

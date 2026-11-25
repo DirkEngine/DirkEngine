@@ -1,3 +1,8 @@
+#![expect(
+    unsafe_code,
+    reason = "The editor viewport's sampler is created through ash."
+)]
+
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use ash::vk;

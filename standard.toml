@@ -1,0 +1,69 @@
+# How DirkEngine applies the engineering standard; the README of the
+# `sourceorigin-standard` crate lists its rules and every key here.
+
+# The renderer's modules that call Vulkan through ash, which #133 replaces with
+# the RHI's. An `#[expect(unsafe_code)]` counts for the first entry holding it,
+# so the crate root, for lib.rs's own calls, comes last.
+unsafe-modules = [
+    "dirk_renderer::debug",
+    "dirk_renderer::init",
+    "dirk_renderer::physical_device",
+    "dirk_renderer::pipeline::graphics",
+    "dirk_renderer::proxy::scene",
+    "dirk_renderer::resources",
+    "dirk_renderer::shaders",
+    "dirk_renderer::viewport_editor",
+    "dirk_renderer::window",
+    "dirk_renderer",
+]
+
+# The binary's library, which holds `DefaultPlugins` and the CLI, and the build
+# scripts' helpers.
+anyhow-crates = ["dirkengine", "dirk_build"]
+
+# Crates a build script compiles without depending on them: the renderer's
+# compiles its shaders, so `just check-changed` checks it when they change.
+[check-changed]
+builds = [{ builder = "dirk_renderer", built = "dirk_shaders_gpu" }]
+
+# Each scoped deviation lists the files its findings were in when DirkEngine
+# adopted the standard; `cargo xtask standard --fix` drops each file once it
+# complies.
+[deviations]
+skills-synced = "7 findings: the shared skills are synced in the adoption stack's third pull request"
+rust-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
+doc-length = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
+config-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
+
+[deviations.inline-tests]
+reason = "4 findings: the adoption stack's fourth pull request moves dirk_proc's and dirk_utils's; the open pull request #106 rewrites dirk_player's input.rs, where a move now would conflict, and #133 deletes egui_integration.rs"
+paths = [
+    "crates/dirk_player/src/input.rs",
+    "crates/dirk_proc/src/event.rs",
+    "crates/dirk_renderer/src/egui_integration.rs",
+    "crates/dirk_utils/src/version.rs",
+]
+
+[deviations.inline-limits]
+reason = "1 finding: the adoption stack's fourth pull request names the limit"
+paths = ["crates/dirk_engine/src/lib.rs"]
+
+[deviations.duplicate-items]
+reason = "1 finding: the open pull request #133 deletes frame_graph.rs, which viewport.rs repeats"
+paths = ["crates/dirk_renderer/src/viewport.rs"]
+
+[deviations.anyhow-edges]
+reason = "7 findings: plugin and subsystem callbacks and asset loaders return anyhow errors, and the coming API overhaul types their errors"
+crates = [
+    "dirk_assets",
+    "dirk_editor",
+    "dirk_engine",
+    "dirk_platform",
+    "dirk_player",
+    "dirk_renderer",
+    "dirk_world",
+]
+
+[deviations.agents-md]
+reason = "AGENTS.md holds 170 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+paths = ["AGENTS.md"]

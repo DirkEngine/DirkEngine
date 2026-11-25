@@ -4,7 +4,7 @@
 default: validate
 
 # Formats the sources, then runs every check CI runs.
-validate: fmt lint test test-minimal doc doc-test audit unused
+validate: fmt lint standard test test-minimal doc doc-test audit unused
 
 # Runs the engine from the workspace root, where it finds `assets/` and writes
 # `saved/`; arguments go on to its CLI.
@@ -14,6 +14,10 @@ run *ARGS:
 
 build:
     @cargo build --locked --workspace
+
+# Type-checks every target with every feature, without linting or building.
+check:
+    @cargo check --locked --workspace --all-targets --all-features
 
 # T3 Code runs this when it creates a worktree (t3.json), often for several at
 # once, so the build runs at low priority on half the cores unless
@@ -39,7 +43,7 @@ lint:
     set -euo pipefail
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     cargo clippy --locked --workspace --exclude dirk_editor --all-targets --no-default-features -- -D warnings
-    for manifest in apps/*/Cargo.toml crates/*/Cargo.toml; do
+    for manifest in apps/*/Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml; do
         cargo clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings
     done
 
@@ -67,3 +71,14 @@ audit:
 # Dependencies a crate declares but never names.
 unused:
     @cargo machete
+
+# The engineering standard's rules; `cargo xtask standard rules` lists them,
+# and `cargo xtask standard --fix` makes the fixes that need no judgement.
+standard:
+    @cargo xtask standard
+
+# CI's quick checks, for only what changed since the merge base with a branch
+# (origin/main unless named).
+[positional-arguments]
+check-changed *ARGS:
+    @cargo xtask check-changed "$@"

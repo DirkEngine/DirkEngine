@@ -1,3 +1,5 @@
+#![expect(unsafe_code, reason = "A window's surface is created through ash.")]
+
 use ash::vk;
 use dirk_platform::WindowId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

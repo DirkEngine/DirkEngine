@@ -1,3 +1,8 @@
+#![expect(
+    unsafe_code,
+    reason = "The validation layers' debug messenger is created and read through ash."
+)]
+
 use std::{ffi::CStr, os::raw::c_void};
 
 use ash::{Entry, vk};

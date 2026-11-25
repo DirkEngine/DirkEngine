@@ -1,3 +1,8 @@
+#![expect(
+    unsafe_code,
+    reason = "The scene's uniform buffers are written through their mapped memory."
+)]
+
 use std::collections::{HashMap, HashSet};
 
 use ash::vk;
