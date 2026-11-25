@@ -60,9 +60,6 @@ enforce-lint-exceptions = false
 
 # Each deviation lists the files its findings were in when DirkEngine adopted
 # the standard; `cargo xtask standard --fix` drops each file once it complies.
-[deviations]
-skills-synced = "7 findings: the shared skills are synced in the adoption stack's third pull request"
-
 [deviations.rust-comments]
 reason = "260 findings: those in the files the open pull requests #72, #104, #106 and #133 rewrite or delete end with those pull requests; the rest are fixed in a follow-up"
 paths = [
@@ -164,5 +161,5 @@ crates = [
 ]
 
 [deviations.agents-md]
-reason = "AGENTS.md holds 170 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
+reason = "AGENTS.md holds 184 lines, over 150, while the open stack edits it; once the stack lands, a later pull request adds the crate map and trims it to 150 lines"
 paths = ["AGENTS.md"]
