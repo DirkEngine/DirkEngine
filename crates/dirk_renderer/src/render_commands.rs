@@ -19,14 +19,10 @@ impl RenderCommandSender {
     where
         F: FnOnce(&mut Renderer) -> Result<()> + Send + 'static,
     {
-        // The only real failure here is a disconnected channel (receiver was
-        // dropped), which generally means the render thread has shut down.
-        // Silently dropping the command is the safest thing to do.
         let _ = self.tx.send(Box::new(command));
     }
 }
 
-// RenderCommandSender is cheap to clone — each clone shares the same channel.
 impl Clone for RenderCommandSender {
     fn clone(&self) -> Self {
         Self {

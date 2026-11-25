@@ -51,8 +51,6 @@ impl EnginePlugin for PlayerPlugin {
     }
 }
 
-// PlayerId
-
 /// A lightweight, copyable identifier for a player.
 ///
 /// Implements [`Component`] so that ECS entities can declare ownership by
@@ -91,8 +89,6 @@ impl AddAssign<u32> for PlayerId {
     }
 }
 
-// PlayerHandle
-
 /// The engine's representation of a connected player.
 ///
 /// A `PlayerHandle` is intentionally a pure data container: it has no entity,
@@ -123,8 +119,6 @@ impl PlayerHandle {
         self.input.movement_input()
     }
 }
-
-// PlayerManager
 
 /// Manages the full lifecycle of all players.
 ///
@@ -162,7 +156,6 @@ pub struct PlayerRegistry {
 
 #[derive(Default)]
 struct PlayerState {
-    // TODO: setup generation based player allocation
     next_id: PlayerId,
     players: HashMap<PlayerId, PlayerHandle>,
 }

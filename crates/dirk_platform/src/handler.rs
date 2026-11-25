@@ -118,8 +118,6 @@ impl PlatformHandler {
             WindowEvent::Focused(focused) => {
                 if !focused {
                     self.pointer_positions.remove(&id);
-                    // Focus loss can consume the matching key/button and
-                    // modifier releases.
                     self.set_modifiers(id, ModifiersState::default());
                 }
                 self.dispatch_input(id, InputEvent::FocusChanged(*focused));
@@ -254,8 +252,6 @@ impl PlatformHandler {
             MouseScrollDelta::PixelDelta(px) => (glam::dvec2(px.x, px.y), ScrollUnit::Point),
             _ => return,
         };
-        // Line deltas are dimensionless. Normalize them by the logical
-        // extent so the egui conversion does not shrink them again by DPI.
         self.dispatch_input(
             id,
             InputEvent::Scroll {

@@ -1,8 +1,6 @@
 use super::*;
 use syn::{DeriveInput, parse_str};
 
-// ── rewrite_placeholders ──────────────────────────────────────────────────
-
 fn lit(format: &str) -> LitStr {
     LitStr::new(format, Span::call_site())
 }
@@ -104,8 +102,6 @@ fn rewrite_rejects_unbalanced_braces() {
     assert!(tuple_error("open {0:}>5", 1).contains("unclosed `{`"));
     assert!(tuple_error("close }", 1).contains("unmatched `}`"));
 }
-
-// ── get_message_format_from_attrs ─────────────────────────────────────────
 
 #[test]
 fn format_falls_back_to_debug_repr_when_no_attr() {

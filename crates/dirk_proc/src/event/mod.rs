@@ -4,12 +4,9 @@ use syn::{Attribute, DataEnum, DataStruct, DeriveInput, Fields, Ident, LitStr};
 
 pub fn derive_event_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<TokenStream> {
     let name = &input.ident;
-    // Split generics into the three parts needed for an impl block:
-    // <T: Any>  |  <T>  |  where T: Any
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let content = if data.variants.is_empty() {
-        // Nothing to match on; fall back to the Debug representation.
         quote! { format!("{self:?}") }
     } else {
         let arms = data
@@ -20,8 +17,6 @@ pub fn derive_event_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<To
                 let fmt = get_message_format_from_attrs(&variant.attrs)?;
                 let (pattern, format_expr) = create_field_bindings(&variant.fields, &fmt)?;
                 Ok(quote! {
-                    // Generated code keeps `allow`: an `expect` would warn for
-                    // every format that uses all of its fields.
                     #[allow(unused_variables)]
                     Self::#var_name #pattern => #format_expr,
                 })
@@ -47,12 +42,10 @@ pub fn derive_event_struct(input: &DeriveInput, data: &DataStruct) -> syn::Resul
     let fmt = get_message_format_from_attrs(&input.attrs)?;
     let (pattern, format_expr) = create_field_bindings(&data.fields, &fmt)?;
 
-    // Unit structs need no destructuring; everything else gets a `let Self …`.
     let content = if let Fields::Unit = data.fields {
         format_expr
     } else {
         quote! {
-            // See the enum arms above for why this is an `allow`.
             #[allow(unused_variables)]
             let Self #pattern = self;
             #format_expr
@@ -76,30 +69,24 @@ fn create_field_bindings(
     message_format: &LitStr,
 ) -> syn::Result<(TokenStream, TokenStream)> {
     match fields {
-        // struct Foo { x: T, y: T }  →  let Self { x, y, .. } = self;
         Fields::Named(named) => {
             let fmt = rewrite_placeholders(message_format, None)?;
             let idents: Vec<_> = named.named.iter().map(|f| &f.ident).collect();
-            // `..` lets the pattern survive the addition of new fields.
             let pattern = quote! { { #(#idents,)* .. } };
             let format_expr = quote! { format!(#fmt) };
 
             Ok((pattern, format_expr))
         }
-        // struct Foo(T, T)  →  let Self(_0, _1) = self;
         Fields::Unnamed(unnamed) => {
             let fmt = rewrite_placeholders(message_format, Some(unnamed.unnamed.len()))?;
             let idents: Vec<Ident> = (0..unnamed.unnamed.len())
                 .map(|i| quote::format_ident!("_{i}"))
                 .collect();
-            // No `..`: we enumerate every field, so the pattern is already
-            // exhaustive. Adding `..` would cause an "unnecessary `..`" lint.
             let pattern = quote! { ( #(#idents,)* ) };
             let format_expr = quote! { format!(#fmt) };
 
             Ok((pattern, format_expr))
         }
-        // struct Foo;  →  nothing to destructure.
         Fields::Unit => {
             let fmt = rewrite_placeholders(message_format, None)?;
             Ok((quote! {}, quote! { format!(#fmt) }))
@@ -161,8 +148,6 @@ fn rewrite_placeholders(format: &LitStr, tuple_fields: Option<usize>) -> syn::Re
             ));
         }
 
-        // A brace immediately before alignment is a fill character, not a
-        // delimiter. Skip it before looking for the placeholder's end.
         let end = tail.find([':', '}']).and_then(|index| {
             if tail.as_bytes()[index] == b'}' {
                 Some(index)
@@ -214,7 +199,6 @@ fn rewrite_placeholders(format: &LitStr, tuple_fields: Option<usize>) -> syn::Re
             output.push('_');
             output.push_str(&index.to_string());
         } else {
-            // Named captures such as `{self:?}` are resolved by `format!`.
             output.push_str(argument);
         }
         if let Some(spec) = spec {
@@ -253,8 +237,6 @@ fn validate_spec(spec: &str) -> Result<(), &'static str> {
              such as `.2` or a named capture such as `.prec$`",
         );
     }
-    // Split on format syntax, not identifier characters: capture names can
-    // contain Unicode. `name$` is a capture; `N$` is a positional argument.
     let positional_argument = spec.match_indices('$').any(|(dollar, _)| {
         let name = spec[..dollar]
             .rsplit(['+', '-', '#', '.', '$'])

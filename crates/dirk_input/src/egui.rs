@@ -221,12 +221,10 @@ pub fn input_events_from_egui_response(
     response: &egui::Response,
     previous_pointer: Option<egui::Pos2>,
 ) -> Vec<InputEvent> {
-    // if the pointer is currently routing input
     let pointer_routes = response.hovered()
         || response.dragged()
         || response.is_pointer_button_down_on()
         || previous_pointer.is_some();
-    // if the keyboard is currently routing input
     let keyboard_routes = response.has_focus() || previous_pointer.is_some();
     let rect = response.rect;
     let size = rect.size();
@@ -294,8 +292,6 @@ pub fn input_events_from_egui_response(
                     out.push(InputEvent::PointerLeft);
                     previous_pointer = None;
                 }
-                // `has_focus()` is already false after native focus loss.
-                // Every viewport must release any input it previously owned.
                 egui::Event::WindowFocused(false) => {
                     out.push(InputEvent::FocusChanged(false));
                     out.push(InputEvent::ModifiersChanged(Modifiers::default()));
@@ -407,7 +403,7 @@ fn logical_key(key: egui::Key) -> Option<LogicalKey> {
         egui::Key::F10 => LogicalKey::Named(NamedKey::Function(10)),
         egui::Key::F11 => LogicalKey::Named(NamedKey::Function(11)),
         egui::Key::F12 => LogicalKey::Named(NamedKey::Function(12)),
-        _ => return None, // TODO: other keys
+        _ => return None,
     })
 }
 

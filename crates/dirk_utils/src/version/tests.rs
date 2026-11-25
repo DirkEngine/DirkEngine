@@ -1,7 +1,5 @@
 use super::*;
 
-// -- Construction & accessors --
-
 #[test]
 fn test_fields_roundtrip() {
     let v = Version::new(1, 2, 3);
@@ -38,8 +36,6 @@ fn test_patch_overflow_panics() {
     let _ = Version::new(0, 0, 4096);
 }
 
-// -- Bumping --
-
 #[test]
 fn test_bump_major_resets_minor_and_patch() {
     assert_eq!(
@@ -75,8 +71,6 @@ fn test_bump_at_limit_returns_none() {
     );
 }
 
-// -- Ordering --
-
 #[test]
 fn test_ordering() {
     assert!(Version::new(2, 0, 0) > Version::new(1, 9, 9));
@@ -84,8 +78,6 @@ fn test_ordering() {
     assert!(Version::new(1, 0, 1) > Version::new(1, 0, 0));
     assert_eq!(Version::new(1, 2, 3), Version::new(1, 2, 3));
 }
-
-// -- Compatibility --
 
 #[test]
 fn test_compatible_same_major_higher_minor() {
@@ -107,8 +99,6 @@ fn test_prerelease() {
     assert!(Version::new(0, 9, 0).is_prerelease());
     assert!(!Version::new(1, 0, 0).is_prerelease());
 }
-
-// -- Formatting & parsing --
 
 #[test]
 fn test_display() {
@@ -146,8 +136,6 @@ fn test_parse_display_roundtrip() {
         .expect("displayed version should parse");
     assert_eq!(original, roundtripped);
 }
-
-// -- Raw conversion --
 
 #[test]
 fn test_from_into_u32() {

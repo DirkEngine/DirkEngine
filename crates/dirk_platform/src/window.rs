@@ -180,7 +180,6 @@ impl Window {
         }
 
         match *event {
-            // Resizing is handled by the renderer.
             WindowEvent::Resized { .. } => {}
             WindowEvent::Occluded { id: _, occluded } => self.occluded = occluded,
             WindowEvent::FocusChanged { id: _, focused } => self.focused = focused,
