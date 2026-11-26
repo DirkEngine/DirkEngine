@@ -1,6 +1,6 @@
 //! Orders systems from the data they declare.
 //!
-//! A system reading `C` (through `&C`, `Delta<C>` or a filter) runs after
+//! A system reading `C` (through `&C`, `Changes<C>` or a filter) runs after
 //! every system writing `C`, so it sees this tick's values. An explicit order
 //! replaces the derived one, which breaks cycles: a reader ordered before a
 //! writer sees the values it left the previous tick. Systems that write the

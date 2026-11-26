@@ -17,7 +17,7 @@ impl WorldId {
     }
 
     /// Returns the ID of the world represented by `entity`, such as a world
-    /// reported by `Delta<World>`. Commands ignore IDs of entities that are
+    /// reported by `Changes<World>`. Commands ignore IDs of entities that are
     /// not live worlds.
     #[must_use]
     pub fn from_entity(entity: Entity) -> Self {
@@ -45,7 +45,7 @@ impl Display for WorldId {
 
 /// The component that makes an entity a world. Worlds hold entities, which
 /// carry an [`InWorld`] component naming their world. Query `&World` to list
-/// worlds, and `Delta<World>` to observe their creation and destruction.
+/// worlds, and `Changes<World>` to observe their creation and destruction.
 #[derive(Clone, Debug)]
 pub struct World {
     id: WorldId,
@@ -81,7 +81,7 @@ impl World {
 }
 
 /// The world an entity lives in. Spawning adds it, sending an entity replaces
-/// it and despawning removes it, so `Delta<InWorld>` observes all three.
+/// it and despawning removes it, so `Changes<InWorld>` observes all three.
 ///
 /// Only the engine writes it; move entities with
 /// [`CommandBuffer::send`](crate::CommandBuffer::send) instead:

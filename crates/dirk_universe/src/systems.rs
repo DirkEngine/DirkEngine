@@ -11,9 +11,9 @@ use std::{
 
 use crate::{
     CommandBuffer, Entity, EntityBuilder, Universe, WorldBuilder, WorldId,
-    components::MutableComponent,
+    components::{Component, MutableComponent},
     macros::sealed::Sealed,
-    query::{Join, Query, QueryData, filter::QueryFilter},
+    query::{Changes, Query, QueryData, filter::QueryFilter},
     schedule::{Access, SystemConfig, SystemId},
 };
 
@@ -68,10 +68,7 @@ macro_rules! impl_system_param_for_tuple {
 all_tuples!(impl_system_param_for_tuple);
 
 impl<D: QueryData, F: QueryFilter> Sealed for Query<'_, D, F> {}
-impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F>
-where
-    D::Liveness: Join<F::Liveness>,
-{
+impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
     type Item<'u> = Query<'u, D, F>;
 
     fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
@@ -81,6 +78,19 @@ where
     fn register_access(access: &mut Access) {
         D::register_access(access);
         F::register_access(access);
+    }
+}
+
+impl<C: Component> Sealed for Changes<'_, C> {}
+impl<C: Component> SystemParam for Changes<'_, C> {
+    type Item<'u> = Changes<'u, C>;
+
+    fn fetch<'u>(context: &'u SystemContext<'_>) -> Self::Item<'u> {
+        Changes::new(context.universe, context.last_run)
+    }
+
+    fn register_access(access: &mut Access) {
+        access.read::<C>();
     }
 }
 
