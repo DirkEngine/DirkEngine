@@ -53,8 +53,8 @@ places where errors from many crates meet: plugin and subsystem callbacks, the
 binary and its CLI, and the editor. Add `.context` to each step there.
 
 Production code never panics: no `unwrap`, `expect`, `panic!`, `todo!` or
-`unimplemented!`. Return an error when the input can be wrong, such as an
-unsupported glTF image format. An invariant the types can't express takes an
+`unimplemented!`. Return an error when the input can be wrong, such as a
+malformed `.dirkasset` file. An invariant the types can't express takes an
 `#[expect(clippy::expect_used, reason = "...")]` on the smallest item around
 it, saying what guarantees it, such as `"Only Drop takes the allocator."`.
 Tests may panic, through an `expect` that says what should have held; `unwrap`
