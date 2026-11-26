@@ -7,7 +7,8 @@ use std::{
 };
 
 use dirk_shaders::bindless::{
-    BufferIndex, HeapIndex, HeapIndices, SamplerIndex, StorageImageIndex, TextureIndex, heap,
+    BufferIndex, DepthTextureIndex, HeapIndex, HeapIndices, SamplerIndex, StorageImageIndex,
+    TextureIndex, heap,
 };
 
 use crate::{Error, Result};
@@ -31,6 +32,9 @@ impl Slot {
             }
             heap::SAMPLERS => HeapIndex::Sampler(SamplerIndex::new(self.index)),
             heap::BUFFERS => HeapIndex::Buffer(BufferIndex::new(self.index)),
+            heap::DEPTH_TEXTURES_2D..=heap::DEPTH_TEXTURES_CUBE_ARRAY => {
+                HeapIndex::DepthTexture(DepthTextureIndex::new(self.index))
+            }
             binding => unreachable!("the heap has no binding {binding}"),
         }
     }
@@ -85,7 +89,8 @@ impl FreeSlots {
 /// array an index kind reads shares that kind's frames: shaders may read
 /// any of them through it.
 const TEXTURES: usize = 0;
-const STORAGE_IMAGES: usize = TEXTURES + heap::IMAGE_CAPACITY as usize;
+const DEPTH_TEXTURES: usize = TEXTURES + heap::IMAGE_CAPACITY as usize;
+const STORAGE_IMAGES: usize = DEPTH_TEXTURES + heap::IMAGE_CAPACITY as usize;
 const SAMPLERS: usize = STORAGE_IMAGES + heap::IMAGE_CAPACITY as usize;
 const BUFFERS: usize = SAMPLERS + heap::SAMPLER_CAPACITY as usize;
 const SLOTS: usize = BUFFERS + heap::BUFFER_CAPACITY as usize;
@@ -154,6 +159,7 @@ impl Reads {
     fn position(index: HeapIndex) -> usize {
         let (first, slot) = match index {
             HeapIndex::Texture(index) => (TEXTURES, index.slot()),
+            HeapIndex::DepthTexture(index) => (DEPTH_TEXTURES, index.slot()),
             HeapIndex::StorageImage(index) => (STORAGE_IMAGES, index.slot()),
             HeapIndex::Sampler(index) => (SAMPLERS, index.slot()),
             HeapIndex::Buffer(index) => (BUFFERS, index.slot()),

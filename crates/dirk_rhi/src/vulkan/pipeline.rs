@@ -211,7 +211,7 @@ impl FrontFace {
 
 impl CompareOp {
     /// The equivalent Vulkan compare op.
-    const fn vk(self) -> vk::CompareOp {
+    pub(super) const fn vk(self) -> vk::CompareOp {
         match self {
             Self::Never => vk::CompareOp::NEVER,
             Self::Less => vk::CompareOp::LESS,

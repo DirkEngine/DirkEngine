@@ -1,8 +1,8 @@
 use dirk_shaders::bindless::heap;
 
 use crate::{
-    Capabilities, Error, Features, Format, ImageAccess, ImageUsage, Limits, Result, Rhi,
-    SampleCounts, StorageImageIndex, TextureIndex, command::Transition, native,
+    Capabilities, DepthTextureIndex, Error, Features, Format, ImageAccess, ImageUsage, Limits,
+    Result, Rhi, SampleCounts, StorageImageIndex, TextureIndex, command::Transition, native,
 };
 
 /// Width, height and depth of an image, in texels.
@@ -269,6 +269,7 @@ pub struct Image {
 pub struct ImageView {
     view_type: ViewType,
     texture: Option<TextureIndex>,
+    depth_texture: Option<DepthTextureIndex>,
     storage: Option<StorageImageIndex>,
 }
 
@@ -285,11 +286,13 @@ impl Rhi {
     pub fn create_image(&self, desc: &ImageDesc<'_>) -> Result<Image> {
         let (view_type, rest) = desc.check(self.capabilities())?;
         let raw = native::Image::new(&self.device, desc, view_type)?;
-        let [texture, storage] = raw.slots().map(|slot| slot.map(|slot| slot.index));
+        let [sampled, storage] = raw.slots().map(|slot| slot.map(|slot| slot.index));
+        let depth = desc.format.is_depth_stencil();
         let image = Image {
             view: view_type.map(|view_type| ImageView {
                 view_type,
-                texture: texture.map(TextureIndex::new),
+                texture: sampled.filter(|_| !depth).map(TextureIndex::new),
+                depth_texture: sampled.filter(|_| depth).map(DepthTextureIndex::new),
                 storage: storage.map(StorageImageIndex::new),
             }),
             raw,
@@ -326,6 +329,7 @@ impl Image {
             view: Some(ImageView {
                 view_type,
                 texture: None,
+                depth_texture: None,
                 storage: None,
             }),
             label: label.into(),
@@ -394,6 +398,9 @@ impl ImageDesc<'_> {
             ImageDimension::D2 => (limits.max_image_dimension_2d, ViewType::D2Array),
             ImageDimension::D3 if self.array_layers != 1 => {
                 return Err(self.invalid("3D images have one array layer"));
+            }
+            ImageDimension::D3 if self.format.is_depth_stencil() => {
+                return Err(self.invalid("depth images are 2D or cubes, not 3D"));
             }
             ImageDimension::D3 => (limits.max_image_dimension_3d, ViewType::D3),
             ImageDimension::Cube
@@ -608,16 +615,30 @@ impl Image {
 }
 
 impl ViewType {
-    /// The heap arrays images viewed this way are sampled and stored through,
-    /// if any.
-    pub(crate) const fn heap_bindings(self) -> (u32, Option<u32>) {
-        match self {
-            Self::D2 => (heap::TEXTURES_2D, Some(heap::STORAGE_IMAGES_2D)),
-            Self::D2Array => (heap::TEXTURES_2D_ARRAY, Some(heap::STORAGE_IMAGES_2D_ARRAY)),
-            Self::Cube => (heap::TEXTURES_CUBE, None),
-            Self::CubeArray => (heap::TEXTURES_CUBE_ARRAY, None),
-            Self::D3 => (heap::TEXTURES_3D, Some(heap::STORAGE_IMAGES_3D)),
-        }
+    /// The heap arrays images of `format` viewed this way are sampled and
+    /// stored through, if any, with the usage each needs. Depth images are
+    /// sampled through the depth texture arrays and never stored.
+    pub(crate) const fn heap_bindings(self, format: Format) -> [(ImageUsage, Option<u32>); 2] {
+        let (sampled, storage) = match (self, format.is_depth_stencil()) {
+            (Self::D2, false) => (Some(heap::TEXTURES_2D), Some(heap::STORAGE_IMAGES_2D)),
+            (Self::D2Array, false) => (
+                Some(heap::TEXTURES_2D_ARRAY),
+                Some(heap::STORAGE_IMAGES_2D_ARRAY),
+            ),
+            (Self::Cube, false) => (Some(heap::TEXTURES_CUBE), None),
+            (Self::CubeArray, false) => (Some(heap::TEXTURES_CUBE_ARRAY), None),
+            (Self::D3, false) => (Some(heap::TEXTURES_3D), Some(heap::STORAGE_IMAGES_3D)),
+            (Self::D2, true) => (Some(heap::DEPTH_TEXTURES_2D), None),
+            (Self::D2Array, true) => (Some(heap::DEPTH_TEXTURES_2D_ARRAY), None),
+            (Self::Cube, true) => (Some(heap::DEPTH_TEXTURES_CUBE), None),
+            (Self::CubeArray, true) => (Some(heap::DEPTH_TEXTURES_CUBE_ARRAY), None),
+            // Creation rejects 3D depth images.
+            (Self::D3, true) => (None, None),
+        };
+        [
+            (ImageUsage::SAMPLED, sampled),
+            (ImageUsage::STORAGE, storage),
+        ]
     }
 }
 
@@ -629,10 +650,18 @@ impl ImageView {
     }
 
     /// The view's index in the heap's texture array of its view type, if
-    /// the image has [`ImageUsage::SAMPLED`].
+    /// the image has [`ImageUsage::SAMPLED`] and a color format.
     #[must_use]
     pub fn index(&self) -> Option<TextureIndex> {
         self.texture
+    }
+
+    /// The view's index in the heap's depth texture array of its view type,
+    /// if the image has [`ImageUsage::SAMPLED`] and a depth format. Every
+    /// sampled depth format can be compared with a comparison sampler.
+    #[must_use]
+    pub fn depth_index(&self) -> Option<DepthTextureIndex> {
+        self.depth_texture
     }
 
     /// The view's index in the heap's storage image array of its view type,
