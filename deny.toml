@@ -98,7 +98,7 @@ allow-workspace = true
 # the rest of the engine never depends on them directly.
 deny = [
     { crate = "ash", wrappers = ["dirk_renderer", "dirk_rhi", "ash-window", "gpu-allocator", "egui-ash-renderer"], reason = "Vulkan stays inside the renderer and the RHI." },
-    { crate = "gpu-allocator", wrappers = ["dirk_renderer"], reason = "GPU memory stays inside the renderer." },
+    { crate = "gpu-allocator", wrappers = ["dirk_renderer", "dirk_rhi"], reason = "GPU memory stays inside the renderer and the RHI." },
     { crate = "winit", wrappers = ["dirk_platform"], reason = "Windowing stays inside the platform layer." },
     { crate = "egui", wrappers = ["dirk_editor", "dirk_engine", "dirk_input", "dirk_renderer", "egui-ash-renderer", "egui_dock"], reason = "egui stays behind the editor and its input and rendering." },
 ]

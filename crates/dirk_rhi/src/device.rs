@@ -16,7 +16,7 @@ pub struct RhiCreateInfo<'a> {
 
 /// The render hardware interface: one device and everything created from it.
 pub struct Rhi {
-    device: Arc<native::Device>,
+    pub(crate) device: Arc<native::Device>,
 }
 
 impl Rhi {
