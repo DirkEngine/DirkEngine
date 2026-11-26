@@ -19,5 +19,10 @@ quote.workspace = true
 rspirv.workspace = true
 syn.workspace = true
 
+# Translates shaders to MSL for Apple targets. Build scripts run on the host,
+# so only macOS hosts, the ones that build for Apple targets, compile it.
+[target.'cfg(target_os = "macos")'.dependencies]
+spirv-cross2.workspace = true
+
 [lints]
 workspace = true
