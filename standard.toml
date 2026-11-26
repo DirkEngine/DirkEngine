@@ -26,6 +26,43 @@ anyhow-crates = ["dirkengine", "dirk_build"]
 [check-changed]
 builds = [{ builder = "dirk_renderer", built = "dirk_shaders_gpu" }]
 
+# The pull request checks of .github/workflows/pr.yml, read at a pull
+# request's base. The scopes are the ones titles on main and the open pull
+# requests use, each crate's and the tooling's.
+[pr-checks]
+scopes = [
+    "agents",
+    "assets",
+    "build",
+    "ci",
+    "deps",
+    "editor",
+    "engine",
+    "events",
+    "input",
+    "platform",
+    "player",
+    "proc",
+    "project",
+    "render-utils",
+    "renderer",
+    "rhi",
+    "runtime",
+    "shaders",
+    "standard",
+    "threads",
+    "universe",
+    "utils",
+    "world",
+    "worktree",
+    "xtask",
+]
+approvers = ["PiquelChips"]
+# Only reported until the open stack lands: about 20 of its pull requests
+# change budget.toml or standard.toml, and each would need the label again
+# after every push.
+enforce-lint-exceptions = false
+
 # Each scoped deviation lists the files its findings were in when DirkEngine
 # adopted the standard; `cargo xtask standard --fix` drops each file once it
 # complies.

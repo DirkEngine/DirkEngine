@@ -1,0 +1,27 @@
+# The engineering standard's checks of a pull request itself: its title,
+# description, commits and exceptions. `pull_request_target` runs main's
+# workflow, and the checks read their settings, `[pr-checks]` of
+# standard.toml, at the base, so a pull request can't loosen its own checks.
+# No step checks out or runs the pull request's code, and the token only reads.
+
+name: PR
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  standard:
+    uses: sourceorigin-dev/standard/.github/workflows/pr-checks.yml@e12b61e8193b4c93c1684b2a1113ef4607cdf3fc # v0.1.3
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read

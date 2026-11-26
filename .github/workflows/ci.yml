@@ -14,13 +14,15 @@
 # Each job compiles once and reuses it for every step. Pull requests run only
 # when their changes can affect the result (see `changes`), and draft pull
 # requests skip macOS, the slowest runner, until they are marked ready. Pushes
-# to main and manual runs run everything. `ci` is the single status to
-# require: it fails if any job failed and passes when the rest succeeded or
-# were skipped. deny.yml audits new advisories weekly.
+# to main and manual runs run everything. `ci` fails if any job failed and
+# passes when the rest succeeded or were skipped. It is one of the two checks
+# to require, with pr.yml's `standard / pr-checks`. deny.yml audits new
+# advisories weekly.
 #
 # `merge_group` runs the full CI on the merge queue's temporary branch, so
-# `main` can require a merge queue and `ci` together. The queue's runs are
-# neither pull requests nor drafts, so they run every job on both platforms.
+# `main` can require a merge queue and both checks together. The queue's runs
+# are neither pull requests nor drafts, so they run every job on both
+# platforms.
 #
 # Caches are saved from main only. Pull requests restore main's caches, so a
 # branch never evicts them with copies no other branch can read.
