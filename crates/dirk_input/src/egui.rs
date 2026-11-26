@@ -1,9 +1,29 @@
 //! egui input helpers.
 
 use crate::{
-    ButtonState, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta, NormalizedPosition,
-    PointerButton, ScrollUnit,
+    ButtonState, ImeEvent, InputEvent, LogicalKey, Modifiers, NamedKey, NormalizedDelta,
+    NormalizedPosition, PointerButton, ScrollUnit,
 };
+
+impl ImeEvent {
+    /// Converts this event for egui, which no longer uses composition start
+    /// and treats an empty preedit as the end of composition.
+    #[must_use]
+    pub fn to_egui(self) -> Option<egui::ImeEvent> {
+        Some(match self {
+            Self::Enabled => return None,
+            Self::Preedit(text) => egui::ImeEvent::Preedit {
+                text,
+                active_range_chars: None,
+            },
+            Self::Commit(text) => egui::ImeEvent::Commit(text),
+            Self::Disabled => egui::ImeEvent::Preedit {
+                text: String::new(),
+                active_range_chars: None,
+            },
+        })
+    }
+}
 
 impl From<PointerButton> for egui::PointerButton {
     fn from(value: PointerButton) -> Self {

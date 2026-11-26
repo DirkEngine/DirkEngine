@@ -72,11 +72,8 @@ doc-length = "DirkEngine is written by hand, mostly without AI; it keeps its com
 config-comments = "DirkEngine is written by hand, mostly without AI; it keeps its comments"
 
 [deviations.inline-tests]
-reason = "2 findings: the open pull request #106 rewrites dirk_player's input.rs, where a move now would conflict, and #133 deletes egui_integration.rs"
-paths = [
-    "crates/dirk_player/src/input.rs",
-    "crates/dirk_renderer/src/egui_integration.rs",
-]
+reason = "1 finding: the open pull request #133 deletes egui_integration.rs"
+paths = ["crates/dirk_renderer/src/egui_integration.rs"]
 
 [deviations.duplicate-items]
 reason = "1 finding: the open pull request #133 deletes frame_graph.rs, which viewport.rs repeats"
