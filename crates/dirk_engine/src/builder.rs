@@ -325,7 +325,7 @@ impl EngineBuilder {
             editor::EditorRuntime::new(editor_services, editor_subsystems)
         };
 
-        let universe = context.builder.build();
+        let universe = context.builder.build()?;
 
         Ok(Engine {
             logger,

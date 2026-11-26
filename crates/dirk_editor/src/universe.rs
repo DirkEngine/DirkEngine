@@ -200,7 +200,10 @@ mod tests {
         for _ in 0..5_000 {
             world = world.with_entity(Entity::builder());
         }
-        let mut universe = Universe::builder().with_world(world).build();
+        let mut universe = Universe::builder()
+            .with_world(world)
+            .build()
+            .expect("universe should schedule");
         universe.tick(0.0);
 
         let ctx = egui::Context::default();
@@ -229,7 +232,10 @@ mod tests {
         for _ in 0..100 {
             world = world.with_entity(Entity::builder());
         }
-        let mut universe = Universe::builder().with_world(world).build();
+        let mut universe = Universe::builder()
+            .with_world(world)
+            .build()
+            .expect("universe should schedule");
         universe.tick(0.0);
 
         let ctx = egui::Context::default();

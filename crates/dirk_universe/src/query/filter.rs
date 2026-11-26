@@ -3,7 +3,7 @@
 use std::{any::TypeId, marker::PhantomData};
 
 use super::{AnyEntity, Join, LiveEntity, Liveness};
-use crate::{Entity, Universe, components::Component, macros::sealed::Sealed};
+use crate::{Entity, Universe, components::Component, macros::sealed::Sealed, schedule::Access};
 
 /// A predicate that decides whether an entity is included in a query.
 ///
@@ -18,6 +18,10 @@ pub trait QueryFilter: Sealed {
     /// Returns `true` when `entity` satisfies this filter in `universe`.
     #[doc(hidden)]
     fn matches(entity: Entity, universe: &Universe, last_run: u64) -> bool;
+
+    /// Registers the components this filter depends on.
+    #[doc(hidden)]
+    fn register_access(access: &mut Access);
 }
 
 impl QueryFilter for () {
@@ -26,6 +30,8 @@ impl QueryFilter for () {
     fn matches(_: Entity, _: &Universe, _: u64) -> bool {
         true
     }
+
+    fn register_access(_: &mut Access) {}
 }
 
 macro_rules! impl_filter_for_tuple {
@@ -42,6 +48,11 @@ macro_rules! impl_filter_for_tuple {
                 $first::matches(entity, universe, last_run)
                     $(&& $ty::matches(entity, universe, last_run))*
             }
+
+            fn register_access(access: &mut Access) {
+                $first::register_access(access);
+                $($ty::register_access(access);)*
+            }
         }
     };
 }
@@ -56,6 +67,10 @@ impl<C: Component> QueryFilter for With<C> {
     fn matches(entity: Entity, universe: &Universe, _: u64) -> bool {
         universe.components.contains(entity, TypeId::of::<C>())
     }
+
+    fn register_access(access: &mut Access) {
+        access.observe::<C>();
+    }
 }
 
 /// Matches entities that do **not** have component `C`.
@@ -66,6 +81,10 @@ impl<C: Component> QueryFilter for Without<C> {
 
     fn matches(entity: Entity, universe: &Universe, _: u64) -> bool {
         !universe.components.contains(entity, TypeId::of::<C>())
+    }
+
+    fn register_access(access: &mut Access) {
+        access.observe::<C>();
     }
 }
 
@@ -79,6 +98,10 @@ impl<C: Component> QueryFilter for Added<C> {
     fn matches(entity: Entity, universe: &Universe, last_run: u64) -> bool {
         universe.components.added::<C>(entity, last_run)
     }
+
+    fn register_access(access: &mut Access) {
+        access.observe::<C>();
+    }
 }
 
 /// Matches components added or mutably dereferenced since this system last ran.
@@ -90,5 +113,9 @@ impl<C: Component> QueryFilter for Changed<C> {
 
     fn matches(entity: Entity, universe: &Universe, last_run: u64) -> bool {
         universe.components.changed::<C>(entity, last_run)
+    }
+
+    fn register_access(access: &mut Access) {
+        access.observe::<C>();
     }
 }
