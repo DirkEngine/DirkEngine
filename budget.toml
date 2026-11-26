@@ -13,7 +13,7 @@ dirk_proc = 0
 dirk_renderer = 53
 dirk_shaders_gpu = 1
 dirk_threads = 1
-dirk_universe = 7
+dirk_universe = 11
 
 [wall-clock]
 dirk_assets = 1

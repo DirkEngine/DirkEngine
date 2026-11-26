@@ -11,8 +11,9 @@ use std::{
 
 /// Data attached to an entity. Derive it with `#[derive(Component)]`.
 pub trait Component: 'static + Sized + Debug + Send {
-    /// [`Mutable`] for ordinary components, or [`ReadOnly`] for components
-    /// that only the engine writes, such as [`InWorld`](crate::InWorld).
+    /// [`Mutable`] for ordinary components, [`Derived`] for outputs of
+    /// `UniverseBuilder::with_derived`, or [`ReadOnly`] for components that
+    /// only the engine writes, such as [`InWorld`](crate::InWorld).
     type Mutability: Mutability;
 }
 #[doc(hidden)]
@@ -30,6 +31,12 @@ impl Mutability for Mutable {}
 pub enum ReadOnly {}
 impl Sealed for ReadOnly {}
 impl Mutability for ReadOnly {}
+
+/// Components computed from others by `UniverseBuilder::with_derived`.
+/// Queries can read them, but only their derivation writes them.
+pub enum Derived {}
+impl Sealed for Derived {}
+impl Mutability for Derived {}
 
 /// A component that `&mut C` queries, commands and entity builders may write.
 pub trait MutableComponent: Component<Mutability = Mutable> {}
