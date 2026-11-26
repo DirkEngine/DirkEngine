@@ -197,6 +197,7 @@ impl Adapter {
                 max_viewport_dimensions: limits.max_viewport_dimensions,
                 viewport_bounds: limits.viewport_bounds_range,
                 max_storage_buffer_size: u64::from(limits.max_storage_buffer_range),
+                max_draw_indirect_count: limits.max_draw_indirect_count,
             },
             features: optional,
             dedicated_copy_queue: families.copy != families.graphics,
@@ -224,11 +225,12 @@ impl Adapter {
 }
 
 impl Adapter {
-    /// Names of the required Vulkan 1.0 features `features` lacks. Graphics
-    /// shaders reach the heap's storage arrays, which are writable.
+    /// Names of the required Vulkan 1.0 features `features` lacks. Indirect
+    /// draws make several draws per call, choosing their first instance.
     fn missing_core_features(features: &vk::PhysicalDeviceFeatures) -> Vec<&'static str> {
         [
             (features.robust_buffer_access, "robust_buffer_access"),
+            // Graphics shaders reach the heap's storage arrays, which are writable.
             (
                 features.vertex_pipeline_stores_and_atomics,
                 "vertex_pipeline_stores_and_atomics",
@@ -236,6 +238,11 @@ impl Adapter {
             (
                 features.fragment_stores_and_atomics,
                 "fragment_stores_and_atomics",
+            ),
+            (features.multi_draw_indirect, "multi_draw_indirect"),
+            (
+                features.draw_indirect_first_instance,
+                "draw_indirect_first_instance",
             ),
         ]
         .into_iter()
