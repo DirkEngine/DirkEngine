@@ -1,0 +1,8 @@
+{
+    "meta": {
+        "asset_type": "Model"
+    },
+    "model": {
+        "gltf": "./quad.gltf"
+    }
+}

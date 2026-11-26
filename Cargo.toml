@@ -32,7 +32,6 @@ parking_lot = "0.12"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 tempfile = "3"
-slotmap = "1"
 signal-hook = "0.4"
 clap = { version = "4", features = ["derive"] }
 
@@ -60,6 +59,7 @@ dirk_shaders  = { version = "0.1.0", path = "crates/dirk_shaders" }
 dirk_rhi      = { version = "0.1.0", path = "crates/dirk_rhi" }
 dirk_rhi_test_shaders = { version = "0.1.0", path = "crates/dirk_rhi/test-shaders" }
 dirk_rhi_test_shaders_gpu = { version = "0.1.0", path = "crates/dirk_rhi/test-shaders/gpu" }
+dirk_render_utils = { version = "0.1.0", path = "crates/dirk_render_utils" }
 
 # Main Engine Dependencies
 winit = "0.31.0-beta.3"
@@ -74,7 +74,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 egui = "0.36"
 egui_dock = "0.21"
-egui-ash-renderer = "0.13"
 
 # Metal, on Apple targets
 block2 = "0.6"
@@ -94,7 +93,6 @@ spirv-cross2 = { version = "0.7", default-features = false, features = ["msl"] }
 # Macro dependencies
 syn = { version = "2", features = ["full"] }
 quote = "1"
-pastey = "0.2"
 proc-macro2 = "1"
 
 # Tooling: `cargo xtask` checks the engineering standard with it.
