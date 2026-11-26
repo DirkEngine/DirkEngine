@@ -5,7 +5,7 @@ use ash::vk;
 use super::{Check, Device, device::Garbage};
 use crate::{
     BlendFactor, BlendOp, BlendState, ColorWrites, CompareOp, CullMode, Error, Format, FrontFace,
-    GraphicsPipelineDesc, MAX_PUSH_DATA_SIZE, PushData, Result, Topology,
+    GraphicsPipelineDesc, PushData, Result, Topology,
 };
 
 /// Shader stages that read push data. Pushes name all of them, as the global
@@ -145,7 +145,7 @@ impl GraphicsPipeline {
             .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
-            .layout(device.pipeline_layout)
+            .layout(device.heap.pipeline_layout)
             .push_next(&mut rendering);
         // SAFETY: the description was validated against the device, and
         // every pointer in `info` outlives the call.
@@ -172,22 +172,6 @@ impl GraphicsPipeline {
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
         self.device.bury(Garbage::Pipeline(self.raw));
-    }
-}
-
-impl Device {
-    /// Creates the pipeline layout every pipeline shares: push data of up to
-    /// [`MAX_PUSH_DATA_SIZE`] bytes, read by every stage.
-    pub(super) fn create_pipeline_layout(device: &ash::Device) -> Result<vk::PipelineLayout> {
-        let push = [vk::PushConstantRange {
-            stage_flags: PUSH_STAGES,
-            offset: 0,
-            size: MAX_PUSH_DATA_SIZE,
-        }];
-        let info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `info` is valid for the device, whose push data limit is at
-        // least 128 bytes.
-        unsafe { device.create_pipeline_layout(&info, None) }.check("vkCreatePipelineLayout")
     }
 }
 

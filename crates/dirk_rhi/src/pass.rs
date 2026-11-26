@@ -552,6 +552,7 @@ impl RenderPass<'_, '_> {
             self.encoder.raw.bind_pipeline(device, &pipeline.raw);
             self.pipeline = Some(id);
         }
+        self.encoder.frame.reads(push);
         self.encoder.raw.push(device, bytemuck::bytes_of(push));
     }
 }

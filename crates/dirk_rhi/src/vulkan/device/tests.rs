@@ -24,6 +24,9 @@ fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
     }
 }
 
+/// Checks that destroying an image leaves no entry for its handle. The frame
+/// rule drains the handle before the graveyard frees the image; the safeguard
+/// in `Device::destroy` would find nothing here.
 #[test]
 fn destroying_a_dropped_image_forgets_its_handle() -> Result<()> {
     with_rhi(|rhi| {
@@ -40,8 +43,9 @@ fn destroying_a_dropped_image_forgets_its_handle() -> Result<()> {
         })?;
         let id = image.raw.id();
         drop(image);
-        // Destroys the image with its first transition still queued; a new
-        // image the driver gives the same handle must not match either entry.
+        // Destroys the image once a frame closed after its drop; a new image
+        // the driver gives the same handle must not match an entry left.
+        rhi.begin_frame()?.finish();
         rhi.wait_idle()?;
         assert!(
             !rhi.device.dropped_images.lock().contains(&id),

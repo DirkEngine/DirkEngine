@@ -79,6 +79,8 @@ lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
   through ash).
 - `dirk_rhi`'s native tests, for its unsafe raw barriers and host access to
   buffers.
+- `dirk_shaders`, for the shaders' unchecked heap accesses and the `unsafe`
+  `HeapIndices` trait.
 - `dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`), for the `unsafe`
   `Shader` implementations the shader build generates.
 

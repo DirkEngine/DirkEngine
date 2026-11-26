@@ -59,9 +59,11 @@ pub enum ImageAccess {
     CopyDestination,
     /// Sampled by the given stages.
     Sampled(ShaderStages),
-    /// Read as a storage image by the given stages.
+    /// Read as a storage image by the given stages, which may also sample
+    /// it if it has sampled usage.
     StorageRead(ShaderStages),
-    /// Read and written as a storage image by the given stages.
+    /// Read and written as a storage image by the given stages, which may
+    /// also sample it if it has sampled usage.
     StorageWrite(ShaderStages),
     /// Read and written as a color attachment.
     ColorAttachment,
@@ -108,16 +110,18 @@ impl BufferAccess {
 
 impl ImageAccess {
     /// The access images with `usage` rest in unless their description
-    /// chooses another: sampled by every stage, read and written as storage
+    /// chooses another: read and written as storage by every stage, sampled
     /// by every stage, rendered to as an attachment, or copied from or,
     /// without [`ImageUsage::COPY_SRC`], copied into, the first of these
-    /// their usage allows.
+    /// their usage allows. Storage comes first so that shaders write
+    /// storage images in place; images with storage usage are sampled in
+    /// the same layout, so they need no barrier to be sampled either.
     #[must_use]
     pub const fn resting(usage: ImageUsage) -> Self {
-        if usage.contains(ImageUsage::SAMPLED) {
-            Self::Sampled(ShaderStages::all())
-        } else if usage.contains(ImageUsage::STORAGE) {
+        if usage.contains(ImageUsage::STORAGE) {
             Self::StorageWrite(ShaderStages::all())
+        } else if usage.contains(ImageUsage::SAMPLED) {
+            Self::Sampled(ShaderStages::all())
         } else if usage.contains(ImageUsage::COLOR_ATTACHMENT) {
             Self::ColorAttachment
         } else if usage.contains(ImageUsage::DEPTH_STENCIL_ATTACHMENT) {

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use bytemuck::NoUninit;
 
-use crate::{Error, Result, Rhi, ShaderStages, native};
+use crate::{Error, HeapIndices, Result, Rhi, ShaderStages, native};
 
 /// Largest push data any pipeline may use, in bytes. Every device supports
 /// it.
@@ -10,11 +10,12 @@ pub const MAX_PUSH_DATA_SIZE: u32 = 128;
 
 /// Data pushed to a pipeline's shaders with each draw: a `#[repr(C)]` struct
 /// shared with the shaders, without padding, at most [`MAX_PUSH_DATA_SIZE`]
-/// bytes and a multiple of four bytes long. Pipelines without push data use
-/// `()`.
-pub trait PushData: NoUninit {}
+/// bytes and a multiple of four bytes long, deriving
+/// [`HeapIndices`](trait@HeapIndices) so draws keep the resources it indexes
+/// until their work completes. Pipelines without push data use `()`.
+pub trait PushData: NoUninit + HeapIndices {}
 
-impl<T: NoUninit> PushData for T {}
+impl<T: NoUninit + HeapIndices> PushData for T {}
 
 /// The stage a shader entry point runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,16 +42,18 @@ impl ShaderStage {
 
 /// A shader entry point compiled by the engine's shader build, which
 /// generates one type implementing this trait per entry point, with the
-/// stage and push data size it reflected and the push data type its source
-/// reads.
+/// stage, push data size and storage writes it reflected and the push data
+/// type its source reads.
 ///
 /// # Safety
 ///
 /// [`SPIRV`](Self::SPIRV) is a valid SPIR-V module for Vulkan 1.3 declaring
 /// [`ENTRY_POINT`](Self::ENTRY_POINT) for [`STAGE`](Self::STAGE). The entry
-/// point binds no descriptors, reads its push data block as
+/// point only binds the bindless heap, reads its push data block as
 /// [`Push`](Self::Push), a block of exactly [`PUSH_SIZE`](Self::PUSH_SIZE)
-/// bytes (zero if it reads none), and uses only features the RHI enables.
+/// bytes (zero if it reads none), writes storage buffers or images only if
+/// [`WRITES_STORAGE`](Self::WRITES_STORAGE), and uses only features the RHI
+/// enables.
 #[expect(
     unsafe_code,
     reason = "`Shader` is an unsafe trait: an implementation vouches that its SPIR-V matches its push data."
@@ -65,6 +68,8 @@ pub unsafe trait Shader {
     /// Size of the push data block the entry point reads, in bytes; zero if
     /// it reads none.
     const PUSH_SIZE: usize;
+    /// Whether the entry point may write storage buffers or images.
+    const WRITES_STORAGE: bool;
     /// The SPIR-V module, as bytes.
     const SPIRV: &'static [u8];
 }
@@ -84,6 +89,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
+///     const WRITES_STORAGE: bool = false;
 ///     const SPIRV: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -106,6 +112,7 @@ pub unsafe trait Shader {
 ///     const ENTRY_POINT: &'static str = "main";
 ///     const STAGE: ShaderStage = ShaderStage::Vertex;
 ///     const PUSH_SIZE: usize = 16;
+///     const WRITES_STORAGE: bool = false;
 ///     const SPIRV: &'static [u8] = &[];
 /// }
 /// fn main() -> Result<()> {
@@ -117,6 +124,7 @@ pub unsafe trait Shader {
 pub struct ShaderModule<P: PushData> {
     pub(crate) raw: native::ShaderModule,
     stage: ShaderStage,
+    writes_storage: bool,
     entry_point: &'static str,
     push: PhantomData<fn(&P)>,
 }
@@ -158,6 +166,7 @@ impl Rhi {
         Ok(ShaderModule {
             raw: native::ShaderModule::new(&self.device, S::ENTRY_POINT, S::SPIRV)?,
             stage: S::STAGE,
+            writes_storage: S::WRITES_STORAGE,
             entry_point: S::ENTRY_POINT,
             push: PhantomData,
         })
@@ -172,6 +181,7 @@ impl ShaderModule<()> {
         ShaderModule {
             raw: self.raw,
             stage: self.stage,
+            writes_storage: self.writes_storage,
             entry_point: self.entry_point,
             push: PhantomData,
         }
@@ -183,6 +193,12 @@ impl<P: PushData> ShaderModule<P> {
     #[must_use]
     pub fn stage(&self) -> ShaderStage {
         self.stage
+    }
+
+    /// Whether the entry point may write storage buffers or images.
+    #[must_use]
+    pub fn writes_storage(&self) -> bool {
+        self.writes_storage
     }
 
     /// Name of the entry point.

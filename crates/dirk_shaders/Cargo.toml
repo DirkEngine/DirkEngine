@@ -7,7 +7,16 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
+dirk_proc.workspace = true
 glam.workspace = true
+
+spirv-std = { workspace = true, optional = true }
+
+[features]
+# Shader-side access to the bindless heap, for shader crates. Host code needs
+# only the shared types.
+gpu = ["dep:spirv-std"]
 
 [lints]
 workspace = true

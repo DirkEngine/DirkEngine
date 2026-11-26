@@ -2,13 +2,20 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use super::{Check, Device, device::Garbage};
+use dirk_shaders::bindless::heap;
+
+use super::{
+    Check, Device,
+    device::Garbage,
+    heap::{Descriptor, Slot},
+};
 use crate::{AddressMode, Filter, Result, SamplerDesc};
 
 /// A Vulkan sampler.
 pub(crate) struct Sampler {
     device: Arc<Device>,
     pub(super) raw: vk::Sampler,
+    slot: Slot,
 }
 
 impl Sampler {
@@ -33,16 +40,28 @@ impl Sampler {
         // when the device supports it, as validated against its limit.
         let raw = unsafe { device.raw.create_sampler(&info, None) }.check("vkCreateSampler")?;
         device.name(raw, desc.label);
+        let slot = device
+            .add_to_heap(heap::SAMPLERS, Descriptor::Sampler(raw))
+            .inspect_err(|_| {
+                // SAFETY: nothing uses the sampler yet.
+                unsafe { device.raw.destroy_sampler(raw, None) };
+            })?;
         Ok(Self {
             device: device.clone(),
             raw,
+            slot,
         })
+    }
+
+    /// The sampler's slot in the heap.
+    pub(crate) fn slot(&self) -> u32 {
+        self.slot.index
     }
 }
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        self.device.bury(Garbage::Sampler(self.raw));
+        self.device.bury(Garbage::Sampler(self.raw, self.slot));
     }
 }
 

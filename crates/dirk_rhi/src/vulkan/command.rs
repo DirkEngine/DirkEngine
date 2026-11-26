@@ -269,12 +269,12 @@ impl CommandBuffer {
                     // Discards the contents, after the image's earlier
                     // accesses on the graphics queue, which left it at rest.
                     ImageAccess::Undefined if queue == QueueType::Graphics => {
-                        let (stage, access, _) = barrier.rest.vk();
+                        let (stage, access, _) = barrier.rest.vk(barrier.storage);
                         (stage, access, vk::ImageLayout::UNDEFINED)
                     }
-                    before => before.vk(),
+                    before => before.vk(barrier.storage),
                 };
-                let (after_stage, after_access, new_layout) = barrier.after.vk();
+                let (after_stage, after_access, new_layout) = barrier.after.vk(barrier.storage);
                 let scope = Scope::new(
                     device,
                     queue,
@@ -447,10 +447,28 @@ impl BufferAccess {
 }
 
 impl ImageAccess {
-    /// The stages, memory accesses and layout of this access.
-    fn vk(self) -> (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout) {
+    /// The layout shaders sample an image in, which its sampled descriptor
+    /// names: `GENERAL` for images with storage usage (`storage`), which
+    /// rest in it for their storage descriptors, so one image is never
+    /// reached in two layouts; otherwise the read-only layout of sampling
+    /// and depth reads.
+    pub(super) const fn sampled_layout(storage: bool) -> vk::ImageLayout {
+        if storage {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::READ_ONLY_OPTIMAL
+        }
+    }
+
+    /// The stages, memory accesses and layout of this access to an image
+    /// with storage usage if `storage`.
+    fn vk(self, storage: bool) -> (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout) {
         use vk::{AccessFlags2 as A, ImageLayout as L, PipelineStageFlags2 as S};
         let fragment_tests = S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS;
+        // Images with storage usage are sampled in the layout of their storage
+        // accesses, without a barrier, so those accesses cover sampled reads:
+        // barriers into and out of them order sampling too.
+        let storage_read = A::SHADER_STORAGE_READ | A::SHADER_SAMPLED_READ;
         match self {
             Self::Undefined => (S::NONE, A::NONE, L::UNDEFINED),
             Self::CopySource => (S::COPY | S::BLIT, A::TRANSFER_READ, L::TRANSFER_SRC_OPTIMAL),
@@ -462,12 +480,12 @@ impl ImageAccess {
             Self::Sampled(stages) => (
                 stages.vk(),
                 A::SHADER_SAMPLED_READ,
-                L::SHADER_READ_ONLY_OPTIMAL,
+                Self::sampled_layout(storage),
             ),
-            Self::StorageRead(stages) => (stages.vk(), A::SHADER_STORAGE_READ, L::GENERAL),
+            Self::StorageRead(stages) => (stages.vk(), storage_read, L::GENERAL),
             Self::StorageWrite(stages) => (
                 stages.vk(),
-                A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+                storage_read | A::SHADER_STORAGE_WRITE,
                 L::GENERAL,
             ),
             Self::ColorAttachment => (
