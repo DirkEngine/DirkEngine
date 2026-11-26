@@ -103,6 +103,10 @@ jobs:
         os: ${{ fromJSON(needs.changes.outputs.platforms) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # Linux runs native tests on lavapipe, so failing to create a device
+      # fails them instead of skipping them.
+      DIRK_REQUIRE_GPU: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
@@ -116,6 +120,28 @@ jobs:
           cache-directories: ${{ runner.os == 'macOS' && '~/Library/Caches/rust-gpu' || '~/.cache/rust-gpu' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: just lint
+      # Runners have no GPU, so native rendering tests run on Mesa's software
+      # Vulkan driver (lavapipe) under the Khronos validation layer. Ubuntu's
+      # Mesa 26.0.8 loses blits into a 3D image's slices past the first, so
+      # lavapipe comes from the kisak-mesa PPA's newer Mesa (26.2.7 works).
+      # The runner's apt reads only amd64v3 package lists, which the PPA
+      # doesn't publish, so without `Architectures: amd64` on its source apt
+      # silently keeps Ubuntu's Mesa; a pin then puts the PPA above Ubuntu's
+      # archive. Downloads retry, and Ubuntu's Mesa, as when Launchpad is down,
+      # fails the step. The last line prints the Mesa version the tests run on.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y --no-update ppa:kisak/kisak-mesa
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/kisak-ubuntu-kisak-mesa-*.sources
+          printf 'Package: *\nPin: release o=LP-PPA-kisak-kisak-mesa\nPin-Priority: 1001\n' \
+            | sudo tee /etc/apt/preferences.d/kisak-mesa
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends mesa-vulkan-drivers vulkan-validationlayers
+          dpkg-query -W -f='${Version}' mesa-vulkan-drivers | grep -q kisak || {
+            echo "::error::mesa-vulkan-drivers $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers) is not the kisak-mesa PPA's build; is Launchpad down?"
+            exit 1
+          }
+          dpkg-query -W mesa-vulkan-drivers
       - run: just test
       - run: just test-minimal
       - if: runner.os == 'Linux'
