@@ -12,6 +12,7 @@ use super::{
     Check, ImageId,
     adapter::{Adapter, RequiredFeatures},
     heap::{Heap, Slot},
+    image::View,
     instance::Instance,
     queue::Queue,
 };
@@ -33,10 +34,11 @@ pub(super) enum Garbage {
     Image {
         /// `None` for swapchain images, which their swapchain owns.
         raw: Option<vk::Image>,
-        view: Option<vk::ImageView>,
+        views: Vec<View>,
         allocation: Allocation,
-        slots: [Option<Slot>; 2],
     },
+    /// A view whose image failed to be created.
+    View(View),
     Sampler(vk::Sampler, Slot),
     Pipeline(vk::Pipeline),
     QueryPool(vk::QueryPool),
@@ -48,15 +50,19 @@ pub(super) enum Garbage {
 
 impl Buried for Garbage {
     fn slots(&self) -> impl Iterator<Item = Slot> {
-        let slots = match self {
-            Self::Buffer { slot, .. } => [*slot, None],
-            Self::Image { slots, .. } => *slots,
-            Self::Sampler(_, slot) => [Some(*slot), None],
+        let (slots, views): ([Option<Slot>; 2], &[View]) = match self {
+            Self::Buffer { slot, .. } => ([*slot, None], &[]),
+            Self::Image { views, .. } => ([None; 2], views),
+            Self::View(view) => ([None; 2], std::slice::from_ref(view)),
+            Self::Sampler(_, slot) => ([Some(*slot), None], &[]),
             Self::Pipeline(_) | Self::QueryPool(_) | Self::Swapchain(..) | Self::Surface(..) => {
-                [None; 2]
+                ([None; 2], &[])
             }
         };
-        slots.into_iter().flatten()
+        slots
+            .into_iter()
+            .chain(views.iter().flat_map(|view| view.slots))
+            .flatten()
     }
 }
 
@@ -286,15 +292,11 @@ impl Device {
                 }
                 Garbage::Image {
                     raw,
-                    view,
+                    views,
                     allocation,
-                    slots,
                 } => {
-                    for slot in slots.into_iter().flatten() {
-                        self.remove_from_heap(slot);
-                    }
-                    if let Some(view) = view {
-                        self.raw.destroy_image_view(view, None);
+                    for view in views {
+                        self.destroy(Garbage::View(view));
                     }
                     if let Some(raw) = raw {
                         // Finds nothing, since the frame after the image's
@@ -306,6 +308,12 @@ impl Device {
                         self.raw.destroy_image(raw, None);
                         self.free(allocation);
                     }
+                }
+                Garbage::View(view) => {
+                    for slot in view.slots.into_iter().flatten() {
+                        self.remove_from_heap(slot);
+                    }
+                    self.raw.destroy_image_view(view.raw, None);
                 }
                 Garbage::Sampler(raw, slot) => {
                     self.remove_from_heap(slot);

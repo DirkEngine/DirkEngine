@@ -7,8 +7,9 @@ use dirk_rhi::{
     Buffer, BufferAccess, BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, ColorTarget,
     CompareOp, Completion, CullMode, DepthBias, DepthState, Error, Extent3d, FRAMES_IN_FLIGHT,
     Filter, Format, FrontFace, Graphics, GraphicsPipeline, GraphicsPipelineDesc, Image,
-    ImageAccess, ImageDesc, ImageDimension, ImageUsage, ImageView, LoadOp, Memory, PushData,
-    Result, Rhi, SampleCount, Sampler, SamplerDesc, Shader, ShaderStages, TextureIndex, Topology,
+    ImageAccess, ImageDesc, ImageDimension, ImageRange, ImageRegion, ImageUsage, ImageView, LoadOp,
+    Memory, Origin3d, PushData, Result, Rhi, SampleCount, Sampler, SamplerDesc, Shader,
+    ShaderStages, Subresource, TextureIndex, Topology,
 };
 use dirk_rhi_test_shaders::support::with_rhi;
 use dirk_rhi_test_shaders::{Fill, FillFs, FillVs, Textured, TexturedFs, TexturedVs, Vertex};
@@ -467,6 +468,97 @@ fn graphs_failing_halfway_leave_their_images_to_be_restored() -> Result<()> {
         frame.finish();
         let pixels = read(rhi, done, &readback)?;
         assert!(pixels.chunks(4).all(|pixel| pixel == unorm(GREEN)));
+        Ok(())
+    })
+}
+
+#[test]
+fn passes_render_a_mip_chain_sampling_each_previous_mip() -> Result<()> {
+    with_rhi(|rhi| {
+        let scene = Scene::new(rhi)?;
+        let readback = readback(rhi, 4)?;
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("mip chain")?;
+        let mut graph = RenderGraph::new();
+        let chain = graph.create_image(&ImageDesc {
+            label: "chain",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::empty(),
+            mip_levels: 4,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        });
+        let mip = |mip_level| Subresource {
+            mip_level,
+            layer: 0,
+        };
+        let fill = &scene.fill;
+        let depth = graph.create_image(&ImageDesc {
+            label: "depth",
+            dimension: ImageDimension::D2,
+            extent: Extent3d::new_2d(SIZE, SIZE),
+            format: Format::Depth32Float,
+            usage: ImageUsage::empty(),
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        });
+        graph
+            .pass("mip 0")
+            .color(chain.subresource(mip(0)), BLACK)
+            .depth(depth, LoadOp::Clear(1.0))
+            .record(move |pass| {
+                let green = Fill {
+                    color: GREEN,
+                    depth: 0.5,
+                };
+                pass.draw(fill, &green, 0..3, 0..1)
+            })?;
+        let scene = &scene;
+        for level in 1..4 {
+            graph
+                .pass("downsample")
+                .sampled(chain.slice(ImageRange::mip(level - 1)), FRAGMENT)
+                .color(chain.subresource(mip(level)), BLACK)
+                .record(move |pass| {
+                    let texture = pass
+                        .image(chain)?
+                        .subview(mip(level - 1))
+                        .and_then(ImageView::index)
+                        .expect("rendered mips have sampled subviews");
+                    let push = Textured {
+                        vertices: scene.quad.index().expect("storage buffers have an index"),
+                        texture,
+                        sampler: scene.sampler.index(),
+                    };
+                    pass.draw(&scene.textured, &push, 0..6, 0..1)
+                })?;
+        }
+        let buffer = graph.import_buffer(&readback, BufferAccess::None, BufferAccess::HostRead)?;
+        graph
+            .pass("read back")
+            .image(chain.slice(ImageRange::mip(3)), ImageAccess::CopySource)
+            .buffer(buffer, BufferAccess::CopyDestination)
+            .record(move |pass| {
+                let (image, buffer) = (pass.image(chain)?, pass.buffer(buffer)?);
+                let region = ImageRegion {
+                    mip_level: 3,
+                    base_layer: 0,
+                    layer_count: 1,
+                    origin: Origin3d::default(),
+                    extent: Extent3d::new_2d(1, 1),
+                };
+                let copy = BufferImageCopy::packed(Format::Rgba8Unorm, 0, region);
+                pass.copy_image_to_buffer(image, buffer, &[copy])
+            })?;
+        graph.execute(&frame, &mut encoder, &mut Transients::new())?;
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        assert_eq!(read(rhi, done, &readback)?, unorm(GREEN));
         Ok(())
     })
 }
