@@ -655,7 +655,6 @@ dependencies = [
 name = "dirk_input"
 version = "0.1.0"
 dependencies = [
- "dirk_build",
  "egui",
  "glam",
 ]
@@ -665,7 +664,6 @@ name = "dirk_platform"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirk_build",
  "dirk_engine",
  "dirk_events",
  "dirk_input",
@@ -710,7 +708,6 @@ dependencies = [
  "ash-window",
  "cargo-gpu-install",
  "dirk_assets",
- "dirk_build",
  "dirk_engine",
  "dirk_events",
  "dirk_input",

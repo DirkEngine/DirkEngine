@@ -88,9 +88,6 @@ uses it too. Before anything destructive, ask what else it touches.
   and `VK_ADD_LAYER_PATH` at the layer. Tests never need a GPU or a window,
   since CI can't count on either: test the logic around GPU code, as the frame
   graph's tests do.
-- Don't set `RUSTFLAGS`: it replaces the `.cargo/config.toml` rustflags that
-  set the `platform_*` cfgs. macOS-only code then silently compiles out: the
-  build passes and the engine fails at run time on MoltenVK.
 
 ## Conventions
 
@@ -141,7 +138,7 @@ both with every feature and with none (`just lint`, `just test`,
 `just test-minimal`). Mixed sets, such as `editor` without `cli`, aren't
 checked: build them yourself when you change that code.
 
-macOS-only code (`platform_macos`) compiles only for Apple targets, and draft
+macOS-only code (`target_os = "macos"`) compiles only for Apple targets, and draft
 CI skips macOS. When you change it, run `cargo clippy --locked --target
 aarch64-apple-darwin -p <crate> --all-features -- -D warnings`, and say in the
 pull request what to run on a Mac before merging, such as `just run`.

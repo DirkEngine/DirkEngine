@@ -137,7 +137,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const DEVICE_EXTENSIONS: &[&str] = &[
     // SAFETY: Vulkan extension names are ASCII.
     unsafe { std::str::from_utf8_unchecked(swapchain::NAME.to_bytes()) },
-    #[cfg(platform_macos)]
+    #[cfg(target_os = "macos")]
     // SAFETY: Vulkan extension names are ASCII.
     unsafe {
         std::str::from_utf8_unchecked(ash::khr::portability_subset::NAME.to_bytes())
@@ -308,7 +308,7 @@ impl Renderer {
         let mut instance_create_info =
             vk::InstanceCreateInfo::default().application_info(&app_info);
 
-        #[cfg(platform_macos)]
+        #[cfg(target_os = "macos")]
         {
             instance_create_info =
                 instance_create_info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
@@ -1060,7 +1060,7 @@ impl Renderer {
         let display_handle = window.display_handle()?.as_raw();
         let extensions = ash_window::enumerate_required_extensions(display_handle)?.to_vec();
 
-        #[cfg(platform_macos)]
+        #[cfg(target_os = "macos")]
         let extensions = {
             let mut extensions = extensions;
             extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());

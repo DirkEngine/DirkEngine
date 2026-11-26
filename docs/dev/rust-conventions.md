@@ -37,10 +37,8 @@ player, and `cli` the binary's command line; both are on by default. Code
 behind a feature must build, lint and pass its tests both with every feature
 and with none (`just lint`, `just test`, `just test-minimal`).
 
-Platform-specific code uses the `platform_windows`, `platform_linux`,
-`platform_macos`, `platform_android` and `platform_ios` cfgs that
-`.cargo/config.toml` sets, declared by `dirk_build::configure_platform` in the
-build script of each crate that uses them.
+Platform-specific code uses the compiler's built-in `target_os` cfg, such as
+`#[cfg(target_os = "macos")]`.
 
 ## Errors
 
