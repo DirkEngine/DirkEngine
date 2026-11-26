@@ -136,9 +136,10 @@ frame.finish();                               // closes the frame (also on Drop)
   a copy queue submission takes over and to forget dropped images' when a frame begins or
   they are destroyed, and the list of images dropped since the last frame began, locked
   to add one, to take them and to remove one as it is destroyed; only queue
-  submission/present take that queue's lock, and waits hold none. On Metal, the heap's
-  lock is also taken when a render pass begins, to declare its resources, and blit
-  pipelines are created under a lock on first use.
+  submission/present take that queue's lock, and waits hold none. On Metal, allocating
+  takes the heap list's lock, blit pipelines are created under a lock on first use, and
+  each encoder takes a fence from its command pool under the pool's own lock, which only
+  the frame's thread takes (see [Metal](#metal)).
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
   host writes (`Buffer::write`), and creating shaders from unvalidated bytes.
 - **Images have a resting access.** `ImageInfo::rest`, chosen by `ImageDesc::rest` or
@@ -380,21 +381,52 @@ format capabilities follow Apple's feature tables, conservatively.
 - **Queues.** Each RHI queue is an `MTLCommandQueue` signaling its own `MTLSharedEvent`
   timeline, so copies run beside graphics work (`dedicated_copy_queue` is true). Metal
   encodes event waits before the passes that follow them, and an encoder's waits are known
-  only at submission, so they go into a command buffer committed just before it: a queue
-  blocks at a wait until the event reaches its value. Command buffers that fail mark the
-  device lost: waits check for that every 100 ms, since a failed command buffer may never
-  reach its value.
-- **Synchronization is Metal's hazard tracking.** Every resource is tracked, and each
-  render pass declares the heap's resources with `useResources` (read for sampled
-  textures, read-write for storage images and buffers), which also makes them resident.
-  Metal then orders conflicting accesses within a queue on its own, so barriers record
-  nothing and queue ownership transfers have no equivalent; they are still validated, and
-  the encoder still remembers where they leave images. Metal textures have no layouts, so
-  resting accesses move nothing: new images and acquisitions queue no first transition,
-  and the safe commands' moves to and from rest record nothing. Across queues, `wait_for`
-  orders work, as on Vulkan. Declaring every heap
-  resource costs O(resources) per pass and serializes passes using storage resources; a
-  residency set and explicit fences can replace it when that matters.
+  only at submission, so they go into a command buffer committed just before it, which
+  ends with the queue's join (below). Command buffers that fail mark the device lost:
+  waits check for that every 100 ms, since a failed command buffer may never reach its
+  value.
+- **Memory and residency.** Every buffer and texture is allocated from an untracked
+  `MTLHeap` (automatic placement; 64 MiB heaps per memory kind, a heap of its own for
+  larger resources; empty heaps are released when garbage is collected, but one spare per
+  memory kind), so Metal tracks no hazards at all. Before each draw, render encoders make
+  every heap resident with one `useHeap` each, O(heaps). Metal makes heaps resident for
+  reads only and does not cover texture views, which shader validation enforces, so
+  encoders also declare, with one `useResources` per usage, the resources that needs:
+  texture views in the heap read, before every draw, and storage buffers and storage
+  images read-write, once a bound pipeline writes storage (the shader build reflects
+  which shaders do: `Shader::WRITES_STORAGE`); read-only passes rely on `useHeap`. Storage
+  subviews are in both lists. The bindless heap keeps the lists as slots are filled and
+  emptied. Both the heap list and the declared list carry a generation; command buffers keep a snapshot and check both
+  generations (two atomic loads) before every draw, so resources created while an encoder
+  records, even in a new heap, are resident before the commands using them, with no lock
+  while recording. Residency sets (macOS 15) would drop the storage resources from that
+  list.
+- **Synchronization is fences.** RHI barriers, explicit or implied, become fences:
+  - Each encoder (blit or render) waits, when it begins, for the fences of the encoders
+    between the last two barriers, and updates a fence of its own when it ends (render
+    encoders at and after both stages). A barrier ends the open encoder, and the encoders
+    begun since the previous barrier become the ones later encoders wait for. Each of
+    those waited for the ones before it, so every encoder after a barrier runs after
+    every encoder before it, like a Vulkan barrier at encoder granularity; encoders
+    between two barriers overlap freely. Barriers' accesses only matter for validation:
+    Metal textures have no layouts and queues need no ownership transfers.
+  - Implicit transitions are barriers too: the safe commands' moves from rest and back,
+    a render pass's attachments and `end_pass` closing a leaked pass. Reads in the
+    resting access need none, since whatever wrote the image moved it back to rest with
+    a barrier.
+  - Each queue has a join fence. A command buffer's first encoders wait for it, and
+    submitting ends the command buffer with a join encoder (a 4-byte fill of a scratch
+    buffer, so Metal keeps it) waiting for its last encoders and updating it. Metal
+    evaluates fences in submission order, so every command buffer runs after all work
+    submitted to its queue before it, and the timeline value, signaled after the join,
+    means that work is done. The command buffer of cross-queue waits ends with a join
+    too, so `wait_for` orders what follows; frame memory needs nothing, since only the
+    host writes it and a slot is reused once its frame completed on every queue.
+  - Fences are lent by each queue and frame slot's command pool, one per encoder, and
+    reused when the slot comes round again.
+  - Barriers order whole encoders; waiting for many encoders costs one wait each, and
+    command buffers do not overlap on a queue. Recording safe commands needs no barrier
+    beyond those, as on Vulkan; buffers are still ordered by their callers' barriers.
 - **Shaders.** `dirk_build::shaders` translates each entry point with SPIRV-Cross (MSL
   3.0, argument buffers tier 2) and rewrites the heap's argument buffer struct so every
   shader declares every array in binding order: slot `s` of binding `b` is element
@@ -408,8 +440,7 @@ format capabilities follow Apple's feature tables, conservatively.
   faces stay in framebuffer coordinates. Libraries are compiled from source when a
   `ShaderModule` is created.
 - **Resources.** Device memory is private, upload and readback memory shared (coherent);
-  resources are allocated by the device, without `gpu-allocator`, since its heaps are
-  untracked. Images are their own full view. Buffer↔image copies take any row pitch that
+  resources come from the heaps above, without `gpu-allocator`. Images are their own full view. Buffer↔image copies take any row pitch that
   is a multiple of the texel size: tightly packed rows need no padding.
 - **Blits** draw: Metal's blit encoder cannot scale, so each destination layer or depth
   slice is a small render pass sampling a view of the source mip and layer.
@@ -420,8 +451,10 @@ format capabilities follow Apple's feature tables, conservatively.
   (`allowsNextDrawableTimeout` is off), as the API promises; occluded windows on macOS
   may then block until visible, so callers should skip frames while occluded.
   Acquisitions and presentation need no semaphores: `frame.present` skips its empty
-  submission and commits one command buffer presenting every drawable after the work
-  committed before it on the same queue. FIFO and immediate presentation are supported;
+  submission and commits one command buffer presenting every drawable, which first waits
+  for the graphics timeline to reach its last submission: Metal presents drawables once
+  that command buffer is scheduled, so the wait holds presentation back until the work
+  rendering them is done. FIFO and immediate presentation are supported;
   the others fall back to FIFO.
 - **Validation** is Metal's API and shader validation (`MTL_DEBUG_LAYER=1`,
   `MTL_SHADER_VALIDATION=1`), which stops the process on misuse;

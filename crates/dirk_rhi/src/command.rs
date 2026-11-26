@@ -93,7 +93,7 @@ pub struct ImageBarrier<'a> {
     any(target_os = "macos", target_os = "ios"),
     expect(
         dead_code,
-        reason = "Metal tracks hazards itself and records no barriers"
+        reason = "Metal orders barriers with fences, which ignore what they transition"
     )
 )]
 pub(crate) struct Transition {
