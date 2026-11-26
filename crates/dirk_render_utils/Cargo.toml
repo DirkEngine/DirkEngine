@@ -1,0 +1,20 @@
+[package]
+name = "dirk_render_utils"
+description = "Rendering utilities built on DirkEngine's RHI"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+homepage.workspace = true
+authors.workspace = true
+documentation.workspace = true
+
+[dependencies]
+dirk_rhi.workspace = true
+
+[dev-dependencies]
+dirk_rhi_test_shaders.workspace = true
+
+[lints]
+workspace = true

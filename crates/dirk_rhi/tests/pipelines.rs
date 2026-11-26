@@ -5,7 +5,7 @@
     reason = "Host reads and writes of a buffer are unsafe; the tests wait for the GPU first."
 )]
 
-mod support;
+use dirk_rhi_test_shaders::support;
 
 use std::time::Duration;
 

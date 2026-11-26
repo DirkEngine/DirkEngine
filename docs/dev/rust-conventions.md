@@ -10,16 +10,16 @@ logic instead of copying it.
 
 ## Crates and boundaries
 
-Libraries live in `crates/` and binaries in `apps/`; the root `Cargo.toml` is
-a virtual workspace. Each crate owns one part of the engine (see `AGENTS.md`
-for the map), and dependencies point down: `dirk_utils`, `dirk_threads`,
+Libraries live in `crates/` and binaries in `apps/`; the root `Cargo.toml` is a
+virtual workspace. Each crate owns one part of the engine (see `AGENTS.md` for
+the map), and dependencies point down: `dirk_utils`, `dirk_threads`,
 `dirk_proc` and `dirk_build` at the bottom, then `dirk_events` and
 `dirk_universe`, `dirk_engine`, the feature crates (`dirk_assets`,
 `dirk_platform`, `dirk_input`, `dirk_world`, `dirk_player`), and
 `dirk_renderer` and `dirk_editor` on top, and the `dirkengine` binary in
 `apps/` above them all. `dirk_rhi`, the render hardware interface, depends on
-no engine crate but `dirk_shaders` and the bottom ones. Never add a dependency
-that points up.
+no engine crate but `dirk_shaders` and the bottom ones, and `dirk_render_utils`
+builds on it alone. Never add a dependency that points up.
 
 Platform and graphics libraries stay behind the crate that wraps them, and
 `deny.toml` bans them elsewhere: `ash` and `gpu-allocator` in `dirk_renderer`
@@ -82,6 +82,8 @@ lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
   buffers.
 - `dirk_shaders`, for the shaders' unchecked heap accesses and the `unsafe`
   `HeapIndices` trait.
+- `dirk_render_utils`, for the raw RHI barriers uploads hand resources over
+  with, and its native tests' raw barriers and host accesses.
 - `dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`), for the `unsafe`
   `Shader` implementations the shader build generates.
 
@@ -104,9 +106,10 @@ renderer's descriptor sets) for repeated boilerplate.
 
 Tests prove one behaviour each, named for it, and assert the outcome. The
 renderer's GPU code has no tests that need a device; test the logic around it,
-such as the frame graph's barriers, without one. `dirk_rhi`'s integration
-tests are the exception: they run on a device when the machine has one and
-skip otherwise, unless `DIRK_REQUIRE_GPU=1` (see its README).
+such as the frame graph's barriers, without one. The native tests of
+`dirk_rhi` and `dirk_render_utils` are the exception: they run on a device
+when the machine has one and skip otherwise, unless `DIRK_REQUIRE_GPU=1` (see
+`dirk_rhi`'s README).
 
 Write a test at the lowest layer that fails without the change, once, not
 again in each caller. When a test or table already covers the behaviour, add

@@ -4,13 +4,11 @@
     reason = "Host reads and writes of a buffer are unsafe; the tests wait for the GPU first."
 )]
 
-mod support;
-
 use dirk_rhi::{
     BufferDesc, BufferUsage, Error, Extent3d, Features, Format, ImageDesc, ImageDimension,
     ImageUsage, ImageView, Memory, Result, Rhi, SampleCount, SamplerDesc, ViewType,
 };
-use support::with_rhi;
+use dirk_rhi_test_shaders::support::with_rhi;
 
 /// A single-mip 2D image description.
 fn image_2d(format: Format, usage: ImageUsage) -> ImageDesc<'static> {

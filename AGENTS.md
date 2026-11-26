@@ -28,6 +28,8 @@ is `apps/dirkengine` (its `src/lib.rs` holds `DefaultPlugins` and its
   elsewhere. Its native tests' shaders are `crates/dirk_rhi/test-shaders`
   and its rust-gpu crate `dirk_rhi_test_shaders_gpu`, built like the
   engine's.
+- `dirk_render_utils`: rendering utilities built on `dirk_rhi`: staged
+  uploads.
 - `dirk_renderer`: the Vulkan renderer. It and `dirk_rhi` are the only crates
   that use `ash`; `docs/dev/rust-conventions.md` says which use `unsafe`.
 - `dirk_shaders`: `no_std` types shared by the engine and its shaders. The
@@ -93,9 +95,10 @@ uses it too. Before anything destructive, ask what else it touches.
   the layer isn't installed system-wide, point `LD_LIBRARY_PATH` at the loader
   and `VK_ADD_LAYER_PATH` at the layer. Tests never need a GPU or a window,
   since CI can't count on either: test the logic around GPU code, as the frame
-  graph's tests do. `dirk_rhi`'s integration tests are the exception: they use
-  a device when there is one and skip otherwise; `DIRK_REQUIRE_GPU=1` makes a
-  missing device fail them (see its README).
+  graph's tests do. The native tests of `dirk_rhi` and `dirk_render_utils` are
+  the exception: they use a device when there is one and skip otherwise;
+  `DIRK_REQUIRE_GPU=1` makes a missing device fail them (see `dirk_rhi`'s
+  README).
 
 ## Conventions
 
