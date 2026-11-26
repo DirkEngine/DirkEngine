@@ -1,6 +1,6 @@
 //! The renderer's passes executed under validation, read back by the host.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use dirk_assets::{AssetHandle, AssetLoaded, AssetRegistry, AssetType};
 use dirk_events::EventManager;
@@ -103,97 +103,140 @@ fn close(actual: [u8; 4], expected: [u8; 4]) -> bool {
         .all(|(&actual, expected)| actual.abs_diff(expected) <= 1)
 }
 
+/// Draws the fixture models at `objects`' paths, translated by their
+/// offsets, into a `width` by `height` image seen from three units in front
+/// of the origin, and returns its texels row by row.
+fn draw_models(
+    rhi: &mut Rhi,
+    extent: (u32, u32),
+    objects: &[(&str, Vec3)],
+) -> Result<Vec<[u8; 4]>> {
+    let workers = WorkerPool::new("renderer tests");
+    let events = EventManager::new(workers.clone());
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    let assets = AssetRegistry::init_at(&events, workers.clone(), fixtures)?;
+
+    let mut models = {
+        let mut frame = rhi.begin_frame()?;
+        let mut uploads = Uploads::new(&mut frame);
+        let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, u64::MAX)?;
+        uploads.submit()?;
+        models
+    };
+    let handles: Vec<_> = objects
+        .iter()
+        .map(|&(path, _)| AssetHandle::from_raw(path, AssetType::Model))
+        .collect();
+    let mut loaded = events.subscribe::<AssetLoaded<dirk_assets::Model>>();
+    let mut assets_loaded = Vec::new();
+    for handle in handles.iter().collect::<HashSet<_>>() {
+        let load = assets.load_asset::<dirk_assets::Model>(handle);
+        assets_loaded.push(workers.handle().block_on(load)?);
+        loaded
+            .consume_blocking()
+            .ok_or_else(|| anyhow::anyhow!("the event bus closed"))?;
+    }
+    {
+        let mut frame = rhi.begin_frame()?;
+        let mut uploads = Uploads::new(&mut frame);
+        models.update(&mut uploads);
+        uploads.submit()?;
+    }
+    anyhow::ensure!(
+        handles
+            .iter()
+            .all(|handle| models.primitives(handle).is_some()),
+        "the registry, which subscribed first, received every load event"
+    );
+
+    let universe = Universe::builder().build()?;
+    let mut commands = universe.handle().command_buffer();
+    let world = commands.create_world(World::builder("test"));
+    let camera = commands.spawn(world, Entity::builder());
+    let mut scene = SceneManager::new(rhi)?;
+    scene.create_scene(world);
+    for (handle, (_, offset)) in handles.into_iter().zip(objects) {
+        let entity = commands.spawn(world, Entity::builder());
+        scene.create_proxy(entity, world)?;
+        let proxy = scene.get_proxy_mut(entity).expect("just created");
+        proxy.set_model(Some(handle));
+        proxy.set_model_matrix(Some(Mat4::from_translation(*offset)));
+    }
+    scene.create_proxy(camera, world)?;
+    let view = glam::camera::rh::view::look_at_mat4(vec3(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+    scene
+        .get_proxy_mut(camera)
+        .expect("just created")
+        .set_view(Some(view));
+    let mut viewport = Viewport::new(rhi, scene.targets())?;
+    viewport.resize(rhi, extent)?;
+    (viewport.world, viewport.camera) = (Some(world), Some(camera));
+
+    let presenter = Presenter::new(rhi)?;
+    let pipeline = presenter.pipeline(rhi, Format::Rgba8Unorm)?;
+    let target = Target::new(rhi, Format::Rgba8Unorm, extent)?;
+    let mut transients = Transients::default();
+    let frame = rhi.begin_frame()?;
+    let objects = scene.write_objects(&frame)?;
+    let mut graph = RenderGraph::new();
+    viewport.record(&mut graph, objects, &scene, &models)?;
+    let mut encoder = frame.encoder::<Graphics>("viewport")?;
+    graph.execute(&frame, &mut encoder, &mut transients)?;
+    frame.submit(encoder)?;
+    let done = target.render(&frame, &mut transients, |graph, image| {
+        let output = graph.import(viewport.output())?;
+        Ok(presenter.record(graph, &pipeline, image, Some(output))?)
+    })?;
+    frame.finish();
+    target.read(rhi, done)
+}
+
+/// Asserts that each `(x, y, color)` texel of the `width` wide `texels` is
+/// close to `color`.
+fn assert_texels(texels: &[[u8; 4]], width: u32, expected: &[(u32, u32, [u8; 4])]) {
+    for &(x, y, expected) in expected {
+        let texel = texels[(y * width + x) as usize];
+        assert!(
+            close(texel, expected),
+            "texel ({x}, {y}) is {texel:?}, not {expected:?}"
+        );
+    }
+}
+
 /// A glTF quad, textured with sRGB (200, 100, 50), drawn as two objects of
 /// one model: each reads its own transform by instance index.
 #[test]
 fn gltf_models_draw_each_object_with_its_own_data() -> Result {
     const EXTENT: (u32, u32) = (16, 8);
     with_rhi(|rhi| {
-        let workers = WorkerPool::new("renderer tests");
-        let events = EventManager::new(workers.clone());
-        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let assets = AssetRegistry::init_at(&events, workers.clone(), fixtures)?;
-        let quad = AssetHandle::from_raw("quad/quad.dirkasset", AssetType::Model);
-
-        let mut models = {
-            let mut frame = rhi.begin_frame()?;
-            let mut uploads = Uploads::new(&mut frame);
-            let models = ModelRegistry::new(uploads.rhi(), &mut uploads, &events, u64::MAX)?;
-            uploads.submit()?;
-            models
-        };
-        let mut loaded = events.subscribe::<AssetLoaded<dirk_assets::Model>>();
-        let _model = workers
-            .handle()
-            .block_on(assets.load_asset::<dirk_assets::Model>(&quad))?;
-        loaded
-            .consume_blocking()
-            .ok_or_else(|| anyhow::anyhow!("the event bus closed"))?;
-        {
-            let mut frame = rhi.begin_frame()?;
-            let mut uploads = Uploads::new(&mut frame);
-            models.update(&mut uploads);
-            uploads.submit()?;
-        }
-        anyhow::ensure!(
-            models.primitives(&quad).is_some(),
-            "the registry, which subscribed first, received the load event"
-        );
-
-        let universe = Universe::builder().build()?;
-        let mut commands = universe.handle().command_buffer();
-        let world = commands.create_world(World::builder("test"));
-        let [left, right, camera] = [(); 3].map(|()| commands.spawn(world, Entity::builder()));
-        let mut scene = SceneManager::new(rhi)?;
-        scene.create_scene(world);
-        for (entity, x) in [(left, -1.2), (right, 1.2)] {
-            scene.create_proxy(entity, world)?;
-            let proxy = scene.get_proxy_mut(entity).expect("just created");
-            proxy.set_model(Some(quad.clone()));
-            proxy.set_model_matrix(Some(Mat4::from_translation(vec3(x, 0.0, 0.0))));
-        }
-        scene.create_proxy(camera, world)?;
-        let view = glam::camera::rh::view::look_at_mat4(vec3(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
-        scene
-            .get_proxy_mut(camera)
-            .expect("just created")
-            .set_view(Some(view));
-        let mut viewport = Viewport::new(rhi, scene.targets())?;
-        viewport.resize(rhi, EXTENT)?;
-        (viewport.world, viewport.camera) = (Some(world), Some(camera));
-
-        let presenter = Presenter::new(rhi)?;
-        let pipeline = presenter.pipeline(rhi, Format::Rgba8Unorm)?;
-        let target = Target::new(rhi, Format::Rgba8Unorm, EXTENT)?;
-        let mut transients = Transients::default();
-        let frame = rhi.begin_frame()?;
-        let objects = scene.write_objects(&frame)?;
-        let mut graph = RenderGraph::new();
-        viewport.record(&mut graph, objects, &scene, &models)?;
-        let mut encoder = frame.encoder::<Graphics>("viewport")?;
-        graph.execute(&frame, &mut encoder, &mut transients)?;
-        frame.submit(encoder)?;
-        let done = target.render(&frame, &mut transients, |graph, image| {
-            let output = graph.import(viewport.output())?;
-            Ok(presenter.record(graph, &pipeline, image, Some(output))?)
-        })?;
-        frame.finish();
-
-        let texels = target.read(rhi, done)?;
-        let texel = |x: u32, y: u32| texels[(y * EXTENT.0 + x) as usize];
+        let quad = "quad/quad.dirkasset";
+        let objects = [(quad, vec3(-1.2, 0.0, 0.0)), (quad, vec3(1.2, 0.0, 0.0))];
+        let texels = draw_models(rhi, EXTENT, &objects)?;
         let (textured, black) = ([200, 100, 50, 255], [0, 0, 0, 255]);
-        for (x, y, expected) in [
-            (4, 4, textured),
-            (11, 4, textured),
-            (8, 4, black),
-            (0, 0, black),
-        ] {
-            assert!(
-                close(texel(x, y), expected),
-                "texel ({x}, {y}) is {:?}, not {expected:?}",
-                texel(x, y)
-            );
-        }
+        assert_texels(
+            &texels,
+            EXTENT.0,
+            &[
+                (4, 4, textured),
+                (11, 4, textured),
+                (8, 4, black),
+                (0, 0, black),
+            ],
+        );
+        Ok(())
+    })
+}
+
+/// A quad textured with a 32x32 black and white checkerboard covers a few
+/// texels, so it samples small mips, which average the squares in linear
+/// space: sRGB 188, not the 128 of averaging encoded values.
+#[test]
+fn model_textures_sample_mips_averaged_in_linear_space() -> Result {
+    const EXTENT: (u32, u32) = (16, 8);
+    with_rhi(|rhi| {
+        let objects = [("checker/checker.dirkasset", Vec3::ZERO)];
+        let texels = draw_models(rhi, EXTENT, &objects)?;
+        assert_texels(&texels, EXTENT.0, &[(8, 4, [188, 188, 188, 255])]);
         Ok(())
     })
 }

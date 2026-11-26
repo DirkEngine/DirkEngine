@@ -513,18 +513,13 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
                     reason,
                 ))
             };
-            if let Err(reason) =
-                Self::check_stages([barrier.before, barrier.after], ImageAccess::shader_stages)
-            {
-                return invalid(reason);
-            }
-            self.check_image(
+            self.check_image_accesses(
+                "image barrier",
                 barrier.image,
-                barrier.before.usage() | barrier.after.usage(),
+                ImageUsage::empty(),
+                barrier.before,
+                barrier.after,
             )?;
-            if barrier.after == ImageAccess::Undefined {
-                return invalid("cannot transition to Undefined".to_owned());
-            }
             if let Err(reason) = Self::check_transfer(
                 barrier.transfer,
                 barrier.before.on_copy_queue(),
@@ -684,6 +679,28 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         }
         if !image.info().usage.contains(usage) {
             return invalid(format!("lacks the {usage:?} usage"));
+        }
+        Ok(())
+    }
+
+    /// Checks that `image` is from this device and has `usage` and the usage
+    /// `before` and `after` need, that they name a stage if they are shader
+    /// accesses, and that `after` is not [`ImageAccess::Undefined`].
+    fn check_image_accesses(
+        &self,
+        operation: &'static str,
+        image: &Image,
+        usage: ImageUsage,
+        before: ImageAccess,
+        after: ImageAccess,
+    ) -> Result<()> {
+        let invalid = |reason: String| Err(Error::invalid(operation, image.label(), reason));
+        if let Err(reason) = Self::check_stages([before, after], ImageAccess::shader_stages) {
+            return invalid(reason);
+        }
+        self.check_image(image, usage | before.usage() | after.usage())?;
+        if after == ImageAccess::Undefined {
+            return invalid("cannot transition to Undefined".to_owned());
         }
         Ok(())
     }
@@ -901,7 +918,56 @@ impl CommandEncoder<'_, Graphics> {
         filter: Filter,
     ) -> Result<()> {
         self.check_image_copy("image blit", src, dst, regions)?;
-        let info = src.info();
+        self.check_blit("image blit", src, filter)?;
+        let wrap = self.enter_copy(src, dst, regions)?;
+        self.wrapped(&wrap, |raw, device| {
+            raw.blit_image(
+                device,
+                &src.raw,
+                &dst.raw,
+                src.info().format,
+                regions,
+                filter,
+            )
+        })
+    }
+
+    /// Generates every mip of every layer of `image` by filtering mip 0
+    /// down, moving the whole image from its resting access and back with
+    /// the barriers in between. Mips past the first may hold anything
+    /// before.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Invalid`] if `image` is from another device, lacks
+    /// the copy usages, is multisampled, its format cannot be blitted with
+    /// linear filtering, or a barrier recorded on this encoder left it out of
+    /// its resting access.
+    pub fn generate_mips(&mut self, image: &Image) -> Result<()> {
+        self.check_image(image, ImageUsage::COPY_SRC | ImageUsage::COPY_DST)?;
+        self.check_blit("mip generation", image, Filter::Linear)?;
+        let info = image.info();
+        let all = ImageRange {
+            mip_level_count: info.mip_levels,
+            layer_count: info.array_layers,
+            ..ImageRange::ALL
+        };
+        let at = self.location(image, all)?;
+        if at != info.rest {
+            return Err(Error::invalid(
+                "mip generation",
+                image.label(),
+                format!("is in {at:?}, where a barrier left it, not its resting access"),
+            ));
+        }
+        self.end_pass();
+        self.raw.generate_mips(self.device(), image)
+    }
+
+    /// Checks that `image` is single-sampled and its format can be blitted
+    /// with `filter`.
+    fn check_blit(&self, operation: &'static str, image: &Image, filter: Filter) -> Result<()> {
+        let info = image.info();
         let features = self.frame.rhi().capabilities().format(info.format).features;
         let filterable = filter == Filter::Nearest
             || (features.contains(FormatFeatures::FILTER_LINEAR)
@@ -911,18 +977,15 @@ impl CommandEncoder<'_, Graphics> {
             || info.samples != SampleCount::X1
         {
             return Err(Error::invalid(
-                "image blit",
-                dst.label(),
+                operation,
+                image.label(),
                 format!(
                     "{:?} with {:?} samples cannot be blitted with {filter:?} filtering",
                     info.format, info.samples
                 ),
             ));
         }
-        let wrap = self.enter_copy(src, dst, regions)?;
-        self.wrapped(&wrap, |raw, device| {
-            raw.blit_image(device, &src.raw, &dst.raw, info.format, regions, filter)
-        })
+        Ok(())
     }
 }
 
