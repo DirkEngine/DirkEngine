@@ -9,11 +9,26 @@ use parking_lot::Mutex;
 use tracing::{error, info, warn};
 
 use super::{
-    Check,
+    Check, ImageId,
     adapter::{Adapter, RequiredFeatures},
     instance::Instance,
+    queue::Queue,
 };
-use crate::{Capabilities, Error, Features, Result, RhiCreateInfo};
+use crate::{
+    Capabilities, Error, Features, QueueType, Result, RhiCreateInfo, command::Transition,
+    graveyard::Graveyard,
+};
+
+/// A native object whose owner dropped it, destroyed once the GPU is done.
+pub(super) enum Garbage {
+    Buffer(vk::Buffer, Allocation),
+    Image {
+        raw: vk::Image,
+        view: Option<vk::ImageView>,
+        allocation: Allocation,
+    },
+    Sampler(vk::Sampler),
+}
 
 /// The logical device, shared by the RHI and every object created from it.
 pub(crate) struct Device {
@@ -26,6 +41,18 @@ pub(crate) struct Device {
     allocator: Mutex<ManuallyDrop<Allocator>>,
     /// Names objects for debugging tools when validation is enabled.
     debug: Option<debug_utils::Device>,
+    /// Indexed by `QueueType`.
+    pub(super) queues: [Queue; QueueType::COUNT],
+    /// The Vulkan queues submitted to, each locked while submitting.
+    pub(super) vk_queues: [Mutex<vk::Queue>; QueueType::COUNT],
+    graveyard: Graveyard<Garbage>,
+    /// Transitions of new images from undefined contents to their resting
+    /// access, recorded before the next graphics submission.
+    initializations: Mutex<Vec<Transition>>,
+    /// Images dropped since the last frame began, whose first transitions
+    /// are forgotten when the next one begins, or as they are destroyed if
+    /// that comes first.
+    dropped_images: Mutex<Vec<ImageId>>,
     /// Destroyed after the device, which `Drop` destroys first.
     instance: Instance,
 }
@@ -73,15 +100,20 @@ impl Device {
             debug_settings: AllocatorDebugSettings::default(),
             buffer_device_address: false,
             allocation_sizes: AllocationSizes::default(),
-        });
-        let allocator = match allocator {
-            Ok(allocator) => allocator,
+        })
+        .map_err(|error| Error::native("creating the memory allocator", error))
+        .and_then(|allocator| Ok((allocator, Queue::create(&raw, adapter.families)?)));
+        let (allocator, queues) = match allocator {
+            Ok(parts) => parts,
             Err(error) => {
-                // SAFETY: nothing has been created from the device yet.
+                // SAFETY: nothing created from the device is left.
                 unsafe { raw.destroy_device(None) };
-                return Err(Error::native("creating the memory allocator", error));
+                return Err(error);
             }
         };
+        // SAFETY: both families were requested with one queue each.
+        let vk_queues = [adapter.families.graphics, adapter.families.copy]
+            .map(|family| Mutex::new(unsafe { raw.get_device_queue(family, 0) }));
         Ok(Self {
             capabilities,
             debug: instance
@@ -90,8 +122,104 @@ impl Device {
             raw,
             non_coherent_atom_size: adapter.non_coherent_atom_size,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
+            queues,
+            vk_queues,
+            graveyard: Graveyard::new(),
+            initializations: Mutex::default(),
+            dropped_images: Mutex::default(),
             instance,
         })
+    }
+
+    /// Records `transition`, a new image's first, before the next graphics
+    /// submission.
+    pub(crate) fn initialize(&self, transition: Transition) {
+        self.initializations.lock().push(transition);
+    }
+
+    /// The image transitions to record before the next graphics submission.
+    pub(crate) fn take_initializations(&self) -> Vec<Transition> {
+        std::mem::take(&mut *self.initializations.lock())
+    }
+
+    /// Drops `image`'s first transition, if it was not recorded yet: a
+    /// submitted copy encoder took it over, or the image is destroyed.
+    pub(crate) fn forget_initialization(&self, image: ImageId) {
+        self.initializations
+            .lock()
+            .retain(|transition| transition.image != image);
+    }
+
+    /// Forgets the dropped `image`'s first transition, if still queued,
+    /// when the next frame begins, or as the image is destroyed if that
+    /// comes first. Until then, commands recorded before the drop may
+    /// expect it. Call it before burying the image, so that an image a
+    /// frame beginning on another thread misses is tagged with that frame
+    /// (see [`begin_frame`](Self::begin_frame)).
+    pub(super) fn forget_initialization_next_frame(&self, image: ImageId) {
+        self.dropped_images.lock().push(image);
+    }
+
+    /// Keeps `garbage` until the work of the current frame completes.
+    pub(super) fn bury(&self, garbage: Garbage) {
+        self.graveyard.bury(garbage);
+    }
+
+    /// Tags objects dropped from now on with `frame`, then forgets the first
+    /// transitions of the images dropped before: encoders cannot outlive
+    /// their frame, so no command recorded from now on expects them.
+    ///
+    /// Tagging first matters when images drop on another thread meanwhile:
+    /// an image dropped too late to be forgotten here was buried after the
+    /// tag moved, so it is tagged with `frame` and outlives the work of
+    /// `frame`, which may still record its transition.
+    pub(crate) fn begin_frame(&self, frame: u64) {
+        self.graveyard.begin_frame(frame);
+        let dropped = std::mem::take(&mut *self.dropped_images.lock());
+        self.initializations
+            .lock()
+            .retain(|transition| !dropped.contains(&transition.image));
+    }
+
+    /// Destroys every object dropped by the end of frame `completed`, whose
+    /// work, and all work before it, has completed.
+    pub(crate) fn collect(&self, completed: u64) {
+        self.graveyard
+            .collect(completed, |garbage| self.destroy(garbage));
+    }
+
+    /// The queue family `queue` submits to.
+    pub(super) fn family(&self, queue: QueueType) -> u32 {
+        self.queues[queue as usize].family
+    }
+
+    /// Destroys `garbage`, which the GPU no longer uses.
+    fn destroy(&self, garbage: Garbage) {
+        // SAFETY: the graveyard only hands out objects whose work completed.
+        unsafe {
+            match garbage {
+                Garbage::Buffer(raw, allocation) => {
+                    self.raw.destroy_buffer(raw, None);
+                    self.free(allocation);
+                }
+                Garbage::Image {
+                    raw,
+                    view,
+                    allocation,
+                } => {
+                    // Before the driver can reuse the handle, so a new image
+                    // never matches what is left of this one.
+                    self.dropped_images.lock().retain(|dropped| *dropped != raw);
+                    self.forget_initialization(raw);
+                    if let Some(view) = view {
+                        self.raw.destroy_image_view(view, None);
+                    }
+                    self.raw.destroy_image(raw, None);
+                    self.free(allocation);
+                }
+                Garbage::Sampler(raw) => self.raw.destroy_sampler(raw, None),
+            }
+        }
     }
 
     /// Allocates memory for a resource labelled `label`.
@@ -154,9 +282,16 @@ impl Drop for Device {
             if let Err(error) = self.raw.device_wait_idle() {
                 error!(%error, "failed to wait for the Vulkan device before destroying it");
             }
+            self.collect(u64::MAX);
+            for queue in &self.queues {
+                queue.destroy(&self.raw);
+            }
             // The allocator frees its memory through the device.
             ManuallyDrop::drop(self.allocator.get_mut());
             self.raw.destroy_device(None);
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

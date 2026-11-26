@@ -73,13 +73,14 @@ doesn't trigger the lint.
 
 Only `dirk_renderer` and `dirk_rhi` may use `unsafe`, to call the native
 graphics API (Vulkan through ash), and `dirk_rhi`'s native tests, for its
-unsafe host access to buffers. It stays in the modules `standard.toml` lists
-in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
-`just lint` denies it everywhere else. Keep it in the modules that wrap a
-native object, and give every `unsafe` block a `// SAFETY:` comment stating
-why it is sound: which handles are valid and owned, which lock provides the
-external synchronization Vulkan requires, and how long the memory a call reads
-lives. An `unsafe fn` documents its contract in a `# Safety` section.
+unsafe raw barriers and host access to buffers. It stays in the modules
+`standard.toml` lists in `unsafe-modules`, each of which expects
+`unsafe_code` with a reason; `just lint` denies it everywhere else. Keep it in
+the modules that wrap a native object, and give every `unsafe` block a
+`// SAFETY:` comment stating why it is sound: which handles are valid and
+owned, which lock provides the external synchronization Vulkan requires, and
+how long the memory a call reads lives. An `unsafe fn` documents its contract
+in a `# Safety` section.
 
 ## Types
 

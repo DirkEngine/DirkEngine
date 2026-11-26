@@ -69,39 +69,105 @@ Goal: **simple and intuitive, yet very powerful and performant.** When in doubt,
   resource tracking because encoders cannot outlive their frame.
 - Freed entries are collected when a frame begins (it already waits for its slot), and on
   `Rhi::wait_idle` / `Drop for Rhi`.
+- Beginning frame F waits for each queue's last submission as recorded when frame
+  `F - FRAMES_IN_FLIGHT + 1` began, so the wait stays correct even if a `Frame` is leaked.
 - `Completion` is `#[derive(Clone, Copy)] struct Completion { queue: QueueType, value: u64 }`
-  with `rhi.wait(c, timeout)` and `rhi.is_complete(c)`.
+  (plus the id of its RHI, so another RHI's completions are rejected) with
+  `rhi.wait(c, timeout)` and `rhi.is_complete(c)`.
 
 ## Frames
 
 ```rust
-let mut frame = rhi.begin_frame()?;          // waits for this slot's previous work, frees garbage
-scene_data.get_mut(&frame).write(&scene);    // PerFrame<T>: safe per-slot host writes
+let frame = rhi.begin_frame()?;              // waits for this slot's previous work, frees garbage
+let objects = frame.alloc(&object_data)?;    // fresh host-visible memory only this frame reads
 let mut cmd = frame.encoder::<Graphics>("scene")?;
+cmd.wait_for(upload)?;                       // the GPU waits for another queue's Completion
 // ... record ...
 frame.submit(cmd)?;                           // or submit several, across queues
 frame.present(acquired)?;                     // presentation is part of the frame
-frame.finish()?;                              // closes the frame (also on Drop)
+frame.finish();                               // closes the frame (also on Drop)
 ```
 
 - `FRAMES_IN_FLIGHT` is a single constant in `dirk_rhi`.
-- `PerFrame<T>` replaces hand-rolled `[T; MAX_FRAMES_IN_FLIGHT]` arrays and their
-  `// SAFETY: waited for this slot` comments. Holding `&Frame` proves the slot is idle.
+- **Frame memory.** Each frame slot owns one host-visible buffer of
+  `RhiCreateInfo::frame_memory` bytes (8 MiB by default) with copy source, index and
+  storage usage. `frame.alloc(&[T]) -> FrameSlice<T>` copies data into the next free range
+  of the open frame's and returns where it is (buffer, byte offset, length); allocations
+  start at multiples of 16 bytes and of `size_of::<T>()`, and reserve whole 16 bytes.
+  Nothing submitted reads fresh memory, and a slot's memory is reused only once beginning
+  a frame waited for its previous work, so these host writes are sound by construction:
+  no "write before submitting" rule. An allocation that does not fit gets a host-visible
+  buffer of its own, freed through deferred destruction when the frame closes; nothing
+  grows. Per-frame data (per-object records, UI vertices and indices, upload staging)
+  comes from here. Slices borrow the frame.
+- Host-visible buffers are shared by every queue family (Vulkan `CONCURRENT` sharing when
+  the copy queue has a family of its own), so both queues read frame memory without
+  ownership transfers, and transfers of such buffers move no ownership.
+- `PerFrame<T>` replaces hand-rolled `[T; FRAMES_IN_FLIGHT]` arrays, such as per-slot
+  query pools, and their `// SAFETY: waited for this slot` comments. Holding `&Frame`
+  proves the slot is idle; `get`/`get_mut` take the frame.
+- `begin_frame` borrows the `Rhi` mutably, so only one frame is open; `frame.rhi()` creates
+  objects meanwhile. Encoders borrow the frame and record on its thread.
 - Headless users (tests, tools) use frames too. A frame is a recording scope, not a window.
 
 ## Queues and recording
 
-- Typed queues stay: `Graphics` and `Copy` (sealed `QueueKind`), with the `compile_fail`
-  doctests proving a copy encoder cannot begin a render pass and a render pass borrows its
-  encoder. Copy-queue ownership transfer is handled by the RHI/uploads, not callers.
+- Typed queues stay: `Graphics` and `CopyQueue` (sealed `QueueKind`; not `Copy`, which
+  glob imports would let shadow the `Copy` trait), with the `compile_fail` doctests proving
+  a copy encoder cannot blit or begin a render pass and a render pass borrows its encoder.
+  Copy-queue ownership transfer is handled by the RHI/uploads, not callers; barriers carry
+  an optional `QueueTransfer` recorded on both queues.
 - Vulkan copies share the graphics family for now: the transfer-only family path (queue
   ownership transfers, concurrently shared buffers) is kept but not selected
   (`QueueFamilies::DEDICATED_COPY`) until it runs on hardware that has such a family, since
   the devices it was tested on have none.
-- No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync);
-  only queue submission/present take that queue's lock.
+- No device-wide lock. Creation is lock-free (Vulkan creation needs no external sync)
+  apart from `gpu-allocator`'s allocator, locked only to allocate and free memory, the
+  list of dropped objects, locked to add and collect them, the list of new images'
+  first transitions, locked to add one, to take them at a graphics submission, to forget
+  those a copy queue submission takes over and to forget dropped images' when a frame
+  begins or they are destroyed, and the list of images dropped since the last frame
+  began, locked to add one, to take them and to remove one as it is destroyed; only
+  queue submission/present take that queue's lock, and waits hold none.
 - Safe by default. `unsafe` remains only on: raw `barrier()` (bypassing the graph), raw
-  host writes outside `PerFrame`, and creating shaders from unvalidated bytes.
+  host writes (`Buffer::write`), and creating shaders from unvalidated bytes.
+- **Images have a resting access.** `ImageInfo::rest`, chosen by `ImageDesc::rest` or
+  defaulting from the usage (`ImageAccess::resting`: sampled by every stage, else storage
+  read/write, else the attachment, else copy source, else copy destination), is the access
+  every image is in between submissions, so nothing safe takes a caller's word for an
+  image's state:
+  - New images start undefined; `create_image` queues their transition to rest, which the
+    next graphics submission records first. A copy-queue barrier from `Undefined` takes it
+    over (uploads), since the copy queue cannot reach graphics accesses, once its encoder is
+    submitted: an encoder dropped unsubmitted leaves the image to the graphics queue. An
+    image dropped before then keeps its transition, which commands recorded meanwhile
+    expect, until the next frame begins or the image is destroyed: encoders cannot
+    outlive their frame, so no command recorded later expects it. Beginning a frame moves
+    the frame dropped objects are tagged with before it forgets, so an image dropped on
+    another thread too late to be forgotten is tagged with the new frame, whose
+    submissions may still record its transition, and is destroyed only after them.
+    Destroying an image forgets what is left of it before the driver can reuse its
+    handle, so a new image given the same handle keeps its own transition.
+  - Safe commands (`copy_buffer_to_image`, `copy_image_to_buffer`, `copy_image`,
+    `blit_image`) move the subresources they touch from rest into their access and back,
+    with no barrier where the access is the resting one and only read.
+  - Raw `unsafe barrier()` is the only way to leave rest. The encoder remembers where its
+    barriers left each range (per mip and layer, the last barrier covering it), and safe
+    commands find ranges there instead of wrapping them, or reject ranges left in another
+    access; the copy queue only copies ranges a barrier moved into the copy accesses. The
+    barrier's contract: describe the accesses since the previous barrier.
+  - Submitting returns what barriers left elsewhere to rest, so every image is at rest
+    between submissions whatever the recording did (a render graph that failed halfway, a
+    barrier never undone): graphics submissions record one barrier from where each range
+    was left back to rest, as do copy queue submissions when rest is a copy access; otherwise
+    the copy queue, which cannot reach it, rejects the encoder. A range a barrier released to another queue is left
+    to the barrier acquiring it there. `encoder.restore()` does the same before recording
+    more, for code that needs every image at rest, such as the render graph.
+  - `ImageAccess::Undefined` before a graphics barrier discards the contents but is ordered
+    after the image's resting access, so it is always a legal start.
+  - Buffers have no layouts and no resting access: ordering GPU accesses to them stays
+    the caller's job, through barriers or the render graph. Host data the GPU reads each
+    frame comes from frame memory, which needs no ordering.
 - Dynamic state defaults: viewport and scissor default to the render area.
 - Typestate presentation: `AcquiredFrame` -> submitted -> presented. Presenting before
   submit, or submitting twice, does not compile. No atomics tracking frame phase.

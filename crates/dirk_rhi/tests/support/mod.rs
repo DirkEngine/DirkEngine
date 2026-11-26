@@ -9,11 +9,13 @@ pub fn with_rhi(test: impl FnOnce(&mut Rhi) -> Result<()>) -> Result<()> {
     let Some(mut rhi) = rhi(&RhiCreateInfo {
         application_name: "dirk_rhi tests",
         validation: true,
+        ..RhiCreateInfo::default()
     })?
     else {
         return Ok(());
     };
     test(&mut rhi)?;
+    rhi.wait_idle()?;
     assert_eq!(
         rhi.validation_error_count().unwrap_or(0),
         0,
