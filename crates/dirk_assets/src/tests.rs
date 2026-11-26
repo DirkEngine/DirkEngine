@@ -925,6 +925,60 @@ mod registry {
         }
     }
 
+    /// Ticks `registry` until `done` holds.
+    fn tick_until(registry: &AssetRegistry, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lease did not settle in time"
+            );
+            registry.tick();
+            // wall-clock: a lease settles only during a tick, once its load
+            // task finishes, which signals nothing a test can await.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn leases_load_during_tick_and_release_when_dropped() {
+        let (_root, events, registry, id) = registry_with_model("leased");
+        let mut unloads = Unloads::subscribe(&events);
+        let lease = registry.lease::<Model>(&id);
+        assert_eq!(lease.asset(), &id);
+
+        tick_until(&registry, || lease.get().is_some());
+        let model = lease.get().expect("the lease settled");
+        assert_eq!(
+            model.get().expect("the model loaded").gltf.scenes().count(),
+            1
+        );
+        let generation = model.generation();
+        drop(model);
+        registry.tick();
+        let cached = registry
+            .cached_handle::<Model>(&id)
+            .expect("the lease keeps it loaded");
+        assert_eq!(cached.generation(), generation);
+        drop(cached);
+
+        drop(lease);
+        let unload = unloads.next(&registry);
+        assert_eq!(unload.handle, id);
+        assert_eq!(unload.generation, generation);
+    }
+
+    #[test]
+    fn failed_leases_stay_empty() {
+        let (_root, _events, registry, _id) = registry_with_model("present");
+        let absent = AssetHandle::from_raw("absent.dirkasset", AssetType::Model);
+        let lease = registry.lease::<Model>(&absent);
+        tick_until(&registry, || {
+            registry.inner.pending_leases.lock().is_empty()
+        });
+        assert!(lease.get().is_none());
+    }
+
     #[test]
     fn explicit_root_loads_model_and_resolves_source_paths() {
         let (_root, _events, registry, id) = registry_with_model("hero");

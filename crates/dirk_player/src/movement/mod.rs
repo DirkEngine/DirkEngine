@@ -1,12 +1,12 @@
 //! Player movement systems.
 
 use dirk_universe::{
-    CommandBuffer, Entity, Universe,
     query::Query,
-    systems::{System, TickingSystem},
+    systems::{DeltaTime, System},
 };
 
 use crate::{PlayerId, PlayerInputState};
+use dirk_world::components::Transform;
 
 /// Default movement speed in world units per second.
 pub const DEFAULT_PLAYER_MOVE_SPEED: f64 = 350.0;
@@ -15,7 +15,6 @@ pub const DEFAULT_PLAYER_LOOK_SENSITIVITY: f32 = 0.5;
 
 /// Applies player movement input to entities that have a [`PlayerId`] and
 /// [`dirk_world::components::Transform`].
-#[derive(System)]
 pub struct PlayerMovementSystem {
     input_state: PlayerInputState,
     speed: f64,
@@ -34,29 +33,17 @@ impl PlayerMovementSystem {
     }
 }
 
-impl TickingSystem for PlayerMovementSystem {
-    fn tick(
-        &self,
-        cmd: &mut CommandBuffer,
-        universe: &Universe,
-        delta_time: f64,
-        entities: &mut dyn Iterator<Item = Entity>,
-    ) {
-        for entity in entities {
-            let Some(player) = universe.component::<PlayerId>(entity).copied() else {
-                continue;
-            };
+impl System for PlayerMovementSystem {
+    type Params<'u> = (Query<'u, (&'u PlayerId, &'u mut Transform)>, DeltaTime);
+
+    fn run(&mut self, (mut query, DeltaTime(delta_time)): Self::Params<'_>) {
+        for (player, mut transform) in &mut query {
+            let player = *player;
             let input = self.input_state.get(player);
             if input.movement == glam::Vec3::ZERO && input.look == glam::DVec2::ZERO {
                 continue;
             }
 
-            let Some(transform) = universe.component::<dirk_world::components::Transform>(entity)
-            else {
-                continue;
-            };
-
-            let mut transform = transform.clone();
             if input.look != glam::DVec2::ZERO {
                 transform.rotate_by_pointer_delta(input.look, self.look_sensitivity);
             }
@@ -72,14 +59,9 @@ impl TickingSystem for PlayerMovementSystem {
                     transform.location += movement * distance;
                 }
             }
-
-            cmd.set_component(entity, transform);
         }
     }
-
-    fn query(&self) -> Query {
-        Query::empty()
-            .with_component::<PlayerId>()
-            .with_component::<dirk_world::components::Transform>()
-    }
 }
+
+#[cfg(test)]
+mod tests;
