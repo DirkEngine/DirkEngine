@@ -17,13 +17,29 @@ mod queue;
 mod sampler;
 mod shader;
 
-// Every target uses Vulkan, Apple targets through MoltenVK, until the Metal
-// backend selects `metal/mod.rs` on Apple targets.
+/// Implements `is_from` for native objects holding their device.
+macro_rules! device_children {
+    ($($object:ty),+) => {$(
+        impl $object {
+            /// Whether this object was created from `device`.
+            pub(crate) fn is_from(&self, device: &Device) -> bool {
+                std::ptr::eq(&*self.device, device)
+            }
+        }
+    )+};
+}
+
+// One native backend per target: Metal on Apple targets (macOS and iOS),
+// Vulkan elsewhere.
 #[expect(
     unsafe_code,
     reason = "The backend calls the native graphics API, and every unsafe block says why its call is sound."
 )]
-#[path = "vulkan/mod.rs"]
+#[cfg_attr(any(target_os = "macos", target_os = "ios"), path = "metal/mod.rs")]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "ios")),
+    path = "vulkan/mod.rs"
+)]
 mod native;
 
 pub use access::{BufferAccess, ImageAccess, ShaderStages};

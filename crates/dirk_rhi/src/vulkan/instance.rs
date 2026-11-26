@@ -77,13 +77,9 @@ impl Instance {
         }
         let debug_messages = extensions.contains(&debug_utils::NAME.as_ptr());
 
-        let application_name = CString::new(info.application_name).map_err(|_| {
-            Error::invalid(
-                "application name",
-                info.application_name,
-                "contains a NUL byte",
-            )
-        })?;
+        // `Rhi::new` rejected names with NUL bytes.
+        let application_name = CString::new(info.application_name)
+            .map_err(|error| Error::native("encoding the application name", error))?;
         let application = vk::ApplicationInfo::default()
             .application_name(&application_name)
             .engine_name(c"DirkEngine")

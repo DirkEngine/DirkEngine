@@ -89,6 +89,13 @@ pub struct ImageBarrier<'a> {
 /// A barrier on a resolved image range, as native recording takes it: it
 /// borrows nothing, so encoders keep the ones they record.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    any(target_os = "macos", target_os = "ios"),
+    expect(
+        dead_code,
+        reason = "Metal tracks hazards itself and records no barriers"
+    )
+)]
 pub(crate) struct Transition {
     pub(crate) image: native::ImageId,
     pub(crate) format: Format,
@@ -362,8 +369,8 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         )?;
         self.wrapped(&wrap, |raw, device| {
             raw.copy_buffer_to_image(device, &src.raw, &dst.raw, dst.info().format, regions);
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Copies regions of a color image into a buffer, through the
@@ -397,8 +404,8 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         )?;
         self.wrapped(&wrap, |raw, device| {
             raw.copy_image_to_buffer(device, &src.raw, &dst.raw, src.info().format, regions);
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Copies regions between images of the same format and sample count,
@@ -430,8 +437,8 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         let wrap = self.enter_copy(src, dst, regions)?;
         self.wrapped(&wrap, |raw, device| {
             raw.copy_image(device, &src.raw, &dst.raw, dst.info().format, regions);
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Records a raw barrier, bypassing the render graph. Both halves of a
@@ -630,17 +637,18 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
     }
 
     /// Records `wrap`'s barriers into the image accesses, then `record`,
-    /// then its barriers back to rest.
+    /// then its barriers back to rest, even if `record` fails.
     fn wrapped(
         &mut self,
         wrap: &Wrap,
-        record: impl FnOnce(&mut native::CommandBuffer, &native::Device),
-    ) {
+        record: impl FnOnce(&mut native::CommandBuffer, &native::Device) -> Result<()>,
+    ) -> Result<()> {
         self.end_pass();
         self.transition(&wrap.before);
-        let frame = self.frame;
-        record(&mut self.raw, &frame.rhi().device);
+        let device = self.device();
+        let recorded = record(&mut self.raw, device);
         self.transition(&wrap.after);
+        recorded
     }
 
     /// Records `transitions` as one barrier, if there are any.
@@ -650,8 +658,9 @@ impl<'f, Q: QueueKind> CommandEncoder<'f, Q> {
         }
     }
 
-    /// The device commands are recorded for.
-    pub(crate) fn device(&self) -> &native::Device {
+    /// The device commands are recorded for. Borrows the frame, not the
+    /// encoder, so recording can borrow the native commands mutably.
+    pub(crate) fn device(&self) -> &'f native::Device {
         &self.frame.rhi().device
     }
 
@@ -881,8 +890,9 @@ impl CommandEncoder<'_, Graphics> {
     /// Returns [`Error::Invalid`] if an image is from another device, lacks
     /// the copy usage or is multisampled, the format cannot be blitted or
     /// filtered with `filter`, a region is out of bounds or overlaps
-    /// another, or an image is not where the blit can reach it; see
-    /// [`CommandEncoder`].
+    /// another, or an image is not where the blit can reach it (see
+    /// [`CommandEncoder`]), or a native error if Metal cannot create what it
+    /// draws blits with.
     pub fn blit_image(
         &mut self,
         src: &Image,
@@ -911,9 +921,8 @@ impl CommandEncoder<'_, Graphics> {
         }
         let wrap = self.enter_copy(src, dst, regions)?;
         self.wrapped(&wrap, |raw, device| {
-            raw.blit_image(device, &src.raw, &dst.raw, info.format, regions, filter);
-        });
-        Ok(())
+            raw.blit_image(device, &src.raw, &dst.raw, info.format, regions, filter)
+        })
     }
 }
 

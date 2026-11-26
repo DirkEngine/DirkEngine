@@ -76,6 +76,15 @@ egui = "0.36"
 egui_dock = "0.21"
 egui-ash-renderer = "0.13"
 
+# Metal, on Apple targets
+block2 = "0.6"
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+raw-window-metal = "1.1"
+
 # Shaders
 cargo-gpu-install = "0.10.0"
 spirv-std         = { version = "0.10.0", default-features = false, features = ["glam_0_33"] }

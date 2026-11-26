@@ -161,8 +161,8 @@ impl Image {
     }
 
     /// The heap slots of the image's view: sampled and storage.
-    pub(crate) fn slots(&self) -> [Option<u32>; 2] {
-        self.slots.map(|slot| slot.map(|slot| slot.index))
+    pub(crate) fn slots(&self) -> [Option<Slot>; 2] {
+        self.slots
     }
 }
 

@@ -40,16 +40,4 @@ impl<T> Check<T> for ash::prelude::VkResult<T> {
     }
 }
 
-/// Implements `is_from` for native objects holding their device.
-macro_rules! device_children {
-    ($($object:ty),+) => {$(
-        impl $object {
-            /// Whether this object was created from `device`.
-            pub(crate) fn is_from(&self, device: &Device) -> bool {
-                std::ptr::eq(&*self.device, device)
-            }
-        }
-    )+};
-}
-
 device_children!(Buffer, Image, ShaderModule, GraphicsPipeline, Swapchain);

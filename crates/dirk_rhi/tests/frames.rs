@@ -11,9 +11,9 @@ use std::{sync::Barrier, thread, time::Duration};
 use dirk_rhi::{
     Buffer, BufferAccess, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, BufferUsage,
     CommandEncoder, CopyQueue, Error, Extent3d, FRAMES_IN_FLIGHT, Filter, Format, Graphics, Image,
-    ImageAccess, ImageBarrier, ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageUsage,
-    Memory, PerFrame, QueueTransfer, QueueType, Result, Rhi, RhiCreateInfo, SampleCount,
-    ShaderStages,
+    ImageAccess, ImageBarrier, ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageRegion,
+    ImageUsage, Memory, Origin3d, PerFrame, QueueTransfer, QueueType, Result, Rhi, RhiCreateInfo,
+    SampleCount, ShaderStages,
 };
 use support::with_rhi;
 
@@ -425,6 +425,148 @@ fn images_dropped_while_a_frame_begins_outlive_its_work() -> Result<()> {
             // validation reports if that work uses those images.
             rhi.begin_frame()?.finish();
         }
+        Ok(())
+    })
+}
+
+#[test]
+fn blits_scale_regions_with_filtering() -> Result<()> {
+    with_rhi(|rhi| {
+        // A 4x4 image of four quadrants: red, green, blue and white.
+        let quadrant = |x, y| match (x < 2, y < 2) {
+            (true, true) => [255, 0, 0, 255],
+            (false, true) => [0, 255, 0, 255],
+            (true, false) => [0, 0, 255, 255],
+            (false, false) => [255; 4],
+        };
+        let texels: Vec<[u8; 4]> = (0..16)
+            .map(|index| quadrant(index % 4, index / 4))
+            .collect();
+        let mut staging = buffer(rhi, 64, BufferUsage::COPY_SRC, Memory::Upload)?;
+        // SAFETY: the buffer was never submitted.
+        unsafe { staging.write(0, texels.as_flattened())? };
+        let texture = image(rhi, Extent3d::new_2d(4, 4), 3)?;
+        let readback = buffer(rhi, 20, BufferUsage::COPY_DST, Memory::Readback)?;
+        let info = *texture.info();
+        let mip = |level| ImageCopy {
+            src: info.mip_region(level - 1),
+            dst: info.mip_region(level),
+        };
+        let packed = |offset, level| {
+            BufferImageCopy::packed(Format::Rgba8Unorm, offset, info.mip_region(level))
+        };
+
+        let frame = rhi.begin_frame()?;
+        let mut encoder = frame.encoder::<Graphics>("blits")?;
+        // Each copy and blit moves the mips it touches from rest and back.
+        encoder.copy_buffer_to_image(&staging, &texture, &[packed(0, 0)])?;
+        encoder.blit_image(&texture, &texture, &[mip(1)], Filter::Linear)?;
+        encoder.blit_image(&texture, &texture, &[mip(2)], Filter::Linear)?;
+        encoder.copy_image_to_buffer(&texture, &readback, &[packed(0, 1), packed(16, 2)])?;
+        // SAFETY: orders the copies before host reads.
+        unsafe {
+            encoder.barrier(
+                &[BufferBarrier {
+                    buffer: &readback,
+                    before: BufferAccess::CopyDestination,
+                    after: BufferAccess::HostRead,
+                    transfer: None,
+                }],
+                &[],
+            )?;
+        }
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, TIMEOUT)?;
+
+        // Each texel of mip 1 filters one quadrant, and mip 2 all of them.
+        let pixels = read(&readback, 0, 20)?;
+        let expected: Vec<u8> = (0..4)
+            .flat_map(|index| quadrant(index % 2 * 2, index / 2 * 2))
+            .collect();
+        assert_eq!(pixels[..16], expected);
+        let average = &pixels[16..];
+        assert!(
+            average[..3]
+                .iter()
+                .all(|channel| channel.abs_diff(128) <= 1)
+                && average[3] == 255,
+            "{average:?} is not the average of the quadrants"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn blits_copy_between_2d_images_and_3d_slices() -> Result<()> {
+    with_rhi(|rhi| {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        let flat = image(rhi, Extent3d::new_2d(2, 2), 1)?;
+        let copied = image(rhi, Extent3d::new_2d(2, 2), 1)?;
+        let deep = rhi.create_image(&ImageDesc {
+            label: "3D",
+            dimension: ImageDimension::D3,
+            extent: Extent3d {
+                width: 2,
+                height: 2,
+                depth: 2,
+            },
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::COPY_SRC | ImageUsage::COPY_DST,
+            mip_levels: 1,
+            array_layers: 1,
+            samples: SampleCount::X1,
+            rest: None,
+        })?;
+        let readback = buffer(rhi, 32, BufferUsage::COPY_DST, Memory::Readback)?;
+        let frame = rhi.begin_frame()?;
+        let texels = frame.alloc(&[RED; 4])?;
+        let mut encoder = frame.encoder::<Graphics>("blits")?;
+        let flat_region = flat.info().mip_region(0);
+        let second_slice = ImageRegion {
+            origin: Origin3d { x: 0, y: 0, z: 1 },
+            extent: Extent3d::new_2d(2, 2),
+            ..deep.info().mip_region(0)
+        };
+        let packed = |offset, region| BufferImageCopy::packed(Format::Rgba8Unorm, offset, region);
+        encoder.copy_buffer_to_image(
+            texels.buffer(),
+            &flat,
+            &[packed(texels.offset(), flat_region)],
+        )?;
+        // The 2D image fills the second slice of the 3D one, which fills
+        // another 2D image.
+        let blit = |src, dst| ImageCopy { src, dst };
+        encoder.blit_image(
+            &flat,
+            &deep,
+            &[blit(flat_region, second_slice)],
+            Filter::Nearest,
+        )?;
+        encoder.blit_image(
+            &deep,
+            &copied,
+            &[blit(second_slice, flat_region)],
+            Filter::Nearest,
+        )?;
+        encoder.copy_image_to_buffer(&deep, &readback, &[packed(0, second_slice)])?;
+        encoder.copy_image_to_buffer(&copied, &readback, &[packed(16, flat_region)])?;
+        // SAFETY: orders the copies before host reads.
+        unsafe {
+            encoder.barrier(
+                &[BufferBarrier {
+                    buffer: &readback,
+                    before: BufferAccess::CopyDestination,
+                    after: BufferAccess::HostRead,
+                    transfer: None,
+                }],
+                &[],
+            )?;
+        }
+        let done = frame.submit(encoder)?;
+        frame.finish();
+        rhi.wait(done, TIMEOUT)?;
+        assert_eq!(read(&readback, 0, 32)?, RED.repeat(8));
         Ok(())
     })
 }
