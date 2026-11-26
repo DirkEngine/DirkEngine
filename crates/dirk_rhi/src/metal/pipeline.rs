@@ -9,7 +9,7 @@ use objc2_metal::{
     MTLRenderPipelineState, MTLWinding,
 };
 
-use super::{Check, Device, Object, device::Garbage, heap::Usage};
+use super::{Check, Device, Object, heap::Usage};
 use crate::{
     BlendFactor, BlendOp, ColorWrites, CompareOp, CullMode, DepthBias, Error, FrontFace,
     GraphicsPipelineDesc, PushData, Result, ShaderModule as Module, Topology,
@@ -21,7 +21,7 @@ pub(crate) type PipelineId = *const ProtocolObject<dyn MTLRenderPipelineState>;
 /// The entry point of a Metal library compiled from the shader build's MSL.
 pub(crate) struct ShaderModule {
     pub(super) device: Arc<Device>,
-    function: Object<dyn MTLFunction>,
+    pub(super) function: Object<dyn MTLFunction>,
 }
 
 impl ShaderModule {
@@ -147,7 +147,7 @@ impl GraphicsPipeline {
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
         self.device
-            .bury(Garbage::object((self.raw.clone(), self.depth.take())));
+            .bury_object((self.raw.clone(), self.depth.take()));
     }
 }
 

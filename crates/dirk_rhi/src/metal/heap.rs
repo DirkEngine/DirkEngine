@@ -8,7 +8,7 @@
 //! resident with `useHeap`. Metal makes heaps resident for reads only, and
 //! texture views apart from their heap, so encoders also declare what that
 //! does not cover with `useResources`: the subviews of images, read by any
-//! draw, and storage buffers and images, written only by
+//! draw or dispatch, and storage buffers and images, written only by
 //! pipelines whose shaders write storage.
 
 use std::{
@@ -61,7 +61,7 @@ pub(super) enum Descriptor<'a> {
 /// pipelines need.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Usage {
-    /// Subviews, which every draw declares, since any shader
+    /// Subviews, which every draw and dispatch declares, since any shader
     /// may sample them.
     Read,
     /// Storage buffers and images, which only pipelines writing storage

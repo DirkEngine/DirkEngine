@@ -1,5 +1,5 @@
 //! Device memory: every buffer and texture is allocated from an untracked
-//! `MTLHeap`, so render encoders make every resource shaders
+//! `MTLHeap`, so render and compute encoders make every resource shaders
 //! may reach through the bindless heap resident with one `useHeap` per heap,
 //! and Metal tracks no hazards between them: command buffers order their
 //! encoders with fences instead (see `command`).

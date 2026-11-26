@@ -38,16 +38,6 @@ impl Buried for Garbage {
     }
 }
 
-impl Garbage {
-    /// `object`, which holds no heap slot.
-    pub(super) fn object(object: impl Send + 'static) -> Self {
-        Self {
-            slots: [None; 2],
-            object: Box::new(object),
-        }
-    }
-}
-
 /// Failures of submitted work, reported by command buffers when they
 /// complete. Shared with their completion handlers.
 #[derive(Default)]
@@ -161,6 +151,7 @@ impl Device {
     /// see `FormatCapabilities`.
     fn capabilities(raw: &Object<dyn MTLDevice>, name: String, timestamps: bool) -> Capabilities {
         let max_buffer_size = raw.maxBufferLength() as u64;
+        let threads = raw.maxThreadsPerThreadgroup();
         Capabilities {
             name,
             limits: Limits {
@@ -182,6 +173,13 @@ impl Device {
                 max_storage_buffer_size: max_buffer_size.min(u64::from(u32::MAX)),
                 // Each indirect draw is its own Metal draw.
                 max_draw_indirect_count: u32::MAX,
+                max_compute_workgroup_size: [threads.width, threads.height, threads.depth]
+                    .map(|size| u32::try_from(size).unwrap_or(u32::MAX)),
+                // Every Metal 3 GPU runs 1024 threads per threadgroup; a
+                // pipeline may allow fewer, which its creation checks.
+                max_compute_workgroup_invocations: 1024,
+                // Vulkan's minimum, which Metal grids exceed.
+                max_compute_workgroups: [65535; 3],
             },
             features: Features::all().difference(if timestamps {
                 Features::empty()
@@ -221,6 +219,15 @@ impl Device {
     /// Keeps `garbage` until the work of the current frame completes.
     pub(super) fn bury(&self, garbage: Garbage) {
         self.graveyard.bury(garbage);
+    }
+
+    /// Keeps `object`, which holds no heap slot, until the work of the
+    /// current frame completes.
+    pub(super) fn bury_object(&self, object: impl Send + 'static) {
+        self.bury(Garbage {
+            slots: [None; 2],
+            object: Box::new(object),
+        });
     }
 
     /// The last frame whose work read each heap slot.

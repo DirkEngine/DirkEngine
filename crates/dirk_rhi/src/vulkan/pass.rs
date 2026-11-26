@@ -77,7 +77,7 @@ impl CommandBuffer {
             info = info.stencil_attachment(stencil);
         }
         device.begin_label(self.raw, desc.label);
-        device.bind_heap(self.raw);
+        device.bind_heap(self.raw, vk::PipelineBindPoint::GRAPHICS);
         // SAFETY: see the recording note above.
         unsafe { device.raw.cmd_begin_rendering(self.raw, &info) };
         #[expect(
