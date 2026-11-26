@@ -168,7 +168,38 @@ frame.finish();                               // closes the frame (also on Drop)
   - Buffers have no layouts and no resting access: ordering GPU accesses to them stays
     the caller's job, through barriers or the render graph. Host data the GPU reads each
     frame comes from frame memory, which needs no ordering.
-- Dynamic state defaults: viewport and scissor default to the render area.
+- Dynamic state defaults: viewport and scissor default to the render area. `set_viewport`
+  rejects viewports past the device's viewport limits, cached in `Limits`.
+- Render passes use dynamic rendering. Attachments are whole single-mip, single-layer 2D
+  images (`&Image`, using the view it owns) of one extent; color attachments may resolve
+  into a single-sample image. Like other safe commands, a pass moves its attachments from
+  rest into their attachment access when it begins and back when it ends (or, if leaked,
+  before the encoder's next command). `pass.draw(&pipeline, &push, vertices, instances)` and
+  `pass.draw_indexed(&pipeline, &push, Indices { buffer, format, offset, range, .. }, instances)`
+  check only that the pipeline's targets equal the pass's (one small `==`) and that the
+  indices fit their buffer; rebinding an unchanged pipeline or index buffer is skipped.
+- Clip space is Vulkan's: y points down and depth runs from 0 to 1. Backends with
+  another convention flip y when translating shaders.
+
+## Shaders and pipelines
+
+- Shaders are Rust, compiled by rust-gpu. `dirk_build::shaders::build_shaders` compiles a
+  shader crate from a build script into one SPIR-V module per entry point and generates a
+  type per entry point implementing the `unsafe` trait `dirk_rhi::Shader` (SPIR-V, stage,
+  reflected push data size, push data type). Implementing it is the only `unsafe` step; creating modules
+  from it is safe. `dirk_rhi`'s tests build their shaders the same way
+  (`crates/dirk_rhi/test-shaders`).
+- `rhi.create_shader::<S>() -> ShaderModule<S::Push>`, where `S::Push` is the push data
+  type the entry point's source reads, asserts in a `const` block that `S` reads no push
+  data or exactly `size_of::<S::Push>()` bytes, and that `S::Push` is at most 128 bytes
+  and a multiple of four. Mismatches fail `cargo build` (not `cargo check`, as with every
+  post-monomorphization error).
+- `GraphicsPipeline<P>` is created from `ShaderModule<P>`s, so its push data type is the
+  shaders'. Descriptions are validated fully at creation: stages, target formats and
+  sample counts against format capabilities, blending against `BLEND` support and
+  independent blend, the color target limit, depth bias clamp. Pipelines have topology,
+  culling, front face, depth test and bias, per-target blending and write masks; stencil
+  tests come when something needs them.
 - Typestate presentation: `AcquiredFrame` -> submitted -> presented. Presenting before
   submit, or submitting twice, does not compile. No atomics tracking frame phase.
 
@@ -190,8 +221,12 @@ frame.finish();                               // closes the frame (also on Drop)
   `SamplerIndex`, `BufferIndex<T>`) and each pipeline's push-data struct (`#[repr(C)]`,
   `NoUninit`). Shaders and host share these exact Rust types.
   `GraphicsPipeline<P: PushData>`; `pass.draw(&pipeline, &P, ...)` only accepts `P`.
-  The shader build reflects each entry point's push block size and emits constants so a
-  `const` assertion fails the build if `size_of::<P>()` disagrees.
+  The shader build names each entry point's push data type, the one its
+  `#[spirv(push_constant)]` parameter refers to (`()` without one), as `Shader::Push`;
+  `rhi.create_shader::<S>()` returns a `ShaderModule<S::Push>`, so pipelines pair only
+  shaders of one push type (a shader reading none joins others with `with_push`). The
+  build also reflects each push block's size, and a `const` assertion fails the build if
+  it disagrees with the type's.
 - Stale indices are memory-safe (they read a valid default or a live resource); in debug
   builds a generation check may report them.
 

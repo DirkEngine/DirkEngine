@@ -11,7 +11,12 @@ authors.workspace = true
 documentation.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 cargo_metadata.workspace = true
+cargo-gpu-install.workspace = true
+quote.workspace = true
+rspirv.workspace = true
+syn.workspace = true
 
 [lints]
 workspace = true
