@@ -82,8 +82,9 @@ lists in `unsafe-modules`, each of which expects `unsafe_code` with a reason;
   buffers.
 - `dirk_shaders`, for the shaders' unchecked heap accesses and the `unsafe`
   `HeapIndices` trait.
-- `dirk_render_utils`, for the raw RHI barriers uploads hand resources over
-  with, and its native tests' raw barriers and host accesses.
+- `dirk_render_utils`, for the raw RHI barriers the render graph derives and
+  uploads hand resources over with, and its native tests' raw barriers and
+  host accesses.
 - `dirk_rhi`'s test shaders (`dirk_rhi_test_shaders`), for the `unsafe`
   `Shader` implementations the shader build generates.
 
