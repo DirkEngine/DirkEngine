@@ -188,12 +188,10 @@ impl Device {
         .check("vkGetSemaphoreCounterValue")
     }
 
-    /// The value each queue's last submission signals.
-    pub(crate) fn submitted(&self) -> [u64; QueueType::COUNT] {
-        QueueType::ALL.map(|queue| {
-            self.queues[queue as usize]
-                .submitted
-                .load(Ordering::Acquire)
-        })
+    /// The value `queue`'s last submission signals.
+    pub(crate) fn submitted_on(&self, queue: QueueType) -> u64 {
+        self.queues[queue as usize]
+            .submitted
+            .load(Ordering::Acquire)
     }
 }
