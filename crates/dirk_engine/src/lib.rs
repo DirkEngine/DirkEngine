@@ -84,7 +84,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::{Receiver, Sender},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dirk_events::EventManager;
@@ -107,6 +107,11 @@ use errors::{Error, Result};
 pub use subsystem::{EnginePlugin, EngineResource, Subsystem};
 
 mod tests;
+
+/// How long each frame sleeps before the universe and the subsystems tick.
+/// Without it, the renderer outpaces its semaphores; remove it once rendering
+/// takes longer.
+const FRAME_THROTTLE: Duration = Duration::from_millis(10);
 
 /// Immutable metadata describing this engine instance.
 ///
@@ -329,7 +334,7 @@ impl Engine {
 
         // TODO: renders too fast and semaphores have problem.
         // remove when rendering takes longer
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(FRAME_THROTTLE);
 
         self.universe.tick(delta_time);
 
