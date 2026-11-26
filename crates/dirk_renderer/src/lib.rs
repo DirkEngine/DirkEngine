@@ -131,6 +131,10 @@ impl dirk_engine::EnginePlugin for RendererPlugin {
 mod debug;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+#[expect(
+    unsafe_code,
+    reason = "Vulkan's extension names become `&str`s unchecked, in a const."
+)]
 const DEVICE_EXTENSIONS: &[&str] = &[
     // SAFETY: Vulkan extension names are ASCII.
     unsafe { std::str::from_utf8_unchecked(swapchain::NAME.to_bytes()) },
@@ -274,6 +278,10 @@ impl Renderer {
     /// # Errors
     ///
     /// Plenty of Vulkan & platform errors can occur during renderer intializing
+    #[expect(
+        unsafe_code,
+        reason = "Loading Vulkan and creating the instance call ash."
+    )]
     pub fn init(
         create_info: &RendererCreateInfo,
         window: &dirk_platform::Window,
@@ -1025,6 +1033,7 @@ impl Renderer {
             }
         }
     }
+    #[expect(unsafe_code, reason = "Creating a sampler calls Vulkan through ash.")]
     fn create_sampler(device: &RenderDevice, mip_levels: u32) -> Result<vk::Sampler> {
         // SAFETY: `physical_device` was enumerated from this instance.
         let props = unsafe {
@@ -1074,6 +1083,10 @@ impl Renderer {
         Ok(extensions)
     }
 
+    #[expect(
+        unsafe_code,
+        reason = "Listing the instance's extensions calls Vulkan through ash."
+    )]
     fn validate_instance_extensions(entry: &Entry, extensions: &[*const i8]) -> Result<()> {
         // SAFETY: `entry` holds the loaded Vulkan library.
         let available = unsafe {
@@ -1104,6 +1117,10 @@ impl Renderer {
 }
 
 impl Drop for Renderer {
+    #[expect(
+        unsafe_code,
+        reason = "Waiting for the device to idle calls Vulkan through ash."
+    )]
     fn drop(&mut self) {
         // SAFETY: the device is live, and the renderer thread, the only one
         // touching its queues, is the one running this.

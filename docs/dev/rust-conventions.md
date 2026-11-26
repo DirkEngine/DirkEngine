@@ -69,12 +69,14 @@ doesn't trigger the lint.
 
 ## Unsafe code
 
-Only `dirk_renderer` may use `unsafe`, to call Vulkan through ash; every other
-crate forbids it. Keep it in the modules that wrap a Vulkan object, and give
-every `unsafe` block a `// SAFETY:` comment stating why it is sound: which
-handles are valid and owned, which lock provides the external synchronization
-Vulkan requires, and how long the memory a call reads lives. An `unsafe fn`
-documents its contract in a `# Safety` section.
+Only `dirk_renderer` may use `unsafe`, to call Vulkan through ash, and only in
+the modules `standard.toml` lists in `unsafe-modules`, each of which expects
+`unsafe_code` with a reason; `just lint` denies it everywhere else. Keep it in
+the modules that wrap a Vulkan object, and give every `unsafe` block a
+`// SAFETY:` comment stating why it is sound: which handles are valid and
+owned, which lock provides the external synchronization Vulkan requires, and
+how long the memory a call reads lives. An `unsafe fn` documents its contract
+in a `# Safety` section.
 
 ## Types
 
@@ -118,7 +120,6 @@ from its signature. Each crate's README is its crate documentation
 
 ## Deviations
 
-- `dirk_renderer` redeclares the workspace lints to allow `unsafe_code`.
 - Asset loaders return `anyhow::Error`, which `dirk_assets` wraps in
   `Error::AssetLoadError`, so a loader's own errors aren't typed yet.
 - `dirk_engine`, `dirk_shaders`, the shaders (`dirk_shaders_gpu`),

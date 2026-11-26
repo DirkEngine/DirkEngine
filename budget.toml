@@ -1,0 +1,19 @@
+# Each crate's number of `#[expect]` lints and of `// wall-clock:` lines;
+# every new one raises it, which the owner reviews. `just standard` fails
+# until a count equals its budget.
+[expect]
+dirk_assets = 3
+dirk_build = 1
+dirk_engine = 3
+dirk_events = 4
+dirk_input = 3
+dirk_platform = 4
+dirk_player = 1
+dirk_proc = 1
+dirk_renderer = 54
+dirk_shaders_gpu = 1
+dirk_threads = 1
+dirk_universe = 5
+
+[wall-clock]
+dirk_threads = 2

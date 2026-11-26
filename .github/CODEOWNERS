@@ -1,0 +1,6 @@
+# The files that loosen a rule of the engineering standard; see standard.toml.
+/standard.toml       @PiquelChips
+/budget.toml         @PiquelChips
+/clippy.toml         @PiquelChips
+/deny.toml           @PiquelChips
+/.cargo/config.toml  @PiquelChips
